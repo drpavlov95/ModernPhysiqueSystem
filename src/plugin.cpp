@@ -6,11 +6,17 @@
 #include <thread>
 #include <cmath>
 #include <atomic>
+#include <string_view>
+#include <algorithm>
 
 float g_lastThin = 0.0f;
 float g_lastMuscular = 0.0f;
 float g_lastFat = 0.0f;
 bool g_hasSavedState = false;
+float g_lastDirectionThin = 0.0f;
+float g_lastDirectionMuscular = 1.0f;
+float g_lastDirectionFat = 0.0f;
+bool g_hasSavedDirection = false;
 
 PRISMA_UI_API::IVPrismaUI1* g_prisma = nullptr;
 PrismaView g_view = 0;
@@ -23,11 +29,21 @@ constexpr const char* kMorphThinName = "RleyThin";
 constexpr const char* kMorphMuscularName = "RleyMuscular";
 constexpr const char* kMorphFatName = "RleyFat";
 constexpr const char* kMorphKey = "RleyBodyMorphs";
+constexpr const char* kRaceMenuName = "RaceSex Menu";
+constexpr const char* kPhysiqueCategoryKey = "rley_physique";
+constexpr const char* kScaleformPluginName = "ModernPhysiqueSystem";
+constexpr const char* kScaleformSetCategoryFunction = "SetActiveCategory";
+constexpr const char* kScaleformSetWeightFunction = "SetWeightSync";
+constexpr const char* kScaleformGetWeightFunction = "GetWeightSync";
+constexpr std::uint32_t kBodyCategoryFlag = 4;
 
 constexpr float kMorphApplyDeltaThreshold = 0.001f;
 constexpr float kMorphClearThreshold = 0.0005f;
+constexpr float kWeightSyncThreshold = 0.0005f;
 
 std::atomic<bool> g_shouldPhysiqueBeVisible = false;
+std::atomic<bool> g_raceMenuOpen = false;
+std::atomic<float> g_weightSyncValue = 0.0f;
 
 void OnMorphsPreview(const char* argument);
 void OnMorphsCommit(const char* argument);
@@ -43,6 +59,110 @@ bool GetPhysiqueDesiredVisible();
 bool TryAcquireRaceMenuBodyMorphInterface();
 bool ApplyMorphsNative(float thin, float muscular, float fat);
 bool RefreshCachedMorphStateFromNative();
+void ResetRaceMenuBridgeState();
+bool RegisterScaleform(RE::GFxMovieView* a_view, RE::GFxValue* a_root);
+void SetWeightSyncValue(float value);
+float GetWeightSyncValue();
+bool ApplyWeightToCurrentDirection(float weight);
+
+void SetPhysiqueVisibilityForCategory(std::string_view categoryKey, std::uint32_t categoryFlag = 0)
+{
+    const bool isBodyCategory = categoryFlag == kBodyCategoryFlag;
+    SetPhysiqueDesiredVisible(isBodyCategory);
+}
+
+class SetActiveCategoryHandler : public RE::GFxFunctionHandler
+{
+public:
+    void Call(Params& a_params) override
+    {
+        if (a_params.argCount < 1) {
+            spdlog::warn("SetActiveCategory called without category arguments");
+            SetPhysiqueDesiredVisible(false);
+            return;
+        }
+
+        std::uint32_t categoryFlag = 0;
+        std::string_view categoryKey{};
+
+        if (a_params.args[0].IsNumber()) {
+            categoryFlag = static_cast<std::uint32_t>(a_params.args[0].GetUInt());
+        } else if (a_params.args[0].IsString()) {
+            const char* category = a_params.args[0].GetString();
+            categoryKey = category ? category : "";
+        }
+
+        if (a_params.argCount >= 2 && a_params.args[1].IsString()) {
+            const char* category = a_params.args[1].GetString();
+            if (category) {
+                categoryKey = category;
+            }
+        }
+
+        spdlog::info(
+            "RaceMenu active category flag={} key={}",
+            categoryFlag,
+            categoryKey.empty() ? "<none>" : categoryKey);
+        SetPhysiqueVisibilityForCategory(categoryKey, categoryFlag);
+    }
+};
+
+class SetWeightSyncHandler : public RE::GFxFunctionHandler
+{
+public:
+    void Call(Params& a_params) override
+    {
+        if (a_params.argCount < 1 || !a_params.args[0].IsNumber()) {
+            spdlog::warn("SetWeightSync called without a numeric weight");
+            return;
+        }
+
+        const float weight = static_cast<float>(a_params.args[0].GetNumber());
+        ApplyWeightToCurrentDirection(weight);
+    }
+};
+
+class GetWeightSyncHandler : public RE::GFxFunctionHandler
+{
+public:
+    void Call(Params& a_params) override
+    {
+        if (a_params.retVal) {
+            a_params.retVal->SetNumber(GetWeightSyncValue());
+        }
+    }
+};
+
+class RaceMenuWatcher : public RE::BSTEventSink<RE::MenuOpenCloseEvent>
+{
+public:
+    RE::BSEventNotifyControl ProcessEvent(
+        const RE::MenuOpenCloseEvent* a_event,
+        RE::BSTEventSource<RE::MenuOpenCloseEvent>*)
+        override
+    {
+        if (!a_event) {
+            return RE::BSEventNotifyControl::kContinue;
+        }
+
+        if (a_event->menuName != kRaceMenuName) {
+            return RE::BSEventNotifyControl::kContinue;
+        }
+
+        g_raceMenuOpen.store(a_event->opening);
+        if (a_event->opening) {
+            SetPhysiqueDesiredVisible(false);
+        } else {
+            ResetRaceMenuBridgeState();
+            SetPhysiqueDesiredVisible(false);
+            CloseMenu();
+        }
+
+        return RE::BSEventNotifyControl::kContinue;
+    }
+};
+
+RaceMenuWatcher g_raceMenuWatcher;
 
 bool NearlyEqual(float a, float b, float epsilon = kMorphApplyDeltaThreshold)
 {
@@ -64,6 +184,16 @@ void CacheMorphState(float thin, float muscular, float fat)
     g_lastMuscular = muscular;
     g_lastFat = fat;
     g_hasSavedState = true;
+
+    const float total = std::clamp(thin + muscular + fat, 0.0f, 1.0f);
+    g_weightSyncValue.store(total);
+
+    if (total > kWeightSyncThreshold) {
+        g_lastDirectionThin = thin / total;
+        g_lastDirectionMuscular = muscular / total;
+        g_lastDirectionFat = fat / total;
+        g_hasSavedDirection = true;
+    }
 }
 
 bool IsSameAsCached(float thin, float muscular, float fat)
@@ -198,6 +328,57 @@ bool ApplyMorphsNative(float thin, float muscular, float fat)
     return true;
 }
 
+void SetWeightSyncValue(float value)
+{
+    g_weightSyncValue.store(std::clamp(value, 0.0f, 1.0f));
+}
+
+float GetWeightSyncValue()
+{
+    return g_weightSyncValue.load();
+}
+
+bool ApplyWeightToCurrentDirection(float weight)
+{
+    const float clampedWeight = std::clamp(weight, 0.0f, 1.0f);
+
+    float dirThin = 0.0f;
+    float dirMuscular = 1.0f;
+    float dirFat = 0.0f;
+
+    const float currentTotal = g_lastThin + g_lastMuscular + g_lastFat;
+    if (currentTotal > kWeightSyncThreshold) {
+        dirThin = g_lastThin / currentTotal;
+        dirMuscular = g_lastMuscular / currentTotal;
+        dirFat = g_lastFat / currentTotal;
+    } else if (g_hasSavedDirection) {
+        dirThin = g_lastDirectionThin;
+        dirMuscular = g_lastDirectionMuscular;
+        dirFat = g_lastDirectionFat;
+    }
+
+    const float thin = dirThin * clampedWeight;
+    const float muscular = dirMuscular * clampedWeight;
+    const float fat = dirFat * clampedWeight;
+
+    const bool unchanged = IsSameAsCached(thin, muscular, fat);
+    CacheMorphState(thin, muscular, fat);
+
+    if (!unchanged) {
+        if (!ApplyMorphsNative(thin, muscular, fat)) {
+            return false;
+        }
+    }
+
+    if (g_prisma && g_view && g_prisma->IsValid(g_view) && g_menuOpen) {
+        char buffer[64];
+        sprintf_s(buffer, "%f,%f,%f", thin, muscular, fat);
+        g_prisma->InteropCall(g_view, "restoreMorphs", buffer);
+    }
+
+    return true;
+}
+
 void OpenMenu()
 {
     if (!g_prisma) {
@@ -260,11 +441,59 @@ void ToggleMenu()
 void SetPhysiqueDesiredVisible(bool visible)
 {
     g_shouldPhysiqueBeVisible.store(visible);
+
+    if (visible) {
+        OpenMenu();
+    } else {
+        CloseMenu();
+    }
 }
 
 bool GetPhysiqueDesiredVisible()
 {
     return g_shouldPhysiqueBeVisible.load();
+}
+
+bool RegisterScaleform(RE::GFxMovieView* a_view, RE::GFxValue* a_root)
+{
+    if (!a_view || !a_root) {
+        spdlog::error("RegisterScaleform received invalid Scaleform objects");
+        return false;
+    }
+
+    RE::GFxValue categoryCallback;
+    a_view->CreateFunction(std::addressof(categoryCallback), new SetActiveCategoryHandler());
+    if (!a_root->SetMember(kScaleformSetCategoryFunction, categoryCallback)) {
+        spdlog::error("Failed to register Scaleform function {}", kScaleformSetCategoryFunction);
+        return false;
+    }
+
+    RE::GFxValue setWeightCallback;
+    a_view->CreateFunction(std::addressof(setWeightCallback), new SetWeightSyncHandler());
+    if (!a_root->SetMember(kScaleformSetWeightFunction, setWeightCallback)) {
+        spdlog::error("Failed to register Scaleform function {}", kScaleformSetWeightFunction);
+        return false;
+    }
+
+    RE::GFxValue getWeightCallback;
+    a_view->CreateFunction(std::addressof(getWeightCallback), new GetWeightSyncHandler());
+    if (!a_root->SetMember(kScaleformGetWeightFunction, getWeightCallback)) {
+        spdlog::error("Failed to register Scaleform function {}", kScaleformGetWeightFunction);
+        return false;
+    }
+
+    spdlog::info(
+        "Registered Scaleform bridge {}.{} / {} / {}",
+        kScaleformPluginName,
+        kScaleformSetCategoryFunction,
+        kScaleformSetWeightFunction,
+        kScaleformGetWeightFunction);
+    return true;
+}
+
+void ResetRaceMenuBridgeState()
+{
+    g_raceMenuOpen.store(false);
 }
 
 void OnMorphsPreview(const char* argument)
@@ -373,9 +602,22 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
     else {
         spdlog::error("Failed to get mod callback event source");
     }
+
+    auto* ui = RE::UI::GetSingleton();
+    if (ui) {
+        ui->AddEventSink<RE::MenuOpenCloseEvent>(&g_raceMenuWatcher);
+    } else {
+        spdlog::error("Failed to get UI singleton");
+    }
     
     auto messaging = SKSE::GetMessagingInterface();
     if (!messaging->RegisterListener("SKSE", MessageHandler)) {
+        return false;
+    }
+
+    auto scaleform = SKSE::GetScaleformInterface();
+    if (!scaleform || !scaleform->Register(RegisterScaleform, kScaleformPluginName)) {
+        spdlog::error("Failed to register Scaleform plugin {}", kScaleformPluginName);
         return false;
     }
 

@@ -5,10 +5,11 @@ const thinValueEl = document.getElementById("thinValue");
 const muscularValueEl = document.getElementById("muscularValue");
 const fatValueEl = document.getElementById("fatValue");
 const resetButton = document.getElementById("reset");
+const snapToggleEl = document.getElementById("snapToggle");
 
 const center = { x: canvas.width / 2, y: canvas.height / 2 };
-const radius = 120;
-const anchorRadius = 5.5;
+const radius = 138;
+const anchorRadius = 6;
 
 let dragging = false;
 let knob = { x: center.x, y: center.y };
@@ -24,6 +25,7 @@ const MORPH_DELTA_THRESHOLD = 0.001;
 let pendingMorphValues = { thin: 0, muscular: 0, fat: 0 };
 let lastPreviewSentValues = null;
 let lastCommitSentValues = null;
+let snapEnabled = true;
 
 let snapLineState = {
     activeName: null,
@@ -742,10 +744,20 @@ function setKnobFromPoint(x, y) {
     let targetX = center.x + dx;
     let targetY = center.y + dy;
 
+    if (!snapEnabled) {
+        setSnapLineHighlight(null, "off");
+        knob.x = targetX;
+        knob.y = targetY;
+        markSlidingActivity();
+        draw();
+        scheduleMorphUpdate();
+        return;
+    }
+
     const SNAP_DISTANCE = 5;
-    const LINE_SNAP_ENTER = 5.5;
-    const LINE_SNAP_STICK = 10.5;
-    const LINE_SNAP_STRONG = 18;
+    const LINE_SNAP_ENTER = 6;
+    const LINE_SNAP_STICK = 13;
+    const LINE_SNAP_STRONG = 24;
 
     const snapPoints = [
         { name: "thin", x: anchors.thin.x, y: anchors.thin.y },
@@ -826,7 +838,7 @@ function setKnobFromPoint(x, y) {
         }
 
         if (bestProjection.distance < threshold) {
-            const strength = alreadyOnSameLine ? 0.85 : 0.35;
+            const strength = alreadyOnSameLine ? 0.985 : 0.42;
 
             targetX = targetX + (bestProjection.x - targetX) * strength;
             targetY = targetY + (bestProjection.y - targetY) * strength;
@@ -886,6 +898,14 @@ resetButton.addEventListener("click", () => {
 
     flushPreviewNow();
     flushCommitNow();
+});
+
+snapToggleEl.addEventListener("change", () => {
+    snapEnabled = !!snapToggleEl.checked;
+    if (!snapEnabled) {
+        setSnapLineHighlight(null, "off");
+        draw();
+    }
 });
 
 runBlendModelSelfTests();

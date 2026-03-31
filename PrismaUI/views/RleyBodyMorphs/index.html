@@ -6,18 +6,24 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div class="container">
-        <h1>Body Morphs</h1>
+    <div class="overlay-shell">
+        <div class="container">
+            <div class="panel-tools">
+                <button id="reset" class="ghost-button">Reset</button>
+                <label class="snap-toggle">
+                    <input id="snapToggle" type="checkbox" checked>
+                    <span>Snap</span>
+                </label>
+            </div>
 
-        <canvas id="morphCanvas" width="420" height="420"></canvas>
+            <canvas id="morphCanvas" width="400" height="400"></canvas>
 
-        <div class="readout">
-            <div>Thin: <span id="thinValue">0.00</span></div>
-            <div>Muscular: <span id="muscularValue">0.00</span></div>
-            <div>Fat: <span id="fatValue">0.00</span></div>
+            <div class="readout">
+                <div>Thin <span id="thinValue">0.00</span></div>
+                <div>Muscular <span id="muscularValue">0.00</span></div>
+                <div>Heavy <span id="fatValue">0.00</span></div>
+            </div>
         </div>
-
-        <button id="reset">Reset</button>
     </div>
 
     <script src="script.js"></script>
