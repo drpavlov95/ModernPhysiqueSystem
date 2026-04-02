@@ -56,12 +56,14 @@ constexpr float kMorphApplyDeltaThreshold = 0.001f;
 constexpr float kMorphClearThreshold = 0.0005f;
 constexpr float kWeightSyncThreshold = 0.0005f;
 constexpr int kThinSoftThresholdPercent = 20;
+constexpr int kPreviewNormalDebounceTicks = 12;
 
 std::atomic<bool> g_shouldPhysiqueBeVisible = false;
 std::atomic<bool> g_raceMenuOpen = false;
 std::atomic<float> g_weightSyncValue = 0.0f;
 std::atomic<int> g_deferredTextureApplyTicks = 0;
 std::atomic<int> g_deferredTextureApplyRepeats = 0;
+std::atomic<int> g_previewNormalApplyTicks = 0;
 std::atomic<std::uint64_t> g_applySequence = 0;
 
 struct TextureSnapshotRequest
@@ -144,6 +146,8 @@ void LogNormalMapTextureSetPlan();
 bool ApplySelectedNormalMapTextureSet(bool persist = true, std::string_view applySource = "unspecified");
 void ScheduleDeferredBodyTextureApply(int ticks, int repeats = 1);
 void QueueDeferredBodyTextureApplyTask();
+void SchedulePreviewNormalApply(int ticks = kPreviewNormalDebounceTicks);
+void CancelPreviewNormalApply();
 void SchedulePlayerTextureSnapshotSeries(std::string_view applySource, bool persist);
 void UpdateScheduledTextureSnapshots();
 void QueuePlayerTextureSnapshotTask(std::string reason);
@@ -821,6 +825,24 @@ void QueueDeferredBodyTextureApplyTask()
     });
 }
 
+void SchedulePreviewNormalApply(int ticks)
+{
+    if (ticks <= 0) {
+        ticks = 1;
+    }
+
+    g_previewNormalApplyTicks.store(ticks);
+    spdlog::info("Scheduled preview normal apply in {} ticks", ticks);
+}
+
+void CancelPreviewNormalApply()
+{
+    const int previousTicks = g_previewNormalApplyTicks.exchange(0);
+    if (previousTicks > 0) {
+        spdlog::info("Canceled pending preview normal apply (remainingTicks={})", previousTicks);
+    }
+}
+
 int MorphValueToPercent(float value)
 {
     return static_cast<int>(std::lround(std::clamp(value, 0.0f, 1.0f) * 100.0f));
@@ -1331,10 +1353,12 @@ public:
         g_raceMenuOpen.store(a_event->opening);
         if (a_event->opening) {
             spdlog::info("RaceMenu open detected; physique wheel hidden until body category is active");
+            CancelPreviewNormalApply();
             SchedulePlayerTextureSnapshotSeries("racemenu_open_event", false);
             SetPhysiqueDesiredVisible(false);
         } else {
             spdlog::info("RaceMenu close detected; scheduling deferred texture reapply");
+            CancelPreviewNormalApply();
             SchedulePlayerTextureSnapshotSeries("racemenu_close_event", false);
             ResetRaceMenuBridgeState();
             SetPhysiqueDesiredVisible(false);
@@ -1719,7 +1743,7 @@ void OnMorphsPreview(const char* argument)
         return;
     }
 
-    ApplySelectedNormalMapTextureSet(false, "preview_slider");
+    SchedulePreviewNormalApply();
 }
 
 void OnMorphsCommit(const char* argument)
@@ -1742,6 +1766,7 @@ void OnMorphsCommit(const char* argument)
         }
     }
 
+    CancelPreviewNormalApply();
     RefreshCachedMorphStateFromNative();
     ApplySelectedNormalMapTextureSet(true, "commit_slider");
 }
@@ -1849,6 +1874,17 @@ void UpdateLoop()
         }
 
         UpdateScheduledTextureSnapshots();
+
+        int remainingPreviewNormalApplyTicks = g_previewNormalApplyTicks.load();
+        if (remainingPreviewNormalApplyTicks > 0) {
+            if (g_previewNormalApplyTicks.compare_exchange_strong(
+                    remainingPreviewNormalApplyTicks,
+                    remainingPreviewNormalApplyTicks - 1)) {
+                if (remainingPreviewNormalApplyTicks == 1) {
+                    ApplySelectedNormalMapTextureSet(false, "preview_slider_debounced");
+                }
+            }
+        }
 
         int remainingTextureApplyTicks = g_deferredTextureApplyTicks.load();
         if (remainingTextureApplyTicks > 0) {
