@@ -27,7 +27,7 @@ Function ApplySelectedNormalPaths(String bodyNormalTexturePath, String handNorma
 	String legacyBodyNodeName = "Body"
 	String legacyHandNodeName = "Hands"
 	String resolvedHandNormalTexturePath = handNormalTexturePath
-	String nativeCotrHandNormalTexturePath = "Textures\\!COR\\Hands\\femalehands_1_msn.dds"
+	String handMode = "skipped"
 
 	Armor cotrSkinArmor = None
 	ArmorAddon cotrBodyAddon = None
@@ -130,7 +130,8 @@ Function ApplySelectedNormalPaths(String bodyNormalTexturePath, String handNorma
 	EndIf
 
 	If handNormalTexturePath != "" && cotrSkinArmor != None && cotrHandAddon != None && hasCotrSkin
-		resolvedHandNormalTexturePath = nativeCotrHandNormalTexturePath
+		resolvedHandNormalTexturePath = handNormalTexturePath
+		handMode = "custom_selected_path"
 
 		; Migrate away from the legacy hand experiments before applying the exact COtR hand addon target.
 		NiOverride.RemoveSkinOverride(playerRef, True, False, handSlotMask, textureSetOverrideKey, textureSetIndex)
@@ -181,7 +182,7 @@ Function ApplySelectedNormalPaths(String bodyNormalTexturePath, String handNorma
 		bodyMode = "cotr_body_addon"
 	EndIf
 
-	Debug.Trace(prefix + "Applied selected normal paths body=" + bodyNormalTexturePath + " handRequest=" + handNormalTexturePath + " handApplied=" + resolvedHandNormalTexturePath + " persist=" + persist + " source=" + applySource + " (bodyMode=" + bodyMode + ", bodyNode3p=" + bodyAddonNode3p + ", bodyNode1p=" + bodyAddonNode1p + ", bodyNamedNode3p=" + bodyAddonNamedNode3p + ", bodyNamedNode1p=" + bodyAddonNamedNode1p + ", bodyAddonOverrideBefore=" + bodyAddonOverrideBefore + ", bodyNamedOverrideBefore=" + bodyAddonNamedOverrideBefore + ", body3pBefore=" + bodyThirdPersonOverrideBefore + ", body1pBefore=" + bodyFirstPersonOverrideBefore + ", body3p=" + bodyThirdPersonOverride + ", body1p=" + bodyFirstPersonOverride + ", cotrSkin=" + hasCotrSkin + ", handNode3p=" + handAddonNode3p + ", handNode1p=" + handAddonNode1p + ", handOverrideBefore=" + handAddonOverrideBefore + ", handOverride=" + handAddonOverride + ")")
+	Debug.Trace(prefix + "Applied selected normal paths body=" + bodyNormalTexturePath + " handRequest=" + handNormalTexturePath + " handApplied=" + resolvedHandNormalTexturePath + " persist=" + persist + " source=" + applySource + " (bodyMode=" + bodyMode + ", handMode=" + handMode + ", bodyNode3p=" + bodyAddonNode3p + ", bodyNode1p=" + bodyAddonNode1p + ", bodyNamedNode3p=" + bodyAddonNamedNode3p + ", bodyNamedNode1p=" + bodyAddonNamedNode1p + ", bodyAddonOverrideBefore=" + bodyAddonOverrideBefore + ", bodyNamedOverrideBefore=" + bodyAddonNamedOverrideBefore + ", body3pBefore=" + bodyThirdPersonOverrideBefore + ", body1pBefore=" + bodyFirstPersonOverrideBefore + ", body3p=" + bodyThirdPersonOverride + ", body1p=" + bodyFirstPersonOverride + ", cotrSkin=" + hasCotrSkin + ", handNode3p=" + handAddonNode3p + ", handNode1p=" + handAddonNode1p + ", handOverrideBefore=" + handAddonOverrideBefore + ", handOverride=" + handAddonOverride + ")")
 EndFunction
 
 Function ApplyBodyNormalPath(String normalTexturePath) global
