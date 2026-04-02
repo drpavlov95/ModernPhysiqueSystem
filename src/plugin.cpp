@@ -14,6 +14,7 @@
 #include <limits>
 #include <string>
 #include <vector>
+#include <mutex>
 
 float g_lastThin = 0.0f;
 float g_lastMuscular = 0.0f;
@@ -42,9 +43,7 @@ constexpr const char* kNormalMapRelativeFolder = "Textures\\RleyBodyMorphs";
 constexpr const char* kHandNormalMapDataFolder = "Data\\Textures\\RleyBodyMorphs\\Hands";
 constexpr const char* kHandNormalMapRelativeFolder = "Textures\\RleyBodyMorphs\\Hands";
 constexpr const char* kTextureBridgeScriptName = "RleyTextureBridge";
-constexpr const char* kTextureBridgeApplyBodyTextureSetFunction = "ApplyBodyTextureSet";
-constexpr const char* kTextureBridgeApplyBodyNormalPathFunction = "ApplyBodyNormalPath";
-constexpr const char* kTextureBridgeApplyHandNormalPathFunction = "ApplyHandNormalPath";
+constexpr const char* kTextureBridgeApplySelectedNormalPathsFunction = "ApplySelectedNormalPaths";
 constexpr const char* kScaleformPluginName = "ModernPhysiqueSystem";
 constexpr const char* kScaleformSetCategoryFunction = "SetActiveCategory";
 constexpr const char* kScaleformSetWeightFunction = "SetWeightSync";
@@ -61,6 +60,15 @@ std::atomic<bool> g_raceMenuOpen = false;
 std::atomic<float> g_weightSyncValue = 0.0f;
 std::atomic<int> g_deferredTextureApplyTicks = 0;
 std::atomic<int> g_deferredTextureApplyRepeats = 0;
+
+struct TextureSnapshotRequest
+{
+    int ticksRemaining = 0;
+    std::string reason;
+};
+
+std::mutex g_textureSnapshotLock;
+std::vector<TextureSnapshotRequest> g_textureSnapshotRequests;
 
 struct AxisNormalMapEntry
 {
@@ -118,14 +126,15 @@ std::string SelectNormalMapRelativePath(float thin, float muscular, float fat);
 std::string SelectHandNormalMapRelativePath(float thin, float muscular, float fat);
 void UpdateSelectedNormalMapCandidate(float thin, float muscular, float fat);
 std::string BuildTextureSetEditorID(std::string_view variantKey);
-std::string BuildSelectedNormalMapDispatchKey();
+std::string BuildSelectedNormalMapDispatchKey(bool persist);
 void LogNormalMapTextureSetPlan();
-bool ApplySelectedNormalMapTextureSet();
-bool DispatchBodyTextureSetStatic(std::string_view textureSetEditorID);
-bool DispatchBodyNormalPathStatic(std::string_view normalPath);
-bool DispatchHandNormalPathStatic(std::string_view normalPath);
+bool ApplySelectedNormalMapTextureSet(bool persist = true, std::string_view applySource = "unspecified");
 void ScheduleDeferredBodyTextureApply(int ticks, int repeats = 1);
 void QueueDeferredBodyTextureApplyTask();
+void SchedulePlayerTextureSnapshotSeries(std::string_view applySource, bool persist);
+void UpdateScheduledTextureSnapshots();
+void QueuePlayerTextureSnapshotTask(std::string reason);
+void LogPlayerTextureSnapshot(std::string_view reason);
 void ApplyVertexDiffs(RE::PlayerCharacter* player);
 
 std::vector<std::string_view> SplitStringView(std::string_view value, char delimiter)
@@ -306,7 +315,158 @@ std::string BuildTextureSetEditorID(std::string_view variantKey)
     return std::string("RBM_TX_") + std::string(variantKey);
 }
 
-std::string BuildSelectedNormalMapDispatchKey()
+bool IsTrackedPlayerTexturePath(std::string_view texturePath)
+{
+    if (texturePath.empty()) {
+        return false;
+    }
+
+    const std::string lower = ToLowerCopy(std::string(texturePath));
+    return lower.find("textures\\rleybodymorphs\\") != std::string::npos ||
+           lower.find("textures\\!cor\\hands\\") != std::string::npos ||
+           lower.find("textures\\!cor\\body\\") != std::string::npos ||
+           lower.find("femalehands") != std::string::npos ||
+           lower.find("femalebody") != std::string::npos;
+}
+
+void LogTrackedTextureSnapshotForRoot(RE::NiAVObject* root, std::string_view rootLabel, std::string_view reason)
+{
+    if (!root) {
+        spdlog::info("Texture snapshot {} root={} unavailable", reason, rootLabel);
+        return;
+    }
+
+    int loggedGeometryCount = 0;
+
+    for (auto* geometry : NifUtil::Node::GetAllGeometries(root)) {
+        if (!geometry) {
+            continue;
+        }
+
+        auto effectPtr = geometry->GetGeometryRuntimeData().properties[RE::BSGeometry::States::kEffect];
+        auto* effect = effectPtr.get();
+        if (!effect) {
+            continue;
+        }
+
+        auto* lightingShader = netimmerse_cast<RE::BSLightingShaderProperty*>(effect);
+        if (!lightingShader || !lightingShader->material) {
+            continue;
+        }
+
+        auto* material = static_cast<RE::BSLightingShaderMaterialBase*>(
+            static_cast<RE::BSShaderMaterial*>(lightingShader->material));
+        if (!material) {
+            continue;
+        }
+
+        auto textureSetPtr = material->GetTextureSet();
+        auto* textureSet = textureSetPtr.get();
+        if (!textureSet) {
+            continue;
+        }
+
+        const char* diffuse = textureSet->GetTexturePath(static_cast<RE::BSTextureSet::Texture>(0));
+        const char* normal = textureSet->GetTexturePath(static_cast<RE::BSTextureSet::Texture>(1));
+        const char* glow = textureSet->GetTexturePath(static_cast<RE::BSTextureSet::Texture>(3));
+        const char* specular = textureSet->GetTexturePath(static_cast<RE::BSTextureSet::Texture>(7));
+
+        const std::string_view diffuseView = diffuse ? diffuse : "";
+        const std::string_view normalView = normal ? normal : "";
+        const std::string_view glowView = glow ? glow : "";
+        const std::string_view specularView = specular ? specular : "";
+
+        if (!IsTrackedPlayerTexturePath(diffuseView) &&
+            !IsTrackedPlayerTexturePath(normalView) &&
+            !IsTrackedPlayerTexturePath(glowView) &&
+            !IsTrackedPlayerTexturePath(specularView)) {
+            continue;
+        }
+
+        const char* geometryName = geometry->name.empty() ? "<unnamed>" : geometry->name.c_str();
+        spdlog::info(
+            "Texture snapshot {} root={} geom={} diffuse={} normal={} glow={} specular={}",
+            reason,
+            rootLabel,
+            geometryName,
+            diffuseView.empty() ? "<empty>" : diffuseView,
+            normalView.empty() ? "<empty>" : normalView,
+            glowView.empty() ? "<empty>" : glowView,
+            specularView.empty() ? "<empty>" : specularView);
+        ++loggedGeometryCount;
+    }
+
+    if (loggedGeometryCount == 0) {
+        spdlog::info("Texture snapshot {} root={} found no tracked body/hand geometries", reason, rootLabel);
+    }
+}
+
+void LogPlayerTextureSnapshot(std::string_view reason)
+{
+    auto* player = RE::PlayerCharacter::GetSingleton();
+    if (!player) {
+        spdlog::warn("Texture snapshot {} skipped because player was unavailable", reason);
+        return;
+    }
+
+    LogTrackedTextureSnapshotForRoot(player->Get3D(false), "3p", reason);
+    LogTrackedTextureSnapshotForRoot(player->Get3D(true), "1p", reason);
+}
+
+void QueuePlayerTextureSnapshotTask(std::string reason)
+{
+    auto* taskInterface = SKSE::GetTaskInterface();
+    if (!taskInterface) {
+        spdlog::error("Failed to get SKSE task interface for player texture snapshot {}", reason);
+        return;
+    }
+
+    taskInterface->AddTask([reason = std::move(reason)]() {
+        LogPlayerTextureSnapshot(reason);
+    });
+}
+
+void SchedulePlayerTextureSnapshotSeries(std::string_view applySource, bool persist)
+{
+    const std::string baseReason =
+        std::string(applySource) + (persist ? "|persist=1" : "|persist=0");
+
+    std::lock_guard lock(g_textureSnapshotLock);
+    g_textureSnapshotRequests.push_back({ 0, "snapshot_t+0|" + baseReason });
+    g_textureSnapshotRequests.push_back({ 1, "snapshot_t+1|" + baseReason });
+    g_textureSnapshotRequests.push_back({ 5, "snapshot_t+5|" + baseReason });
+    g_textureSnapshotRequests.push_back({ 10, "snapshot_t+10|" + baseReason });
+    g_textureSnapshotRequests.push_back({ 30, "snapshot_t+30|" + baseReason });
+    g_textureSnapshotRequests.push_back({ 60, "snapshot_t+60|" + baseReason });
+    g_textureSnapshotRequests.push_back({ 120, "snapshot_t+120|" + baseReason });
+
+    spdlog::info("Scheduled player texture snapshots for {}", baseReason);
+}
+
+void UpdateScheduledTextureSnapshots()
+{
+    std::vector<std::string> dueReasons;
+
+    {
+        std::lock_guard lock(g_textureSnapshotLock);
+        auto it = g_textureSnapshotRequests.begin();
+        while (it != g_textureSnapshotRequests.end()) {
+            it->ticksRemaining -= 1;
+            if (it->ticksRemaining <= 0) {
+                dueReasons.push_back(it->reason);
+                it = g_textureSnapshotRequests.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    for (auto& reason : dueReasons) {
+        QueuePlayerTextureSnapshotTask(std::move(reason));
+    }
+}
+
+std::string BuildSelectedNormalMapDispatchKey(bool persist)
 {
     std::string key;
 
@@ -323,149 +483,136 @@ std::string BuildSelectedNormalMapDispatchKey()
         key += std::string("HAND:") + g_selectedHandNormalMapPath;
     }
 
+    if (!key.empty()) {
+        key += persist ? "|PERSIST:1" : "|PERSIST:0";
+    }
+
     return key;
 }
 
-bool DispatchTextureBridgeStringStatic(
-    std::string_view functionName,
-    std::string_view argument,
-    std::string_view argumentLabel)
+bool DispatchSelectedNormalPathsStatic(
+    std::string_view bodyNormalPath,
+    std::string_view handNormalPath,
+    bool persist,
+    std::string_view applySource)
 {
-    if (functionName.empty()) {
-        spdlog::warn("DispatchTextureBridgeStringStatic skipped because function name was empty");
-        return false;
-    }
-
-    if (argument.empty()) {
+    if (bodyNormalPath.empty()) {
         spdlog::warn(
-            "DispatchTextureBridgeStringStatic skipped because argument {} was empty",
-            argumentLabel.empty() ? "<arg>" : argumentLabel);
+            "DispatchSelectedNormalPathsStatic skipped because body normal path was empty (source={})",
+            applySource);
         return false;
     }
 
     auto* vm = RE::BSScript::Internal::VirtualMachine::GetSingleton();
     if (!vm) {
-        spdlog::error("Failed to get Papyrus VM while dispatching body texture set");
+        spdlog::error("Failed to get Papyrus VM while dispatching selected normal paths");
         return false;
     }
 
     RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> result;
-    auto* args = RE::MakeFunctionArguments(std::string(argument));
+    auto* args = RE::MakeFunctionArguments(
+        std::string(bodyNormalPath),
+        std::string(handNormalPath),
+        persist ? true : false,
+        std::string(applySource));
     const bool dispatched = vm->DispatchStaticCall(
         RE::BSFixedString(kTextureBridgeScriptName),
-        RE::BSFixedString(functionName.data()),
+        RE::BSFixedString(kTextureBridgeApplySelectedNormalPathsFunction),
         args,
         result);
 
     if (!dispatched) {
         spdlog::warn(
-            "Failed to dispatch static texture bridge call {}.{}({}={})",
+            "Failed to dispatch static texture bridge call {}.{}(bodyNormalPath={}, handNormalPath={}, persist={}, source={})",
             kTextureBridgeScriptName,
-            functionName,
-            argumentLabel.empty() ? "arg" : argumentLabel,
-            argument);
+            kTextureBridgeApplySelectedNormalPathsFunction,
+            bodyNormalPath,
+            handNormalPath.empty() ? "<empty>" : handNormalPath,
+            persist,
+            applySource);
     } else {
         spdlog::info(
-            "Dispatched static texture bridge call {}.{} with {}={}",
+            "Dispatched static texture bridge call {}.{} with bodyNormalPath={}, handNormalPath={}, persist={}, source={}",
             kTextureBridgeScriptName,
-            functionName,
-            argumentLabel.empty() ? "arg" : argumentLabel,
-            argument);
+            kTextureBridgeApplySelectedNormalPathsFunction,
+            bodyNormalPath,
+            handNormalPath.empty() ? "<empty>" : handNormalPath,
+            persist,
+            applySource);
     }
 
     return dispatched;
 }
 
-bool DispatchBodyTextureSetStatic(std::string_view textureSetEditorID)
+bool ApplySelectedNormalMapTextureSet(bool persist, std::string_view applySource)
 {
-    return DispatchTextureBridgeStringStatic(
-        kTextureBridgeApplyBodyTextureSetFunction,
-        textureSetEditorID,
-        "txst");
-}
-
-bool DispatchBodyNormalPathStatic(std::string_view normalPath)
-{
-    return DispatchTextureBridgeStringStatic(
-        kTextureBridgeApplyBodyNormalPathFunction,
-        normalPath,
-        "normalPath");
-}
-
-bool DispatchHandNormalPathStatic(std::string_view normalPath)
-{
-    return DispatchTextureBridgeStringStatic(
-        kTextureBridgeApplyHandNormalPathFunction,
-        normalPath,
-        "handNormalPath");
-}
-
-bool ApplySelectedNormalMapTextureSet()
-{
-    const bool hasTextureSet = !g_selectedNormalMapTextureSetEditorID.empty();
     const bool hasNormalPath = !g_selectedNormalMapPath.empty();
     const bool hasHandNormalPath = !g_selectedHandNormalMapPath.empty();
-    const std::string dispatchKey = BuildSelectedNormalMapDispatchKey();
+    const std::string dispatchKey = BuildSelectedNormalMapDispatchKey(persist);
 
-    if (!hasTextureSet && !hasNormalPath && !hasHandNormalPath) {
-        spdlog::warn("ApplySelectedNormalMapTextureSet skipped because no normal map was selected");
+    if (!hasNormalPath && !hasHandNormalPath) {
+        spdlog::warn(
+            "ApplySelectedNormalMapTextureSet skipped because no normal map was selected (source={}, thin={:.3f}, muscular={:.3f}, heavy={:.3f})",
+            applySource,
+            g_lastThin,
+            g_lastMuscular,
+            g_lastFat);
         return false;
     }
 
     if (!dispatchKey.empty() && dispatchKey == g_appliedNormalMapDispatchKey) {
+        spdlog::info(
+            "ApplySelectedNormalMapTextureSet skipped because the requested normals are already applied (source={}, persist={}, bodyPath={}, handPath={}, thin={:.3f}, muscular={:.3f}, heavy={:.3f})",
+            applySource,
+            persist,
+            hasNormalPath ? g_selectedNormalMapPath : "<no-path>",
+            hasHandNormalPath ? g_selectedHandNormalMapPath : "<no-hand-path>",
+            g_lastThin,
+            g_lastMuscular,
+            g_lastFat);
         return true;
     }
 
     auto* player = RE::PlayerCharacter::GetSingleton();
     if (!player) {
-        spdlog::warn("ApplySelectedNormalMapTextureSet skipped because player was unavailable");
+        spdlog::warn(
+            "ApplySelectedNormalMapTextureSet skipped because player was unavailable (source={})",
+            applySource);
         return false;
     }
 
     spdlog::info(
-        "ApplySelectedNormalMapTextureSet attempting {} for bodyPath={} handPath={}",
-        hasTextureSet ? g_selectedNormalMapTextureSetEditorID : "<no-txst>",
+        "ApplySelectedNormalMapTextureSet attempting bodyPath={} handPath={} persist={} source={} thin={:.3f} muscular={:.3f} heavy={:.3f}",
         hasNormalPath ? g_selectedNormalMapPath : "<no-path>",
-        hasHandNormalPath ? g_selectedHandNormalMapPath : "<no-hand-path>");
+        hasHandNormalPath ? g_selectedHandNormalMapPath : "<no-hand-path>",
+        persist,
+        applySource,
+        g_lastThin,
+        g_lastMuscular,
+        g_lastFat);
 
-    bool bodyDispatched = false;
-    if (hasNormalPath && DispatchBodyNormalPathStatic(g_selectedNormalMapPath)) {
-        spdlog::info("Dispatched body normal path {}", g_selectedNormalMapPath);
-        bodyDispatched = true;
-    }
+    const std::string_view handNormalPath =
+        hasHandNormalPath ? std::string_view(g_selectedHandNormalMapPath) : std::string_view{};
 
-    if (!bodyDispatched && hasTextureSet) {
-        if (DispatchBodyTextureSetStatic(g_selectedNormalMapTextureSetEditorID)) {
-            spdlog::info("Dispatched body texture set {}", g_selectedNormalMapTextureSetEditorID);
-            bodyDispatched = true;
-        }
-    }
-
-    bool handDispatched = !hasHandNormalPath;
-    if (hasHandNormalPath && DispatchHandNormalPathStatic(g_selectedHandNormalMapPath)) {
-        spdlog::info("Dispatched hand normal path {}", g_selectedHandNormalMapPath);
-        handDispatched = true;
-    }
-
-    if (bodyDispatched && handDispatched) {
+    if (hasNormalPath &&
+        DispatchSelectedNormalPathsStatic(
+            g_selectedNormalMapPath,
+            handNormalPath,
+            persist,
+            applySource)) {
         g_appliedNormalMapDispatchKey = dispatchKey;
+        SchedulePlayerTextureSnapshotSeries(applySource, persist);
         return true;
     }
 
-    if (!bodyDispatched) {
-        spdlog::warn(
-            "ApplySelectedNormalMapTextureSet failed to dispatch body normal path {} and texture set {}",
-            hasNormalPath ? g_selectedNormalMapPath : "<no-path>",
-            hasTextureSet ? g_selectedNormalMapTextureSetEditorID : "<no-txst>");
-    }
+    spdlog::warn(
+        "ApplySelectedNormalMapTextureSet failed to dispatch unified normal paths body={} hand={} persist={} source={}",
+        hasNormalPath ? g_selectedNormalMapPath : "<no-path>",
+        hasHandNormalPath ? g_selectedHandNormalMapPath : "<no-hand-path>",
+        persist,
+        applySource);
 
-    if (!handDispatched) {
-        spdlog::warn(
-            "ApplySelectedNormalMapTextureSet failed to dispatch hand normal path {}",
-            hasHandNormalPath ? g_selectedHandNormalMapPath : "<no-hand-path>");
-    }
-
-    return bodyDispatched;
+    return false;
 }
 
 void ScheduleDeferredBodyTextureApply(int ticks, int repeats)
@@ -503,8 +650,9 @@ void QueueDeferredBodyTextureApplyTask()
     }
 
     taskInterface->AddTask([]() {
+        QueuePlayerTextureSnapshotTask("before_deferred_apply|deferred_racemenu_close");
         g_appliedNormalMapDispatchKey.clear();
-        ApplySelectedNormalMapTextureSet();
+        ApplySelectedNormalMapTextureSet(true, "deferred_racemenu_close");
     });
 }
 
@@ -1017,8 +1165,12 @@ public:
 
         g_raceMenuOpen.store(a_event->opening);
         if (a_event->opening) {
+            spdlog::info("RaceMenu open detected; physique wheel hidden until body category is active");
+            SchedulePlayerTextureSnapshotSeries("racemenu_open_event", false);
             SetPhysiqueDesiredVisible(false);
         } else {
+            spdlog::info("RaceMenu close detected; scheduling deferred texture reapply");
+            SchedulePlayerTextureSnapshotSeries("racemenu_close_event", false);
             ResetRaceMenuBridgeState();
             SetPhysiqueDesiredVisible(false);
             CloseMenu();
@@ -1253,7 +1405,7 @@ bool ApplyWeightToCurrentDirection(float weight)
             return false;
         }
 
-        ApplySelectedNormalMapTextureSet();
+        ApplySelectedNormalMapTextureSet(true, "weight_sync");
     }
 
     if (g_prisma && g_view && g_prisma->IsValid(g_view) && g_menuOpen) {
@@ -1402,7 +1554,7 @@ void OnMorphsPreview(const char* argument)
         return;
     }
 
-    ApplySelectedNormalMapTextureSet();
+    ApplySelectedNormalMapTextureSet(false, "preview_slider");
 }
 
 void OnMorphsCommit(const char* argument)
@@ -1426,7 +1578,7 @@ void OnMorphsCommit(const char* argument)
     }
 
     RefreshCachedMorphStateFromNative();
-    ApplySelectedNormalMapTextureSet();
+    ApplySelectedNormalMapTextureSet(true, "commit_slider");
 }
 
 void OnDataLoaded()
@@ -1468,12 +1620,12 @@ void MessageHandler(SKSE::MessagingInterface::Message* a_msg)
     case SKSE::MessagingInterface::kPostLoadGame:
         TryAcquireRaceMenuBodyMorphInterface();
         RefreshCachedMorphStateFromNative();
-        ApplySelectedNormalMapTextureSet();
+        ApplySelectedNormalMapTextureSet(true, "post_load_game");
         break;
     case SKSE::MessagingInterface::kNewGame:
         TryAcquireRaceMenuBodyMorphInterface();
         RefreshCachedMorphStateFromNative();
-        ApplySelectedNormalMapTextureSet();
+        ApplySelectedNormalMapTextureSet(true, "new_game");
         break;
     }
 }
@@ -1530,6 +1682,8 @@ void UpdateLoop()
         if (GetAsyncKeyState(VK_F7) & 1) {
             ToggleMenu();
         }
+
+        UpdateScheduledTextureSnapshots();
 
         int remainingTextureApplyTicks = g_deferredTextureApplyTicks.load();
         if (remainingTextureApplyTicks > 0) {
