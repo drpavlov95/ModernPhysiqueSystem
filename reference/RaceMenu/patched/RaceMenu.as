@@ -331,6 +331,14 @@ class RaceMenu extends MovieClip
       this.ShowRacePanel(!abShowTextEntry);
       this.ShowBottomBar(!abShowTextEntry);
       this.ShowModeSwitcher(!abShowTextEntry);
+      this.syncPhysiqueOverlayState();
+   }
+   function HideTextEntryWithoutRestoringPanels()
+   {
+      this.itemList.invalidateSelection();
+      this.textEntry.TextInputInstance.focused = false;
+      this.textEntry._visible = this.textEntry.enabled = false;
+      gfx.managers.FocusHandler.instance.setFocus(this.itemList,0);
    }
    function ShowTextEntryField()
    {
@@ -361,6 +369,7 @@ class RaceMenu extends MovieClip
       this.ShowRacePanel(!bShowField);
       this.ShowBottomBar(!bShowField);
       this.ShowModeSwitcher(!bShowField);
+      this.syncPhysiqueOverlayState();
    }
    function ShowRaceDescription(bShowDescription)
    {
@@ -429,21 +438,11 @@ class RaceMenu extends MovieClip
       this.ShowRacePanel(!bShowPanel);
       this.ShowBottomBar(!bShowPanel);
       this.ShowModeSwitcher(!bShowPanel);
+      this.syncPhysiqueOverlayState();
    }
    function ShowRacePanel(bShowPanel)
    {
       this.updatePhysiqueTitleVisibility(bShowPanel);
-      if(_global.skse.plugins.ModernPhysiqueSystem.SetActiveCategory)
-      {
-         if(bShowPanel && this.bPhysiqueBodyCategoryActive && this.categoryList.selectedEntry != undefined)
-         {
-            _global.skse.plugins.ModernPhysiqueSystem.SetActiveCategory(this.categoryList.selectedEntry.flag,this.categoryList.selectedEntry.textFilter);
-         }
-         else
-         {
-            _global.skse.plugins.ModernPhysiqueSystem.SetActiveCategory(0,"");
-         }
-      }
       if(bShowPanel)
       {
          this.categoryList.disableSelection = this.categoryList.disableInput = false;
@@ -487,7 +486,11 @@ class RaceMenu extends MovieClip
    {
       if(event.nameChanged == true)
       {
-         this.ShowTextEntry(false);
+         this.HideTextEntryWithoutRestoringPanels();
+         if(_global.skse.plugins.ModernPhysiqueSystem.SetActiveCategory)
+         {
+            _global.skse.plugins.ModernPhysiqueSystem.SetActiveCategory(0,"");
+         }
          this.ShowRacePanel(false);
          this.ShowBottomBar(false);
          this.ShowModeSwitcher(false);
@@ -931,27 +934,92 @@ class RaceMenu extends MovieClip
          delete this.physiqueWeightSyncInterval;
       }
    }
+   function syncPhysiqueOverlayState()
+   {
+      if(!_global.skse.plugins.ModernPhysiqueSystem.SetActiveCategory)
+      {
+         return undefined;
+      }
+      if(this.bPhysiqueBodyCategoryActive && !this.textEntry.enabled && !this.colorField.enabled && !this.makeupPanel.enabled && this.categoryList.selectedEntry != undefined)
+      {
+         _global.skse.plugins.ModernPhysiqueSystem.SetActiveCategory(this.categoryList.selectedEntry.flag,this.categoryList.selectedEntry.textFilter);
+      }
+      else
+      {
+         _global.skse.plugins.ModernPhysiqueSystem.SetActiveCategory(0,"");
+      }
+   }
+   function getPhysiqueTitleAnchorClip()
+   {
+      var _loc2_ = this.getWeightSliderEntry();
+      if(_loc2_ && _loc2_.clipIndex != undefined)
+      {
+         return this.itemList.getClipByIndex(_loc2_.clipIndex);
+      }
+      return null;
+   }
+   function refreshPhysiqueTitleRow()
+   {
+      if(this.physiqueTitle == null)
+      {
+         return undefined;
+      }
+      var _loc3_ = this.getPhysiqueTitleAnchorClip();
+      var _loc2_ = {type:RaceMenuDefines.ENTRY_TYPE_RACE,text:"Physique:",enabled:true,align:"left"};
+      _loc2_.isColorEnabled = function()
+      {
+         return false;
+      };
+      _loc2_.hasColor = function()
+      {
+         return false;
+      };
+      _loc2_.hasGlow = function()
+      {
+         return false;
+      };
+      this.physiqueTitle.setEntry(_loc2_,{list:{selectedEntry:null},activeEntry:null,focusEntry:null});
+      if(_loc3_)
+      {
+         this.physiqueTitle._x = _loc3_._x;
+         this.physiqueTitle._y = _loc3_._y + this.itemList.entryHeight;
+      }
+      else
+      {
+         this.physiqueTitle._x = this.itemList.background._x + this.itemList.leftBorder;
+         this.physiqueTitle._y = this.itemList.background._y + this.itemList.topBorder + this.itemList.entryHeight * 4;
+      }
+      this.physiqueTitle.itemIndex = undefined;
+      this.physiqueTitle.trigger._visible = false;
+      this.physiqueTitle.trigger.enabled = false;
+      this.physiqueTitle.activeIndicator._visible = false;
+      this.physiqueTitle.activeIndicator.enabled = false;
+      this.physiqueTitle.selectIndicator._visible = false;
+      this.physiqueTitle.focusIndicator._visible = false;
+      this.physiqueTitle.enabled = false;
+   }
    function ensurePhysiqueTitle()
    {
       if(this.physiqueTitle != null)
       {
          return undefined;
       }
-      this.racePanel.createTextField("physiqueTitle",this.racePanel.getNextHighestDepth(),28,226,180,24);
-      this.physiqueTitle = this.racePanel.physiqueTitle;
-      this.physiqueTitle.autoSize = "left";
-      this.physiqueTitle.selectable = false;
-      this.physiqueTitle.multiline = false;
-      this.physiqueTitle.wordWrap = false;
-      this.physiqueTitle.embedFonts = true;
-      this.physiqueTitle.antiAliasType = "advanced";
-      this.physiqueTitle.html = true;
+      this.physiqueTitle = SliderListEntry(this.itemList.attachMovie("SliderListEntry","physiqueTitle",this.itemList.getNextHighestDepth()));
+      this.physiqueTitle.onSliderLoad = function(event)
+      {
+         return undefined;
+      };
+      this.physiqueTitle.textField.textColor = SliderListEntry.defaultTextColor;
       this.physiqueTitle._visible = false;
-      this.physiqueTitle.htmlText = "<p align='left'><font face='$EverywhereMediumFont' size='18' color='#e3ddd0' letterSpacing='0.100000' kerning='1'>Physique</font></p>";
+      this.refreshPhysiqueTitleRow();
    }
    function updatePhysiqueTitleVisibility(bShowPanel)
    {
       this.ensurePhysiqueTitle();
+      if(this.bPhysiqueBodyCategoryActive && bShowPanel)
+      {
+         this.refreshPhysiqueTitleRow();
+      }
       this.physiqueTitle._visible = this.bPhysiqueBodyCategoryActive && bShowPanel;
    }
    function onCategoryPress(a_event)
@@ -982,10 +1050,7 @@ class RaceMenu extends MovieClip
          {
             this.stopPhysiqueWeightSync();
          }
-         if(_global.skse.plugins.ModernPhysiqueSystem.SetActiveCategory)
-         {
-            _global.skse.plugins.ModernPhysiqueSystem.SetActiveCategory(this.categoryList.selectedEntry.flag,this.categoryList.selectedEntry.textFilter);
-         }
+         this.syncPhysiqueOverlayState();
       }
    }
    function onCategoryChange(a_event)
@@ -1030,6 +1095,7 @@ class RaceMenu extends MovieClip
             this.vertexEditor.ShowAll(false,false,true);
             this.cameraEditor.ShowAll(false);
             this.presetEditor.ShowAll(false);
+            this.syncPhysiqueOverlayState();
             return undefined;
          case 1:
             this.ShowRacePanel(false);
@@ -1037,6 +1103,7 @@ class RaceMenu extends MovieClip
             this.vertexEditor.ShowAll(false,false,false);
             this.cameraEditor.ShowAll(false);
             this.presetEditor.ShowAll(true);
+            this.syncPhysiqueOverlayState();
             return undefined;
          case 2:
             this.ShowRacePanel(false);
@@ -1044,6 +1111,7 @@ class RaceMenu extends MovieClip
             this.cameraEditor.ShowAll(true);
             this.vertexEditor.ShowAll(false,false,false);
             this.presetEditor.ShowAll(false);
+            this.syncPhysiqueOverlayState();
             return undefined;
          case 3:
             this.ShowRacePanel(true);
@@ -1052,6 +1120,7 @@ class RaceMenu extends MovieClip
             this.vertexEditor.ShowAll(true,true,false);
             this.cameraEditor.ShowAll(false);
             this.presetEditor.ShowAll(false);
+            this.syncPhysiqueOverlayState();
       }
       return undefined;
    }
