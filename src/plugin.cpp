@@ -15,6 +15,8 @@
 #include <string>
 #include <vector>
 #include <mutex>
+#include <unordered_map>
+#include <format>
 
 float g_lastThin = 0.0f;
 float g_lastMuscular = 0.0f;
@@ -60,6 +62,7 @@ std::atomic<bool> g_raceMenuOpen = false;
 std::atomic<float> g_weightSyncValue = 0.0f;
 std::atomic<int> g_deferredTextureApplyTicks = 0;
 std::atomic<int> g_deferredTextureApplyRepeats = 0;
+std::atomic<std::uint64_t> g_applySequence = 0;
 
 struct TextureSnapshotRequest
 {
@@ -67,8 +70,18 @@ struct TextureSnapshotRequest
     std::string reason;
 };
 
+struct TrackedGeometryTextureState
+{
+    std::string diffuse;
+    std::string normal;
+    std::string glow;
+    std::string specular;
+};
+
 std::mutex g_textureSnapshotLock;
 std::vector<TextureSnapshotRequest> g_textureSnapshotRequests;
+std::mutex g_trackedTextureStateLock;
+std::unordered_map<std::string, TrackedGeometryTextureState> g_lastTrackedGeometryTextures;
 
 struct AxisNormalMapEntry
 {
@@ -310,6 +323,106 @@ std::string ToLowerCopy(std::string value)
     return value;
 }
 
+std::string DescribeFormForLog(RE::TESForm* form)
+{
+    if (!form) {
+        return "<none>";
+    }
+
+    const auto* file = form->GetFile();
+    const std::string_view fileName = file ? file->GetFilename() : std::string_view("<runtime>");
+    const char* editorID = form->GetFormEditorID();
+    const char* displayName = form->GetName();
+
+    return std::format(
+        "{:08X}[{}|type={}|edid={}|name={}]",
+        form->GetFormID(),
+        fileName,
+        static_cast<std::uint32_t>(form->GetFormType()),
+        editorID && editorID[0] ? editorID : "<none>",
+        displayName && displayName[0] ? displayName : "<none>");
+}
+
+bool TryParseHexFormIDToken(std::string_view token, RE::FormID& outFormID)
+{
+    if (token.empty() || token.size() > 8) {
+        return false;
+    }
+
+    RE::FormID result = 0;
+    for (const char ch : token) {
+        result <<= 4;
+        if (ch >= '0' && ch <= '9') {
+            result |= static_cast<RE::FormID>(ch - '0');
+        } else if (ch >= 'A' && ch <= 'F') {
+            result |= static_cast<RE::FormID>(10 + (ch - 'A'));
+        } else if (ch >= 'a' && ch <= 'f') {
+            result |= static_cast<RE::FormID>(10 + (ch - 'a'));
+        } else {
+            return false;
+        }
+    }
+
+    outFormID = result;
+    return true;
+}
+
+std::string DescribeGeometryProvenance(std::string_view geometryName)
+{
+    std::vector<RE::FormID> parsedFormIDs;
+    std::size_t cursor = 0;
+
+    while ((cursor = geometryName.find('(', cursor)) != std::string_view::npos) {
+        const auto close = geometryName.find(')', cursor + 1);
+        if (close == std::string_view::npos) {
+            break;
+        }
+
+        RE::FormID parsedFormID = 0;
+        if (TryParseHexFormIDToken(geometryName.substr(cursor + 1, close - cursor - 1), parsedFormID)) {
+            parsedFormIDs.push_back(parsedFormID);
+        }
+
+        cursor = close + 1;
+    }
+
+    if (parsedFormIDs.empty()) {
+        return "<no-formids-in-geometry-name>";
+    }
+
+    std::string provenance;
+    for (std::size_t index = 0; index < parsedFormIDs.size(); ++index) {
+        if (!provenance.empty()) {
+            provenance += " ";
+        }
+
+        auto* form = RE::TESForm::LookupByID(parsedFormIDs[index]);
+        provenance += std::format("form{}={}", index, DescribeFormForLog(form));
+    }
+
+    return provenance;
+}
+
+std::string DetermineTextureDriverHint(std::string_view reason)
+{
+    if (reason.find("driver=ModernPhysiqueSystem.dll") != std::string_view::npos ||
+        reason.find("applyId=") != std::string_view::npos) {
+        return "ModernPhysiqueSystem.dll -> RleyTextureBridge.ApplySelectedNormalPaths";
+    }
+
+    if (reason.find("racemenu_open_event") != std::string_view::npos ||
+        reason.find("racemenu_close_event") != std::string_view::npos) {
+        return "engine_or_RaceMenu_refresh (exact DLL/ESP cannot be known from this event alone)";
+    }
+
+    if (reason.find("post_load_game") != std::string_view::npos ||
+        reason.find("new_game") != std::string_view::npos) {
+        return "load_game_refresh_or_external_runtime (exact DLL/ESP cannot be known from this event alone)";
+    }
+
+    return "unknown_or_external_runtime (exact DLL/ESP cannot be known from this event alone)";
+}
+
 std::string BuildTextureSetEditorID(std::string_view variantKey)
 {
     return std::string("RBM_TX_") + std::string(variantKey);
@@ -384,15 +497,59 @@ void LogTrackedTextureSnapshotForRoot(RE::NiAVObject* root, std::string_view roo
         }
 
         const char* geometryName = geometry->name.empty() ? "<unnamed>" : geometry->name.c_str();
+        const std::string provenance = DescribeGeometryProvenance(geometryName);
+        const std::string stateKey = std::string(rootLabel) + "|" + geometryName;
+        const TrackedGeometryTextureState currentState{
+            std::string(diffuseView),
+            std::string(normalView),
+            std::string(glowView),
+            std::string(specularView)
+        };
+
+        TrackedGeometryTextureState previousState;
+        bool hadPreviousState = false;
+        {
+            std::lock_guard lock(g_trackedTextureStateLock);
+            const auto it = g_lastTrackedGeometryTextures.find(stateKey);
+            if (it != g_lastTrackedGeometryTextures.end()) {
+                previousState = it->second;
+                hadPreviousState = true;
+            }
+            g_lastTrackedGeometryTextures[stateKey] = currentState;
+        }
+
         spdlog::info(
-            "Texture snapshot {} root={} geom={} diffuse={} normal={} glow={} specular={}",
+            "Texture snapshot {} root={} geom={} diffuse={} normal={} glow={} specular={} provenance={}",
             reason,
             rootLabel,
             geometryName,
             diffuseView.empty() ? "<empty>" : diffuseView,
             normalView.empty() ? "<empty>" : normalView,
             glowView.empty() ? "<empty>" : glowView,
-            specularView.empty() ? "<empty>" : specularView);
+            specularView.empty() ? "<empty>" : specularView,
+            provenance);
+
+        if (!hadPreviousState ||
+            previousState.diffuse != currentState.diffuse ||
+            previousState.normal != currentState.normal ||
+            previousState.glow != currentState.glow ||
+            previousState.specular != currentState.specular) {
+            spdlog::info(
+                "Texture change detected reason={} root={} geom={} driverHint={} provenance={} diffuse={} -> {} normal={} -> {} glow={} -> {} specular={} -> {}",
+                reason,
+                rootLabel,
+                geometryName,
+                DetermineTextureDriverHint(reason),
+                provenance,
+                hadPreviousState ? previousState.diffuse : "<unset>",
+                diffuseView.empty() ? "<empty>" : diffuseView,
+                hadPreviousState ? previousState.normal : "<unset>",
+                normalView.empty() ? "<empty>" : normalView,
+                hadPreviousState ? previousState.glow : "<unset>",
+                glowView.empty() ? "<empty>" : glowView,
+                hadPreviousState ? previousState.specular : "<unset>",
+                specularView.empty() ? "<empty>" : specularView);
+        }
         ++loggedGeometryCount;
     }
 
@@ -581,8 +738,15 @@ bool ApplySelectedNormalMapTextureSet(bool persist, std::string_view applySource
         return false;
     }
 
+    const auto applyId = g_applySequence.fetch_add(1) + 1;
+    const std::string tracedApplySource = std::format(
+        "{}|applyId={}|driver=ModernPhysiqueSystem.dll",
+        applySource,
+        applyId);
+
     spdlog::info(
-        "ApplySelectedNormalMapTextureSet attempting bodyPath={} handPath={} persist={} source={} thin={:.3f} muscular={:.3f} heavy={:.3f}",
+        "ApplySelectedNormalMapTextureSet attempting applyId={} bodyPath={} handPath={} persist={} source={} thin={:.3f} muscular={:.3f} heavy={:.3f}",
+        applyId,
         hasNormalPath ? g_selectedNormalMapPath : "<no-path>",
         hasHandNormalPath ? g_selectedHandNormalMapPath : "<no-hand-path>",
         persist,
@@ -599,14 +763,15 @@ bool ApplySelectedNormalMapTextureSet(bool persist, std::string_view applySource
             g_selectedNormalMapPath,
             handNormalPath,
             persist,
-            applySource)) {
+            tracedApplySource)) {
         g_appliedNormalMapDispatchKey = dispatchKey;
-        SchedulePlayerTextureSnapshotSeries(applySource, persist);
+        SchedulePlayerTextureSnapshotSeries(tracedApplySource, persist);
         return true;
     }
 
     spdlog::warn(
-        "ApplySelectedNormalMapTextureSet failed to dispatch unified normal paths body={} hand={} persist={} source={}",
+        "ApplySelectedNormalMapTextureSet failed to dispatch unified normal paths applyId={} body={} hand={} persist={} source={}",
+        applyId,
         hasNormalPath ? g_selectedNormalMapPath : "<no-path>",
         hasHandNormalPath ? g_selectedHandNormalMapPath : "<no-hand-path>",
         persist,
