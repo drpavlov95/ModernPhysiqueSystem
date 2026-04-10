@@ -1,10 +1,12 @@
 #pragma once
 
 #include <cstdint>
+#include "RE/B/BSFixedString.h"
 
 namespace RE
 {
 	class TESObjectREFR;
+	class TESNPC;
 	class NiAVObject;
 }
 
@@ -114,7 +116,49 @@ public:
 	virtual skee_u64 ClearMorphCache() = 0;
 };
 
+class IFaceMorphInterface : public IPluginInterface
+{
+public:
+	enum
+	{
+		kCurrentPluginVersion = 1
+	};
+
+	virtual float GetMorphValueByName(RE::TESNPC* npc, const RE::BSFixedString& name) = 0;
+	virtual void SetMorphValue(RE::TESNPC* npc, const RE::BSFixedString& name, float value) = 0;
+};
+
+class IAddonAttachmentInterface;
+
+class IActorUpdateManager : public IPluginInterface
+{
+public:
+	enum
+	{
+		kPluginVersion1 = 1,
+		kPluginVersion2,
+		kCurrentPluginVersion = kPluginVersion2
+	};
+
+	using FlushCallback = void (*)(skee_u32* formId, skee_u32 length);
+
+	virtual void AddBodyUpdate(skee_u32 formId) = 0;
+	virtual void AddTransformUpdate(skee_u32 formId) = 0;
+	virtual void AddOverlayUpdate(skee_u32 formId) = 0;
+	virtual void AddNodeOverrideUpdate(skee_u32 formId) = 0;
+	virtual void AddWeaponOverrideUpdate(skee_u32 formId) = 0;
+	virtual void AddAddonOverrideUpdate(skee_u32 formId) = 0;
+	virtual void AddSkinOverrideUpdate(skee_u32 formId) = 0;
+	virtual void Flush() = 0;
+	virtual void AddInterface(IAddonAttachmentInterface* observer) = 0;
+	virtual void RemoveInterface(IAddonAttachmentInterface* observer) = 0;
+	virtual bool RegisterFlushCallback(const char* key, FlushCallback cb) = 0;
+	virtual bool UnregisterFlushCallback(const char* key) = 0;
+};
+
 inline constexpr const char* kRaceMenuBodyMorphInterfaceName = "BodyMorph";
+inline constexpr const char* kRaceMenuFaceMorphInterfaceName = "FaceMorph";
+inline constexpr const char* kRaceMenuActorUpdateManagerInterfaceName = "ActorUpdateManager";
 
 inline IBodyMorphInterface* GetBodyMorphInterfaceFromMap(IInterfaceMap* interfaceMap)
 {
@@ -128,4 +172,32 @@ inline IBodyMorphInterface* GetBodyMorphInterfaceFromMap(IInterfaceMap* interfac
 	}
 
 	return static_cast<IBodyMorphInterface*>(pluginInterface);
+}
+
+inline IFaceMorphInterface* GetFaceMorphInterfaceFromMap(IInterfaceMap* interfaceMap)
+{
+	if (!interfaceMap) {
+		return nullptr;
+	}
+
+	auto* pluginInterface = interfaceMap->QueryInterface(kRaceMenuFaceMorphInterfaceName);
+	if (!pluginInterface) {
+		return nullptr;
+	}
+
+	return static_cast<IFaceMorphInterface*>(pluginInterface);
+}
+
+inline IActorUpdateManager* GetActorUpdateManagerInterfaceFromMap(IInterfaceMap* interfaceMap)
+{
+	if (!interfaceMap) {
+		return nullptr;
+	}
+
+	auto* pluginInterface = interfaceMap->QueryInterface(kRaceMenuActorUpdateManagerInterfaceName);
+	if (!pluginInterface) {
+		return nullptr;
+	}
+
+	return static_cast<IActorUpdateManager*>(pluginInterface);
 }
