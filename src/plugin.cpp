@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 #include <mutex>
+#include <array>
 #include <unordered_map>
 #include <format>
 
@@ -33,10 +34,19 @@ bool g_menuOpen = false;
 
 IInterfaceMap* g_raceMenuInterfaceMap = nullptr;
 IBodyMorphInterface* g_bodyMorphInterface = nullptr;
+IFaceMorphInterface* g_faceMorphInterface = nullptr;
+IActorUpdateManager* g_actorUpdateManagerInterface = nullptr;
+bool g_faceMorphUnavailableLogged = false;
+bool g_actorUpdateManagerUnavailableLogged = false;
+bool g_actorUpdateManagerCallsDisabled = false;
+bool g_faceSliderBridgeUnavailableLogged = false;
 
 constexpr const char* kMorphThinName = "RM_Thin";
 constexpr const char* kMorphMuscularName = "RM_Muscular";
 constexpr const char* kMorphFatName = "RM_Heavy";
+constexpr const char* kFaceSliderThinName = "RLY_Thin";
+constexpr const char* kFaceSliderMuscularName = "RLY_Muscular";
+constexpr const char* kFaceSliderFatName = "RLY_Heavy";
 constexpr const char* kMorphKey = "RleyBodyMorphs";
 constexpr const char* kRaceMenuName = "RaceSex Menu";
 constexpr const char* kPhysiqueCategoryKey = "rley_physique";
@@ -130,6 +140,10 @@ bool GetPhysiqueDesiredVisible();
 bool TryAcquireRaceMenuBodyMorphInterface();
 bool ApplyMorphsNative(float thin, float muscular, float fat);
 bool RefreshCachedMorphStateFromNative();
+void TryAcquireOptionalRaceMenuInterfaces();
+void SetFaceMorphValue(RE::TESNPC* actorBase, const char* sliderName, float value);
+void FlushRaceMenuActorUpdates(RE::PlayerCharacter* player);
+bool ApplyFaceMorphsViaRaceMenuSliders(float thin, float muscular, float fat);
 void ResetRaceMenuBridgeState();
 bool RegisterScaleform(RE::GFxMovieView* a_view, RE::GFxValue* a_root);
 void SetWeightSyncValue(float value);
@@ -1427,6 +1441,344 @@ void SetOrClearMorph(RE::TESObjectREFR* actor, const char* morphName, float valu
     }
 }
 
+void SetFaceMorphValue(RE::TESNPC* actorBase, const char* sliderName, float value)
+{
+    if (!g_faceMorphInterface || !actorBase || !sliderName) {
+        return;
+    }
+
+    const float clampedValue = std::fabs(value) <= kMorphClearThreshold ? 0.0f : value;
+    g_faceMorphInterface->SetMorphValue(actorBase, RE::BSFixedString(sliderName), clampedValue);
+}
+
+std::string NormalizeSliderLabel(std::string_view label)
+{
+    std::string normalized;
+    normalized.reserve(label.size());
+
+    for (const char ch : label) {
+        const unsigned char uch = static_cast<unsigned char>(ch);
+        if (ch == '$' || ch == ' ' || ch == '_' || ch == '-' || ch == '\t') {
+            continue;
+        }
+
+        normalized.push_back(static_cast<char>(std::tolower(uch)));
+    }
+
+    return normalized;
+}
+
+bool IsMatchingFaceSliderLabel(std::string_view normalizedLabel, std::string_view target)
+{
+    if (target == "thin") {
+        return normalizedLabel == "facerlythin" ||
+               normalizedLabel == "rlythin" ||
+               normalizedLabel == "facermthin" ||
+               normalizedLabel == "rmthin" ||
+               normalizedLabel == "facethin" ||
+               normalizedLabel == "thinface";
+    }
+
+    if (target == "muscular") {
+        return normalizedLabel == "facerlymuscular" ||
+               normalizedLabel == "rlymuscular" ||
+               normalizedLabel == "facermmuscular" ||
+               normalizedLabel == "rmmuscular" ||
+               normalizedLabel == "facemuscular" ||
+               normalizedLabel == "muscularface";
+    }
+
+    if (target == "heavy") {
+        return normalizedLabel == "facerlyheavy" ||
+               normalizedLabel == "rlyheavy" ||
+               normalizedLabel == "facermheavy" ||
+               normalizedLabel == "rmheavy" ||
+               normalizedLabel == "faceheavy" ||
+               normalizedLabel == "heavyface";
+    }
+
+    return false;
+}
+
+bool TryGetRaceMenuItemList(RE::GFxMovieView*& outMovie, RE::GFxValue& outItemList, RE::GFxValue& outEntryList)
+{
+    auto* ui = RE::UI::GetSingleton();
+    if (!ui) {
+        return false;
+    }
+
+    auto raceMenu = ui->GetMenu(kRaceMenuName);
+    if (!raceMenu || !raceMenu->uiMovie) {
+        return false;
+    }
+
+    outMovie = raceMenu->uiMovie.get();
+    if (!outMovie) {
+        return false;
+    }
+
+    constexpr std::array itemListPaths{
+        "_root.RaceSexMenuBaseInstance.RaceSexPanelsInstance.itemList",
+        "_root.RaceMenuInstance.itemList",
+        "_root.itemList"
+    };
+
+    for (const char* path : itemListPaths) {
+        if (!outMovie->GetVariable(std::addressof(outItemList), path) || !outItemList.IsObject()) {
+            continue;
+        }
+
+        if (outItemList.GetMember("entryList", std::addressof(outEntryList)) && outEntryList.IsArray()) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool TryGetRaceMenuGameDelegate(RE::GFxMovieView* movie, RE::GFxValue& outDelegate)
+{
+    if (!movie) {
+        return false;
+    }
+
+    constexpr std::array delegatePaths{
+        "gfx.io.GameDelegate",
+        "_global.gfx.io.GameDelegate",
+        "_root.gfx.io.GameDelegate"
+    };
+
+    for (const char* path : delegatePaths) {
+        if (movie->GetVariable(std::addressof(outDelegate), path) && outDelegate.IsObject()) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool ApplySingleFaceSliderViaRaceMenu(
+    RE::GFxMovieView* movie,
+    RE::GFxValue& itemList,
+    RE::GFxValue& entryList,
+    std::string_view targetSlider,
+    float value)
+{
+    if (!movie || !entryList.IsArray()) {
+        return false;
+    }
+
+    const std::uint32_t entryCount = entryList.GetArraySize();
+    const double clampedValue = std::clamp(static_cast<double>(value), 0.0, 1.0);
+
+    for (std::uint32_t index = 0; index < entryCount; ++index) {
+        RE::GFxValue entry;
+        if (!entryList.GetElement(index, std::addressof(entry)) || !entry.IsObject()) {
+            continue;
+        }
+
+        const auto entryMatchesTarget = [&](const char* memberName) {
+            RE::GFxValue memberValue;
+            if (!entry.GetMember(memberName, std::addressof(memberValue)) || !memberValue.IsString()) {
+                return false;
+            }
+
+            const char* rawMember = memberValue.GetString();
+            const std::string normalizedMember = NormalizeSliderLabel(rawMember ? rawMember : "");
+            return IsMatchingFaceSliderLabel(normalizedMember, targetSlider);
+        };
+
+        RE::GFxValue textValue;
+        const bool hasText = entry.GetMember("text", std::addressof(textValue)) && textValue.IsString();
+        const char* rawLabel = hasText ? textValue.GetString() : "";
+
+        bool matchedTarget = false;
+        if (hasText) {
+            const std::string normalizedLabel = NormalizeSliderLabel(rawLabel ? rawLabel : "");
+            matchedTarget = IsMatchingFaceSliderLabel(normalizedLabel, targetSlider);
+        }
+
+        if (!matchedTarget && !entryMatchesTarget("callbackName") && !entryMatchesTarget("name")) {
+            continue;
+        }
+
+        RE::GFxValue callbackNameValue;
+        if (!entry.GetMember("callbackName", std::addressof(callbackNameValue)) || !callbackNameValue.IsString()) {
+            spdlog::warn("RaceMenu slider {} missing callbackName; skipping", targetSlider);
+            return false;
+        }
+
+        const char* callbackName = callbackNameValue.GetString();
+        if (!callbackName || callbackName[0] == '\0') {
+            spdlog::warn("RaceMenu slider {} had an empty callbackName; skipping", targetSlider);
+            return false;
+        }
+
+        RE::GFxValue delegate;
+        if (!TryGetRaceMenuGameDelegate(movie, delegate)) {
+            if (!g_faceSliderBridgeUnavailableLogged) {
+                spdlog::warn("Unable to resolve RaceMenu GameDelegate for face slider bridge");
+                g_faceSliderBridgeUnavailableLogged = true;
+            }
+            return false;
+        }
+
+        RE::GFxValue sliderIdValue;
+        const bool hasSliderId = entry.GetMember("sliderID", std::addressof(sliderIdValue)) && sliderIdValue.IsNumber();
+
+        RE::GFxValue newPosition;
+        newPosition.SetNumber(clampedValue);
+        entry.SetMember("position", newPosition);
+
+        RE::GFxValue callbackArguments;
+        movie->CreateArray(std::addressof(callbackArguments));
+
+        RE::GFxValue valueArgument;
+        valueArgument.SetNumber(clampedValue);
+        callbackArguments.PushBack(valueArgument);
+
+        if (hasSliderId) {
+            RE::GFxValue sliderIdArgument;
+            sliderIdArgument.SetNumber(sliderIdValue.GetNumber());
+            callbackArguments.PushBack(sliderIdArgument);
+        }
+
+        std::array<RE::GFxValue, 2> invokeArguments{};
+        invokeArguments[0].SetString(callbackName);
+        invokeArguments[1] = callbackArguments;
+
+        const bool callbackInvoked = delegate.Invoke(
+            "call",
+            nullptr,
+            invokeArguments.data(),
+            static_cast<std::size_t>(invokeArguments.size()));
+
+        if (!callbackInvoked) {
+            spdlog::warn(
+                "RaceMenu slider callback dispatch failed slider={} callback={} value={:.3f}",
+                targetSlider,
+                callbackName,
+                clampedValue);
+            return false;
+        }
+
+        if (entry.HasMember("internalCallback")) {
+            entry.Invoke("internalCallback");
+        }
+
+        if (itemList.IsObject()) {
+            itemList.Invoke("requestUpdate");
+        }
+
+        spdlog::info(
+            "Applied RaceMenu face slider {} label={} callback={} value={:.3f}",
+            targetSlider,
+            rawLabel ? rawLabel : "<empty>",
+            callbackName,
+            clampedValue);
+        g_faceSliderBridgeUnavailableLogged = false;
+        return true;
+    }
+
+    spdlog::warn("Failed to find RaceMenu face slider entry {}", targetSlider);
+    return false;
+}
+
+bool ApplyFaceMorphsViaRaceMenuSliders(float thin, float muscular, float fat)
+{
+    RE::GFxMovieView* movie = nullptr;
+    RE::GFxValue itemList;
+    RE::GFxValue entryList;
+    if (!TryGetRaceMenuItemList(movie, itemList, entryList)) {
+        if (!g_faceSliderBridgeUnavailableLogged) {
+            spdlog::warn("RaceMenu item list was unavailable for face slider bridge");
+            g_faceSliderBridgeUnavailableLogged = true;
+        }
+        return false;
+    }
+
+    const bool thinOk = ApplySingleFaceSliderViaRaceMenu(movie, itemList, entryList, "thin", thin);
+    const bool muscularOk = ApplySingleFaceSliderViaRaceMenu(movie, itemList, entryList, "muscular", muscular);
+    const bool fatOk = ApplySingleFaceSliderViaRaceMenu(movie, itemList, entryList, "heavy", fat);
+
+    if (itemList.IsObject()) {
+        itemList.Invoke("requestUpdate");
+    }
+
+    return thinOk && muscularOk && fatOk;
+}
+
+void FlushRaceMenuActorUpdates(RE::PlayerCharacter* player)
+{
+    if (g_actorUpdateManagerCallsDisabled) {
+        return;
+    }
+
+    if (!g_actorUpdateManagerInterface) {
+        if (!g_actorUpdateManagerUnavailableLogged) {
+            spdlog::warn(
+                "RaceMenu ActorUpdateManager interface unavailable; face morph values may not apply immediately");
+            g_actorUpdateManagerUnavailableLogged = true;
+        }
+        return;
+    }
+
+    const auto interfaceValue = reinterpret_cast<std::uintptr_t>(g_actorUpdateManagerInterface);
+    if (interfaceValue < 0x10000 || interfaceValue == std::numeric_limits<std::uintptr_t>::max()) {
+        spdlog::error(
+            "RaceMenu ActorUpdateManager pointer looked invalid ({}); disabling calls",
+            static_cast<const void*>(g_actorUpdateManagerInterface));
+        g_actorUpdateManagerCallsDisabled = true;
+        return;
+    }
+
+    __try {
+        if (player) {
+            g_actorUpdateManagerInterface->AddBodyUpdate(player->GetFormID());
+        }
+
+        g_actorUpdateManagerInterface->Flush();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        const auto exceptionCode = static_cast<std::uint32_t>(GetExceptionCode());
+        spdlog::error(
+            "RaceMenu ActorUpdateManager call raised SEH exception 0x{:08X}; disabling calls",
+            exceptionCode);
+        g_actorUpdateManagerCallsDisabled = true;
+    }
+}
+
+void TryAcquireOptionalRaceMenuInterfaces()
+{
+    if (!g_raceMenuInterfaceMap) {
+        return;
+    }
+
+    if (!g_faceMorphInterface) {
+        g_faceMorphInterface = GetFaceMorphInterfaceFromMap(g_raceMenuInterfaceMap);
+        if (g_faceMorphInterface) {
+            g_faceMorphUnavailableLogged = false;
+            spdlog::info("Acquired RaceMenu FaceMorph interface");
+        } else if (!g_faceMorphUnavailableLogged) {
+            spdlog::warn("RaceMenu FaceMorph interface unavailable");
+            g_faceMorphUnavailableLogged = true;
+        }
+    }
+
+    if (!g_actorUpdateManagerInterface) {
+        g_actorUpdateManagerInterface = GetActorUpdateManagerInterfaceFromMap(g_raceMenuInterfaceMap);
+        if (g_actorUpdateManagerInterface) {
+            g_actorUpdateManagerUnavailableLogged = false;
+            g_actorUpdateManagerCallsDisabled = false;
+            spdlog::info(
+                "Acquired RaceMenu ActorUpdateManager interface ptr={}",
+                static_cast<const void*>(g_actorUpdateManagerInterface));
+        } else if (!g_actorUpdateManagerUnavailableLogged) {
+            spdlog::warn("RaceMenu ActorUpdateManager interface unavailable");
+            g_actorUpdateManagerUnavailableLogged = true;
+        }
+    }
+}
+
 class RleyModCallbackHandler : public RE::BSTEventSink<SKSE::ModCallbackEvent>
 {
 public:
@@ -1455,6 +1807,7 @@ RleyModCallbackHandler g_modCallbackHandler;
 bool TryAcquireRaceMenuBodyMorphInterface()
 {
     if (g_bodyMorphInterface) {
+        TryAcquireOptionalRaceMenuInterfaces();
         return true;
     }
 
@@ -1482,6 +1835,7 @@ bool TryAcquireRaceMenuBodyMorphInterface()
     }
 
     g_raceMenuInterfaceMap = exchangeMessage.interfaceMap;
+    TryAcquireOptionalRaceMenuInterfaces();
     g_bodyMorphInterface = GetBodyMorphInterfaceFromMap(g_raceMenuInterfaceMap);
 
     if (!g_bodyMorphInterface) {
@@ -1538,6 +1892,20 @@ bool ApplyMorphsNative(float thin, float muscular, float fat)
     if (!player) {
         spdlog::error("PlayerCharacter singleton was null");
         return false;
+    }
+
+    const bool faceAppliedViaRaceMenuSliders = ApplyFaceMorphsViaRaceMenuSliders(thin, muscular, fat);
+    if (!faceAppliedViaRaceMenuSliders && g_faceMorphInterface) {
+        if (auto* actorBase = player->GetActorBase()) {
+            SetFaceMorphValue(actorBase, kFaceSliderThinName, thin);
+            SetFaceMorphValue(actorBase, kFaceSliderMuscularName, muscular);
+            SetFaceMorphValue(actorBase, kFaceSliderFatName, fat);
+            player->Update3DModel();
+            spdlog::warn(
+                "Face slider bridge unavailable; fell back to direct face morph value writes");
+        } else {
+            spdlog::warn("Player actor base was null while applying RaceMenu face morphs");
+        }
     }
 
     if (!player->Get3D()) {
