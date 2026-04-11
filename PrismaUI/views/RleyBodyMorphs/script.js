@@ -18,9 +18,9 @@ let morphPreviewTimeout = null;
 let morphCommitTimeout = null;
 let lastPreviewSendTime = 0;
 
-const MORPH_PREVIEW_INTERVAL = 16;
-const MORPH_COMMIT_DELAY = 120;
-const MORPH_DELTA_THRESHOLD = 0.001;
+const MORPH_PREVIEW_INTERVAL = 24;
+const MORPH_COMMIT_DELAY = 140;
+const MORPH_DELTA_THRESHOLD = 0.002;
 
 let pendingMorphValues = { thin: 0, muscular: 0, fat: 0 };
 let lastPreviewSentValues = null;
@@ -896,8 +896,24 @@ resetButton.addEventListener("click", () => {
     updateKnobFromMorphs(values.thin, values.muscular, values.fat);
     updateReadout(values);
 
-    flushPreviewNow();
-    flushCommitNow();
+    if (morphPreviewTimeout !== null) {
+        clearTimeout(morphPreviewTimeout);
+        morphPreviewTimeout = null;
+    }
+
+    if (morphCommitTimeout !== null) {
+        clearTimeout(morphCommitTimeout);
+        morphCommitTimeout = null;
+    }
+
+    // Force reset through both paths even if dedupe state got out of sync.
+    lastPreviewSentValues = null;
+    lastCommitSentValues = null;
+    window.onMorphsPreview("0,0,0");
+    window.onMorphsCommit("0,0,0");
+    lastPreviewSentValues = cloneMorphValues(values);
+    lastCommitSentValues = cloneMorphValues(values);
+    lastPreviewSendTime = performance.now();
 });
 
 snapToggleEl.addEventListener("change", () => {

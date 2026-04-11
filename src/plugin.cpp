@@ -65,8 +65,11 @@ constexpr std::uint32_t kBodyCategoryFlag = 4;
 constexpr float kMorphApplyDeltaThreshold = 0.001f;
 constexpr float kMorphClearThreshold = 0.0005f;
 constexpr float kWeightSyncThreshold = 0.0005f;
+constexpr float kPreviewMorphQuantizeStep = 0.01f;
 constexpr int kThinSoftThresholdPercent = 20;
-constexpr int kPreviewNormalDebounceTicks = 12;
+constexpr int kPreviewNormalDebounceTicks = 18;
+constexpr std::uint64_t kPreviewApplyMinIntervalMs = 33;
+constexpr bool kEnableTextureSnapshotDiagnostics = false;
 
 std::atomic<bool> g_shouldPhysiqueBeVisible = false;
 std::atomic<bool> g_raceMenuOpen = false;
@@ -75,6 +78,7 @@ std::atomic<int> g_deferredTextureApplyTicks = 0;
 std::atomic<int> g_deferredTextureApplyRepeats = 0;
 std::atomic<int> g_previewNormalApplyTicks = 0;
 std::atomic<std::uint64_t> g_applySequence = 0;
+std::atomic<std::uint64_t> g_lastPreviewApplyTimeMs = 0;
 
 struct TextureSnapshotRequest
 {
@@ -90,10 +94,23 @@ struct TrackedGeometryTextureState
     std::string specular;
 };
 
+struct FaceSliderBinding
+{
+    bool resolved = false;
+    std::string callbackName;
+    std::string label;
+    double sliderId = 0.0;
+    bool hasSliderId = false;
+};
+
 std::mutex g_textureSnapshotLock;
 std::vector<TextureSnapshotRequest> g_textureSnapshotRequests;
 std::mutex g_trackedTextureStateLock;
 std::unordered_map<std::string, TrackedGeometryTextureState> g_lastTrackedGeometryTextures;
+RE::GFxMovieView* g_cachedFaceSliderMovie = nullptr;
+FaceSliderBinding g_faceSliderThinBinding;
+FaceSliderBinding g_faceSliderMuscularBinding;
+FaceSliderBinding g_faceSliderHeavyBinding;
 
 struct AxisNormalMapEntry
 {
@@ -138,12 +155,12 @@ void SetPhysiqueDesiredVisible(bool visible);
 bool GetPhysiqueDesiredVisible();
 
 bool TryAcquireRaceMenuBodyMorphInterface();
-bool ApplyMorphsNative(float thin, float muscular, float fat);
+bool ApplyMorphsNative(float thin, float muscular, float fat, bool isCommit);
 bool RefreshCachedMorphStateFromNative();
 void TryAcquireOptionalRaceMenuInterfaces();
 void SetFaceMorphValue(RE::TESNPC* actorBase, const char* sliderName, float value);
 void FlushRaceMenuActorUpdates(RE::PlayerCharacter* player);
-bool ApplyFaceMorphsViaRaceMenuSliders(float thin, float muscular, float fat);
+bool ApplyFaceMorphsViaRaceMenuSliders(float thin, float muscular, float fat, bool requestUiUpdate);
 void ResetRaceMenuBridgeState();
 bool RegisterScaleform(RE::GFxMovieView* a_view, RE::GFxValue* a_root);
 void SetWeightSyncValue(float value);
@@ -166,7 +183,7 @@ void SchedulePlayerTextureSnapshotSeries(std::string_view applySource, bool pers
 void UpdateScheduledTextureSnapshots();
 void QueuePlayerTextureSnapshotTask(std::string reason);
 void LogPlayerTextureSnapshot(std::string_view reason);
-void ApplyVertexDiffs(RE::PlayerCharacter* player);
+void ApplyVertexDiffs(RE::PlayerCharacter* player, bool includeFirstPerson);
 
 std::vector<std::string_view> SplitStringView(std::string_view value, char delimiter)
 {
@@ -578,6 +595,10 @@ void LogTrackedTextureSnapshotForRoot(RE::NiAVObject* root, std::string_view roo
 
 void LogPlayerTextureSnapshot(std::string_view reason)
 {
+    if (!kEnableTextureSnapshotDiagnostics) {
+        return;
+    }
+
     auto* player = RE::PlayerCharacter::GetSingleton();
     if (!player) {
         spdlog::warn("Texture snapshot {} skipped because player was unavailable", reason);
@@ -590,6 +611,10 @@ void LogPlayerTextureSnapshot(std::string_view reason)
 
 void QueuePlayerTextureSnapshotTask(std::string reason)
 {
+    if (!kEnableTextureSnapshotDiagnostics) {
+        return;
+    }
+
     auto* taskInterface = SKSE::GetTaskInterface();
     if (!taskInterface) {
         spdlog::error("Failed to get SKSE task interface for player texture snapshot {}", reason);
@@ -603,6 +628,10 @@ void QueuePlayerTextureSnapshotTask(std::string reason)
 
 void SchedulePlayerTextureSnapshotSeries(std::string_view applySource, bool persist)
 {
+    if (!kEnableTextureSnapshotDiagnostics) {
+        return;
+    }
+
     const std::string baseReason =
         std::string(applySource) + (persist ? "|persist=1" : "|persist=0");
 
@@ -620,6 +649,10 @@ void SchedulePlayerTextureSnapshotSeries(std::string_view applySource, bool pers
 
 void UpdateScheduledTextureSnapshots()
 {
+    if (!kEnableTextureSnapshotDiagnostics) {
+        return;
+    }
+
     std::vector<std::string> dueReasons;
 
     {
@@ -706,7 +739,7 @@ bool DispatchSelectedNormalPathsStatic(
             persist,
             applySource);
     } else {
-        spdlog::info(
+        spdlog::debug(
             "Dispatched static texture bridge call {}.{} with bodyNormalPath={}, handNormalPath={}, persist={}, source={}",
             kTextureBridgeScriptName,
             kTextureBridgeApplySelectedNormalPathsFunction,
@@ -736,7 +769,7 @@ bool ApplySelectedNormalMapTextureSet(bool persist, std::string_view applySource
     }
 
     if (!dispatchKey.empty() && dispatchKey == g_appliedNormalMapDispatchKey) {
-        spdlog::info(
+        spdlog::debug(
             "ApplySelectedNormalMapTextureSet skipped because the requested normals are already applied (source={}, persist={}, bodyPath={}, handPath={}, thin={:.3f}, muscular={:.3f}, heavy={:.3f})",
             applySource,
             persist,
@@ -762,7 +795,7 @@ bool ApplySelectedNormalMapTextureSet(bool persist, std::string_view applySource
         applySource,
         applyId);
 
-    spdlog::info(
+    spdlog::debug(
         "ApplySelectedNormalMapTextureSet attempting applyId={} bodyPath={} handPath={} persist={} source={} thin={:.3f} muscular={:.3f} heavy={:.3f}",
         applyId,
         hasNormalPath ? g_selectedNormalMapPath : "<no-path>",
@@ -846,14 +879,14 @@ void SchedulePreviewNormalApply(int ticks)
     }
 
     g_previewNormalApplyTicks.store(ticks);
-    spdlog::info("Scheduled preview normal apply in {} ticks", ticks);
+    spdlog::debug("Scheduled preview normal apply in {} ticks", ticks);
 }
 
 void CancelPreviewNormalApply()
 {
     const int previousTicks = g_previewNormalApplyTicks.exchange(0);
     if (previousTicks > 0) {
-        spdlog::info("Canceled pending preview normal apply (remainingTicks={})", previousTicks);
+        spdlog::debug("Canceled pending preview normal apply (remainingTicks={})", previousTicks);
     }
 }
 
@@ -1270,7 +1303,7 @@ void UpdateSelectedNormalMapCandidate(float thin, float muscular, float fat)
 
     g_selectedNormalMapPath = nextPath;
     g_selectedHandNormalMapPath = nextHandPath;
-    spdlog::info(
+    spdlog::debug(
         "Selected normal map candidate body={} hand={} using {} for thin={:.3f} muscular={:.3f} heavy={:.3f}",
         g_selectedNormalMapPath,
         g_selectedHandNormalMapPath.empty() ? "<no-hand-path>" : g_selectedHandNormalMapPath,
@@ -1391,6 +1424,17 @@ bool NearlyEqual(float a, float b, float epsilon = kMorphApplyDeltaThreshold)
     return std::fabs(a - b) <= epsilon;
 }
 
+float QuantizeMorphValue(float value, float step)
+{
+    const float clamped = std::clamp(value, 0.0f, 1.0f);
+    if (step <= 0.0f) {
+        return clamped;
+    }
+
+    const float quantized = std::round(clamped / step) * step;
+    return std::clamp(quantized, 0.0f, 1.0f);
+}
+
 bool ParseMorphPayload(const char* argument, float& thin, float& muscular, float& fat)
 {
     if (!argument) {
@@ -1500,6 +1544,100 @@ bool IsMatchingFaceSliderLabel(std::string_view normalizedLabel, std::string_vie
     return false;
 }
 
+void ResetFaceSliderBindingCache()
+{
+    g_cachedFaceSliderMovie = nullptr;
+    g_faceSliderThinBinding = {};
+    g_faceSliderMuscularBinding = {};
+    g_faceSliderHeavyBinding = {};
+}
+
+bool TryResolveFaceSliderBindingFromEntry(
+    RE::GFxValue& entry,
+    std::string_view target,
+    FaceSliderBinding& outBinding)
+{
+    auto matchesMember = [&](const char* memberName, std::string& matchedRawLabel) {
+        RE::GFxValue memberValue;
+        if (!entry.GetMember(memberName, std::addressof(memberValue)) || !memberValue.IsString()) {
+            return false;
+        }
+
+        const char* rawMember = memberValue.GetString();
+        matchedRawLabel = rawMember ? rawMember : "";
+        const std::string normalizedMember = NormalizeSliderLabel(matchedRawLabel);
+        return IsMatchingFaceSliderLabel(normalizedMember, target);
+    };
+
+    std::string matchedRawLabel;
+    const bool matched =
+        matchesMember("text", matchedRawLabel) ||
+        matchesMember("name", matchedRawLabel) ||
+        matchesMember("callbackName", matchedRawLabel);
+    if (!matched) {
+        return false;
+    }
+
+    RE::GFxValue callbackNameValue;
+    if (!entry.GetMember("callbackName", std::addressof(callbackNameValue)) || !callbackNameValue.IsString()) {
+        return false;
+    }
+
+    const char* callbackName = callbackNameValue.GetString();
+    if (!callbackName || callbackName[0] == '\0') {
+        return false;
+    }
+
+    RE::GFxValue sliderIdValue;
+    const bool hasSliderId = entry.GetMember("sliderID", std::addressof(sliderIdValue)) && sliderIdValue.IsNumber();
+
+    outBinding.resolved = true;
+    outBinding.callbackName = callbackName;
+    outBinding.label = matchedRawLabel;
+    outBinding.hasSliderId = hasSliderId;
+    outBinding.sliderId = hasSliderId ? sliderIdValue.GetNumber() : 0.0;
+    return true;
+}
+
+bool ResolveFaceSliderBindings(RE::GFxValue& entryList)
+{
+    g_faceSliderThinBinding = {};
+    g_faceSliderMuscularBinding = {};
+    g_faceSliderHeavyBinding = {};
+
+    if (!entryList.IsArray()) {
+        return false;
+    }
+
+    const std::uint32_t entryCount = entryList.GetArraySize();
+    for (std::uint32_t index = 0; index < entryCount; ++index) {
+        RE::GFxValue entry;
+        if (!entryList.GetElement(index, std::addressof(entry)) || !entry.IsObject()) {
+            continue;
+        }
+
+        if (!g_faceSliderThinBinding.resolved) {
+            TryResolveFaceSliderBindingFromEntry(entry, "thin", g_faceSliderThinBinding);
+        }
+
+        if (!g_faceSliderMuscularBinding.resolved) {
+            TryResolveFaceSliderBindingFromEntry(entry, "muscular", g_faceSliderMuscularBinding);
+        }
+
+        if (!g_faceSliderHeavyBinding.resolved) {
+            TryResolveFaceSliderBindingFromEntry(entry, "heavy", g_faceSliderHeavyBinding);
+        }
+
+        if (g_faceSliderThinBinding.resolved &&
+            g_faceSliderMuscularBinding.resolved &&
+            g_faceSliderHeavyBinding.resolved) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 bool TryGetRaceMenuItemList(RE::GFxMovieView*& outMovie, RE::GFxValue& outItemList, RE::GFxValue& outEntryList)
 {
     auto* ui = RE::UI::GetSingleton();
@@ -1557,134 +1695,59 @@ bool TryGetRaceMenuGameDelegate(RE::GFxMovieView* movie, RE::GFxValue& outDelega
     return false;
 }
 
-bool ApplySingleFaceSliderViaRaceMenu(
+bool ApplyBoundFaceSliderViaRaceMenu(
     RE::GFxMovieView* movie,
-    RE::GFxValue& itemList,
-    RE::GFxValue& entryList,
+    RE::GFxValue& delegate,
     std::string_view targetSlider,
+    const FaceSliderBinding& binding,
     float value)
 {
-    if (!movie || !entryList.IsArray()) {
+    if (!movie || !binding.resolved || binding.callbackName.empty()) {
         return false;
     }
 
-    const std::uint32_t entryCount = entryList.GetArraySize();
     const double clampedValue = std::clamp(static_cast<double>(value), 0.0, 1.0);
+    RE::GFxValue callbackArguments;
+    movie->CreateArray(std::addressof(callbackArguments));
 
-    for (std::uint32_t index = 0; index < entryCount; ++index) {
-        RE::GFxValue entry;
-        if (!entryList.GetElement(index, std::addressof(entry)) || !entry.IsObject()) {
-            continue;
-        }
+    RE::GFxValue valueArgument;
+    valueArgument.SetNumber(clampedValue);
+    callbackArguments.PushBack(valueArgument);
 
-        const auto entryMatchesTarget = [&](const char* memberName) {
-            RE::GFxValue memberValue;
-            if (!entry.GetMember(memberName, std::addressof(memberValue)) || !memberValue.IsString()) {
-                return false;
-            }
-
-            const char* rawMember = memberValue.GetString();
-            const std::string normalizedMember = NormalizeSliderLabel(rawMember ? rawMember : "");
-            return IsMatchingFaceSliderLabel(normalizedMember, targetSlider);
-        };
-
-        RE::GFxValue textValue;
-        const bool hasText = entry.GetMember("text", std::addressof(textValue)) && textValue.IsString();
-        const char* rawLabel = hasText ? textValue.GetString() : "";
-
-        bool matchedTarget = false;
-        if (hasText) {
-            const std::string normalizedLabel = NormalizeSliderLabel(rawLabel ? rawLabel : "");
-            matchedTarget = IsMatchingFaceSliderLabel(normalizedLabel, targetSlider);
-        }
-
-        if (!matchedTarget && !entryMatchesTarget("callbackName") && !entryMatchesTarget("name")) {
-            continue;
-        }
-
-        RE::GFxValue callbackNameValue;
-        if (!entry.GetMember("callbackName", std::addressof(callbackNameValue)) || !callbackNameValue.IsString()) {
-            spdlog::warn("RaceMenu slider {} missing callbackName; skipping", targetSlider);
-            return false;
-        }
-
-        const char* callbackName = callbackNameValue.GetString();
-        if (!callbackName || callbackName[0] == '\0') {
-            spdlog::warn("RaceMenu slider {} had an empty callbackName; skipping", targetSlider);
-            return false;
-        }
-
-        RE::GFxValue delegate;
-        if (!TryGetRaceMenuGameDelegate(movie, delegate)) {
-            if (!g_faceSliderBridgeUnavailableLogged) {
-                spdlog::warn("Unable to resolve RaceMenu GameDelegate for face slider bridge");
-                g_faceSliderBridgeUnavailableLogged = true;
-            }
-            return false;
-        }
-
-        RE::GFxValue sliderIdValue;
-        const bool hasSliderId = entry.GetMember("sliderID", std::addressof(sliderIdValue)) && sliderIdValue.IsNumber();
-
-        RE::GFxValue newPosition;
-        newPosition.SetNumber(clampedValue);
-        entry.SetMember("position", newPosition);
-
-        RE::GFxValue callbackArguments;
-        movie->CreateArray(std::addressof(callbackArguments));
-
-        RE::GFxValue valueArgument;
-        valueArgument.SetNumber(clampedValue);
-        callbackArguments.PushBack(valueArgument);
-
-        if (hasSliderId) {
-            RE::GFxValue sliderIdArgument;
-            sliderIdArgument.SetNumber(sliderIdValue.GetNumber());
-            callbackArguments.PushBack(sliderIdArgument);
-        }
-
-        std::array<RE::GFxValue, 2> invokeArguments{};
-        invokeArguments[0].SetString(callbackName);
-        invokeArguments[1] = callbackArguments;
-
-        const bool callbackInvoked = delegate.Invoke(
-            "call",
-            nullptr,
-            invokeArguments.data(),
-            static_cast<std::size_t>(invokeArguments.size()));
-
-        if (!callbackInvoked) {
-            spdlog::warn(
-                "RaceMenu slider callback dispatch failed slider={} callback={} value={:.3f}",
-                targetSlider,
-                callbackName,
-                clampedValue);
-            return false;
-        }
-
-        if (entry.HasMember("internalCallback")) {
-            entry.Invoke("internalCallback");
-        }
-
-        if (itemList.IsObject()) {
-            itemList.Invoke("requestUpdate");
-        }
-
-        spdlog::info(
-            "Applied RaceMenu face slider {} label={} callback={} value={:.3f}",
-            targetSlider,
-            rawLabel ? rawLabel : "<empty>",
-            callbackName,
-            clampedValue);
-        g_faceSliderBridgeUnavailableLogged = false;
-        return true;
+    if (binding.hasSliderId) {
+        RE::GFxValue sliderIdArgument;
+        sliderIdArgument.SetNumber(binding.sliderId);
+        callbackArguments.PushBack(sliderIdArgument);
     }
 
-    spdlog::warn("Failed to find RaceMenu face slider entry {}", targetSlider);
-    return false;
+    std::array<RE::GFxValue, 2> invokeArguments{};
+    invokeArguments[0].SetString(binding.callbackName.c_str());
+    invokeArguments[1] = callbackArguments;
+
+    const bool callbackInvoked = delegate.Invoke(
+        "call",
+        nullptr,
+        invokeArguments.data(),
+        static_cast<std::size_t>(invokeArguments.size()));
+    if (!callbackInvoked) {
+        spdlog::warn(
+            "RaceMenu slider callback dispatch failed slider={} callback={} value={:.3f}",
+            targetSlider,
+            binding.callbackName,
+            clampedValue);
+        return false;
+    }
+
+    spdlog::debug(
+        "Applied RaceMenu face slider {} label={} callback={} value={:.3f}",
+        targetSlider,
+        binding.label.empty() ? "<unknown>" : binding.label,
+        binding.callbackName,
+        clampedValue);
+    return true;
 }
 
-bool ApplyFaceMorphsViaRaceMenuSliders(float thin, float muscular, float fat)
+bool ApplyFaceMorphsViaRaceMenuSliders(float thin, float muscular, float fat, bool requestUiUpdate)
 {
     RE::GFxMovieView* movie = nullptr;
     RE::GFxValue itemList;
@@ -1697,15 +1760,61 @@ bool ApplyFaceMorphsViaRaceMenuSliders(float thin, float muscular, float fat)
         return false;
     }
 
-    const bool thinOk = ApplySingleFaceSliderViaRaceMenu(movie, itemList, entryList, "thin", thin);
-    const bool muscularOk = ApplySingleFaceSliderViaRaceMenu(movie, itemList, entryList, "muscular", muscular);
-    const bool fatOk = ApplySingleFaceSliderViaRaceMenu(movie, itemList, entryList, "heavy", fat);
+    const bool movieChanged = movie != g_cachedFaceSliderMovie;
+    if (movieChanged) {
+        ResetFaceSliderBindingCache();
+        g_cachedFaceSliderMovie = movie;
+    }
 
-    if (itemList.IsObject()) {
+    const bool haveCachedBindings =
+        g_faceSliderThinBinding.resolved &&
+        g_faceSliderMuscularBinding.resolved &&
+        g_faceSliderHeavyBinding.resolved;
+
+    if (!haveCachedBindings && !ResolveFaceSliderBindings(entryList)) {
+        if (!g_faceSliderBridgeUnavailableLogged) {
+            spdlog::warn("Failed to resolve RaceMenu face slider bindings for thin/muscular/heavy");
+            g_faceSliderBridgeUnavailableLogged = true;
+        }
+        return false;
+    }
+
+    RE::GFxValue delegate;
+    if (!TryGetRaceMenuGameDelegate(movie, delegate)) {
+        if (!g_faceSliderBridgeUnavailableLogged) {
+            spdlog::warn("Unable to resolve RaceMenu GameDelegate for face slider bridge");
+            g_faceSliderBridgeUnavailableLogged = true;
+        }
+        return false;
+    }
+
+    auto dispatchAll = [&](RE::GFxValue& dispatchDelegate) {
+        const bool thinOk = ApplyBoundFaceSliderViaRaceMenu(movie, dispatchDelegate, "thin", g_faceSliderThinBinding, thin);
+        const bool muscularOk = ApplyBoundFaceSliderViaRaceMenu(movie, dispatchDelegate, "muscular", g_faceSliderMuscularBinding, muscular);
+        const bool fatOk = ApplyBoundFaceSliderViaRaceMenu(movie, dispatchDelegate, "heavy", g_faceSliderHeavyBinding, fat);
+        return thinOk && muscularOk && fatOk;
+    };
+
+    bool allApplied = dispatchAll(delegate);
+    if (!allApplied) {
+        g_faceSliderThinBinding = {};
+        g_faceSliderMuscularBinding = {};
+        g_faceSliderHeavyBinding = {};
+
+        if (ResolveFaceSliderBindings(entryList)) {
+            allApplied = dispatchAll(delegate);
+        }
+    }
+
+    if (allApplied && requestUiUpdate && itemList.IsObject()) {
         itemList.Invoke("requestUpdate");
     }
 
-    return thinOk && muscularOk && fatOk;
+    if (allApplied) {
+        g_faceSliderBridgeUnavailableLogged = false;
+    }
+
+    return allApplied;
 }
 
 void FlushRaceMenuActorUpdates(RE::PlayerCharacter* player)
@@ -1867,7 +1976,7 @@ bool RefreshCachedMorphStateFromNative()
     return true;
 }
 
-void ApplyVertexDiffs(RE::PlayerCharacter* player)
+void ApplyVertexDiffs(RE::PlayerCharacter* player, bool includeFirstPerson)
 {
     if (!g_bodyMorphInterface || !player) {
         return;
@@ -1877,12 +1986,14 @@ void ApplyVertexDiffs(RE::PlayerCharacter* player)
         g_bodyMorphInterface->ApplyVertexDiff(player, root, false);
     }
 
-    if (auto* firstPersonRoot = player->Get3D(true)) {
-        g_bodyMorphInterface->ApplyVertexDiff(player, firstPersonRoot, false);
+    if (includeFirstPerson) {
+        if (auto* firstPersonRoot = player->Get3D(true)) {
+            g_bodyMorphInterface->ApplyVertexDiff(player, firstPersonRoot, false);
+        }
     }
 }
 
-bool ApplyMorphsNative(float thin, float muscular, float fat)
+bool ApplyMorphsNative(float thin, float muscular, float fat, bool isCommit)
 {
     if (!TryAcquireRaceMenuBodyMorphInterface()) {
         return false;
@@ -1894,13 +2005,19 @@ bool ApplyMorphsNative(float thin, float muscular, float fat)
         return false;
     }
 
-    const bool faceAppliedViaRaceMenuSliders = ApplyFaceMorphsViaRaceMenuSliders(thin, muscular, fat);
+    const bool faceAppliedViaRaceMenuSliders = ApplyFaceMorphsViaRaceMenuSliders(
+        thin,
+        muscular,
+        fat,
+        isCommit);
     if (!faceAppliedViaRaceMenuSliders && g_faceMorphInterface) {
         if (auto* actorBase = player->GetActorBase()) {
             SetFaceMorphValue(actorBase, kFaceSliderThinName, thin);
             SetFaceMorphValue(actorBase, kFaceSliderMuscularName, muscular);
             SetFaceMorphValue(actorBase, kFaceSliderFatName, fat);
-            player->Update3DModel();
+            if (isCommit) {
+                player->Update3DModel();
+            }
             spdlog::warn(
                 "Face slider bridge unavailable; fell back to direct face morph value writes");
         } else {
@@ -1916,8 +2033,8 @@ bool ApplyMorphsNative(float thin, float muscular, float fat)
     SetOrClearMorph(player, kMorphMuscularName, muscular);
     SetOrClearMorph(player, kMorphFatName, fat);
 
-    g_bodyMorphInterface->UpdateModelWeight(player, true);
-    ApplyVertexDiffs(player);
+    g_bodyMorphInterface->UpdateModelWeight(player, isCommit);
+    ApplyVertexDiffs(player, isCommit);
     return true;
 }
 
@@ -1958,7 +2075,7 @@ bool ApplyWeightToCurrentDirection(float weight)
     CacheMorphState(thin, muscular, fat);
 
     if (!unchanged) {
-        if (!ApplyMorphsNative(thin, muscular, fat)) {
+        if (!ApplyMorphsNative(thin, muscular, fat, false)) {
             return false;
         }
 
@@ -2087,19 +2204,24 @@ bool RegisterScaleform(RE::GFxMovieView* a_view, RE::GFxValue* a_root)
 void ResetRaceMenuBridgeState()
 {
     g_raceMenuOpen.store(false);
+    ResetFaceSliderBindingCache();
+    g_faceSliderBridgeUnavailableLogged = false;
 }
 
 void OnMorphsPreview(const char* argument)
 {
-    float thin = 0.0f;
-    float muscular = 0.0f;
-    float fat = 0.0f;
+    float rawThin = 0.0f;
+    float rawMuscular = 0.0f;
+    float rawFat = 0.0f;
 
-    if (!ParseMorphPayload(argument, thin, muscular, fat)) {
+    if (!ParseMorphPayload(argument, rawThin, rawMuscular, rawFat)) {
         spdlog::error("OnMorphsPreview got invalid payload");
         return;
     }
 
+    const float thin = QuantizeMorphValue(rawThin, kPreviewMorphQuantizeStep);
+    const float muscular = QuantizeMorphValue(rawMuscular, kPreviewMorphQuantizeStep);
+    const float fat = QuantizeMorphValue(rawFat, kPreviewMorphQuantizeStep);
     const bool unchanged = IsSameAsCached(thin, muscular, fat);
     CacheMorphState(thin, muscular, fat);
 
@@ -2107,7 +2229,14 @@ void OnMorphsPreview(const char* argument)
         return;
     }
 
-    if (!ApplyMorphsNative(thin, muscular, fat)) {
+    const std::uint64_t nowMs = GetTickCount64();
+    const std::uint64_t previousApplyMs = g_lastPreviewApplyTimeMs.load();
+    if (nowMs > previousApplyMs && (nowMs - previousApplyMs) < kPreviewApplyMinIntervalMs) {
+        return;
+    }
+    g_lastPreviewApplyTimeMs.store(nowMs);
+
+    if (!ApplyMorphsNative(thin, muscular, fat, false)) {
         return;
     }
 
@@ -2125,13 +2254,10 @@ void OnMorphsCommit(const char* argument)
         return;
     }
 
-    const bool unchanged = IsSameAsCached(thin, muscular, fat);
     CacheMorphState(thin, muscular, fat);
 
-    if (!unchanged) {
-        if (!ApplyMorphsNative(thin, muscular, fat)) {
-            return;
-        }
+    if (!ApplyMorphsNative(thin, muscular, fat, true)) {
+        return;
     }
 
     CancelPreviewNormalApply();
