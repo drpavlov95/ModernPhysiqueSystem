@@ -25,6 +25,7 @@ const MORPH_DELTA_THRESHOLD = 0.001;
 let pendingMorphValues = { thin: 0, muscular: 0, fat: 0 };
 let lastPreviewSentValues = null;
 let lastCommitSentValues = null;
+let morphTraceSequence = 0;
 let snapEnabled = true;
 
 let snapLineState = {
@@ -437,6 +438,11 @@ function hasMeaningfulDelta(a, b) {
     );
 }
 
+function nextMorphTraceId(source) {
+    morphTraceSequence += 1;
+    return `${source}-${Date.now()}-${morphTraceSequence}`;
+}
+
 function sendPreviewMorphs(values) {
     const safe = cloneMorphValues(values);
 
@@ -444,7 +450,8 @@ function sendPreviewMorphs(values) {
         return;
     }
 
-    window.onMorphsPreview(`${safe.thin},${safe.muscular},${safe.fat}`);
+    const traceId = nextMorphTraceId("preview");
+    window.onMorphsPreview(`${safe.thin},${safe.muscular},${safe.fat},${traceId}`);
     lastPreviewSentValues = safe;
 }
 
@@ -455,7 +462,8 @@ function sendCommitMorphs(values) {
         return;
     }
 
-    window.onMorphsCommit(`${safe.thin},${safe.muscular},${safe.fat}`);
+    const traceId = nextMorphTraceId("commit");
+    window.onMorphsCommit(`${safe.thin},${safe.muscular},${safe.fat},${traceId}`);
     lastCommitSentValues = safe;
 }
 

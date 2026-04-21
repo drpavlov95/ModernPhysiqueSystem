@@ -43,6 +43,26 @@ add_commonlibsse_plugin(${PROJECT_NAME} SOURCES ${headers} ${sources}) # <--- sp
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_23) # <--- use C++23 standard
 target_precompile_headers(${PROJECT_NAME} PRIVATE src/PCH.h) # <--- PCH.h is required!
 
+find_package(Git QUIET)
+set(MPS_GIT_COMMIT "unknown")
+if(GIT_FOUND)
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" rev-parse --short=12 HEAD
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        OUTPUT_VARIABLE MPS_GIT_COMMIT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+endif()
+
+string(TIMESTAMP MPS_BUILD_STAMP "%Y-%m-%d %H:%M:%S")
+target_compile_definitions(
+    "${PROJECT_NAME}"
+    PRIVATE
+        MPS_GIT_COMMIT="${MPS_GIT_COMMIT}"
+        MPS_BUILD_STAMP="${MPS_BUILD_STAMP}"
+)
+
 target_include_directories(
 	"${PROJECT_NAME}"
 	PRIVATE
