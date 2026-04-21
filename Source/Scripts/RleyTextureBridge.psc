@@ -1,17 +1,27 @@
 Scriptname RleyTextureBridge Hidden
 
+Bool Function IsVerboseLoggingEnabled() global
+	Return False
+EndFunction
+
+Function TraceVerbose(String logText) global
+	If IsVerboseLoggingEnabled()
+		Debug.Trace(logText)
+	EndIf
+EndFunction
+
 Function ApplySelectedNormalPaths(String bodyNormalTexturePath, String handNormalTexturePath, Bool persist, String applySource = "unspecified") global
 	String prefix = "[ModernPhysiqueSystem] [RleyTextureBridge] "
-	Debug.Trace(prefix + "ApplySelectedNormalPaths called for body=" + bodyNormalTexturePath + " hand=" + handNormalTexturePath + " persist=" + persist + " source=" + applySource)
+	TraceVerbose(prefix + "ApplySelectedNormalPaths called for body=" + bodyNormalTexturePath + " hand=" + handNormalTexturePath + " persist=" + persist + " source=" + applySource)
 
 	Actor playerRef = Game.GetPlayer()
 	If playerRef == None
-		Debug.Trace(prefix + "Abort: player is None")
+		TraceVerbose(prefix + "Abort: player is None")
 		Return
 	EndIf
 
 	If bodyNormalTexturePath == "" && handNormalTexturePath == ""
-		Debug.Trace(prefix + "Abort: body and hand normal texture paths are empty")
+		TraceVerbose(prefix + "Abort: body and hand normal texture paths are empty")
 		Return
 	EndIf
 
@@ -75,7 +85,7 @@ Function ApplySelectedNormalPaths(String bodyNormalTexturePath, String handNorma
 			bodyAddonNamedOverrideBefore = NiOverride.HasOverride(playerRef, True, cotrSkinArmor, cotrBodyAddon, bodyNamedNodeName, stringOverrideKey, normalTextureIndex)
 			usingCotrBodyAddonPath = True
 		Else
-			Debug.Trace(prefix + "Body path falling back to skin override because COtR body addon path is unavailable (skin=" + cotrSkinArmor + ", addon=" + cotrBodyAddon + ", hasSkin=" + hasCotrSkin + ", source=" + applySource + ")")
+			TraceVerbose(prefix + "Body path falling back to skin override because COtR body addon path is unavailable (skin=" + cotrSkinArmor + ", addon=" + cotrBodyAddon + ", hasSkin=" + hasCotrSkin + ", source=" + applySource + ")")
 		EndIf
 	EndIf
 
@@ -86,9 +96,9 @@ Function ApplySelectedNormalPaths(String bodyNormalTexturePath, String handNorma
 		EndIf
 
 		If cotrSkinArmor == None || cotrHandAddon == None
-			Debug.Trace(prefix + "Hand path unresolved: missing COtR skin armor or hand addon (source=" + applySource + ")")
+			TraceVerbose(prefix + "Hand path unresolved: missing COtR skin armor or hand addon (source=" + applySource + ")")
 		ElseIf hasCotrSkin == False
-			Debug.Trace(prefix + "Hand path skipped: COtR skin armor is not present on the player (source=" + applySource + ")")
+			TraceVerbose(prefix + "Hand path skipped: COtR skin armor is not present on the player (source=" + applySource + ")")
 		Else
 			; Armor-addon overrides match by geometry name; for single-geometry addons the key is the empty string.
 			handAddonNode3p = NiOverride.HasArmorAddonNode(playerRef, False, cotrSkinArmor, cotrHandAddon, handNodeName, True)
@@ -182,7 +192,7 @@ Function ApplySelectedNormalPaths(String bodyNormalTexturePath, String handNorma
 		bodyMode = "cotr_body_addon"
 	EndIf
 
-	Debug.Trace(prefix + "Applied selected normal paths body=" + bodyNormalTexturePath + " handRequest=" + handNormalTexturePath + " handApplied=" + resolvedHandNormalTexturePath + " persist=" + persist + " source=" + applySource + " (bodyMode=" + bodyMode + ", handMode=" + handMode + ", bodyNode3p=" + bodyAddonNode3p + ", bodyNode1p=" + bodyAddonNode1p + ", bodyNamedNode3p=" + bodyAddonNamedNode3p + ", bodyNamedNode1p=" + bodyAddonNamedNode1p + ", bodyAddonOverrideBefore=" + bodyAddonOverrideBefore + ", bodyNamedOverrideBefore=" + bodyAddonNamedOverrideBefore + ", body3pBefore=" + bodyThirdPersonOverrideBefore + ", body1pBefore=" + bodyFirstPersonOverrideBefore + ", body3p=" + bodyThirdPersonOverride + ", body1p=" + bodyFirstPersonOverride + ", cotrSkin=" + hasCotrSkin + ", handNode3p=" + handAddonNode3p + ", handNode1p=" + handAddonNode1p + ", handOverrideBefore=" + handAddonOverrideBefore + ", handOverride=" + handAddonOverride + ")")
+	TraceVerbose(prefix + "Applied selected normal paths body=" + bodyNormalTexturePath + " handRequest=" + handNormalTexturePath + " handApplied=" + resolvedHandNormalTexturePath + " persist=" + persist + " source=" + applySource + " (bodyMode=" + bodyMode + ", handMode=" + handMode + ", bodyNode3p=" + bodyAddonNode3p + ", bodyNode1p=" + bodyAddonNode1p + ", bodyNamedNode3p=" + bodyAddonNamedNode3p + ", bodyNamedNode1p=" + bodyAddonNamedNode1p + ", bodyAddonOverrideBefore=" + bodyAddonOverrideBefore + ", bodyNamedOverrideBefore=" + bodyAddonNamedOverrideBefore + ", body3pBefore=" + bodyThirdPersonOverrideBefore + ", body1pBefore=" + bodyFirstPersonOverrideBefore + ", body3p=" + bodyThirdPersonOverride + ", body1p=" + bodyFirstPersonOverride + ", cotrSkin=" + hasCotrSkin + ", handNode3p=" + handAddonNode3p + ", handNode1p=" + handAddonNode1p + ", handOverrideBefore=" + handAddonOverrideBefore + ", handOverride=" + handAddonOverride + ")")
 EndFunction
 
 Function ApplyBodyNormalPath(String normalTexturePath) global
@@ -195,17 +205,17 @@ EndFunction
 
 Function ApplyBodyTextureSet(String textureSetEditorID) global
 	String prefix = "[ModernPhysiqueSystem] [RleyTextureBridge] "
-	Debug.Trace(prefix + "ApplyBodyTextureSet called for " + textureSetEditorID)
+	TraceVerbose(prefix + "ApplyBodyTextureSet called for " + textureSetEditorID)
 
 	Actor playerRef = Game.GetPlayer()
 	TextureSet textureSetForm = PO3_SKSEFunctions.GetFormFromEditorID(textureSetEditorID) as TextureSet
 
 	If playerRef == None || textureSetForm == None
 		If playerRef == None
-			Debug.Trace(prefix + "Abort: player is None")
+			TraceVerbose(prefix + "Abort: player is None")
 		EndIf
 		If textureSetForm == None
-			Debug.Trace(prefix + "Abort: failed to resolve TextureSet " + textureSetEditorID)
+			TraceVerbose(prefix + "Abort: failed to resolve TextureSet " + textureSetEditorID)
 		EndIf
 		Return
 	EndIf
@@ -226,23 +236,23 @@ Function ApplyBodyTextureSet(String textureSetEditorID) global
 
 	If cotrSkinArmor != None && cotrSourceBodyTextureSet != None
 		hasCotrSkin = PO3_SKSEFunctions.HasSkin(playerRef, cotrSkinArmor)
-		Debug.Trace(prefix + "COtR skin present on player = " + hasCotrSkin)
+		TraceVerbose(prefix + "COtR skin present on player = " + hasCotrSkin)
 	Else
-		Debug.Trace(prefix + "COtR path unresolved (missing skin armor or source TXST)")
+		TraceVerbose(prefix + "COtR path unresolved (missing skin armor or source TXST)")
 	EndIf
 
 	If hasCotrSkin
 		PO3_SKSEFunctions.ReplaceArmorTextureSet(playerRef, cotrSkinArmor, cotrSourceBodyTextureSet, textureSetForm)
-		Debug.Trace(prefix + "Applied COtR armor TextureSet swap to " + textureSetEditorID)
+		TraceVerbose(prefix + "Applied COtR armor TextureSet swap to " + textureSetEditorID)
 		applied = True
 	Else
 		Int bodySlotMask = 4
 		PO3_SKSEFunctions.ReplaceSkinTextureSet(playerRef, None, textureSetForm, bodySlotMask)
-		Debug.Trace(prefix + "Applied fallback skin TextureSet swap to " + textureSetEditorID + " on slot mask " + bodySlotMask)
+		TraceVerbose(prefix + "Applied fallback skin TextureSet swap to " + textureSetEditorID + " on slot mask " + bodySlotMask)
 		applied = True
 	EndIf
 
 	playerRef.QueueNiNodeUpdate()
-	Debug.Trace(prefix + "Queued NiNode update for " + textureSetEditorID + " (applied=" + applied + ")")
+	TraceVerbose(prefix + "Queued NiNode update for " + textureSetEditorID + " (applied=" + applied + ")")
 
 EndFunction
