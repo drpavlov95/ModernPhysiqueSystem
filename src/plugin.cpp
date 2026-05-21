@@ -19,6 +19,7 @@
 #include <unordered_map>
 #include <format>
 #include <fstream>
+#include <optional>
 
 #ifndef MPS_GIT_COMMIT
 #define MPS_GIT_COMMIT "unknown"
@@ -28,10 +29,10 @@
 #define MPS_BUILD_STAMP __DATE__ " " __TIME__
 #endif
 
-float g_lastThin = 0.0f;
-float g_lastMuscular = 0.0f;
-float g_lastFat = 0.0f;
-bool g_hasSavedState = false;
+std::atomic<float> g_lastThin = 0.0f;
+std::atomic<float> g_lastMuscular = 0.0f;
+std::atomic<float> g_lastFat = 0.0f;
+std::atomic<bool> g_hasSavedState = false;
 float g_lastDirectionThin = 0.0f;
 float g_lastDirectionMuscular = 1.0f;
 float g_lastDirectionFat = 0.0f;
@@ -39,7 +40,7 @@ bool g_hasSavedDirection = false;
 
 PRISMA_UI_API::IVPrismaUI1* g_prisma = nullptr;
 PrismaView g_view = 0;
-bool g_menuOpen = false;
+std::atomic<bool> g_menuOpen = false;
 
 IInterfaceMap* g_raceMenuInterfaceMap = nullptr;
 IBodyMorphInterface* g_bodyMorphInterface = nullptr;
@@ -99,9 +100,13 @@ constexpr std::uint64_t kPreviewApplyMinIntervalMs = 33;
 constexpr std::uint64_t kFacePreviewApplyMinIntervalMs = 75;
 constexpr std::uint64_t kPreviewFaceVerifyMinIntervalMs = 120;
 constexpr std::uint64_t kCommitFaceVerifyDelayMs = 100;
+constexpr std::uint64_t kActorUpdateFlushMinIntervalMs = 120;
 constexpr std::uint64_t kPendingFaceReapplyInitialDelayMs = 120;
-constexpr std::uint64_t kPendingFaceReapplyRetryDelayMs = 50;
-constexpr int kPendingFaceReapplyMaxAttempts = 240;
+constexpr std::uint64_t kPendingFaceReapplyRetryDelayMs = 300;
+constexpr int kPendingFaceReapplyMaxAttempts = 8;
+constexpr std::uint64_t kFaceSwitchTransitionSettleMs = 1200;
+constexpr std::uint64_t kFaceSwitchTransitionHardCapMs = 3500;
+constexpr int kFaceReadbackDisableThreshold = 3;
 constexpr bool kEnableTextureSnapshotDiagnostics = false;
 
 std::atomic<bool> g_shouldPhysiqueBeVisible = false;
@@ -114,6 +119,7 @@ std::atomic<std::uint64_t> g_applySequence = 0;
 std::atomic<std::uint64_t> g_lastPreviewApplyTimeMs = 0;
 std::atomic<std::uint64_t> g_lastFacePreviewApplyTimeMs = 0;
 std::atomic<std::uint64_t> g_lastFaceVerifyTimeMs = 0;
+std::atomic<std::uint64_t> g_lastActorUpdateFlushMs = 0;
 std::atomic<std::uint64_t> g_morphTraceSequence = 0;
 std::atomic<std::uint64_t> g_previewDispatchSequence = 0;
 std::atomic<std::uint64_t> g_commitDispatchSequence = 0;
@@ -121,6 +127,20 @@ std::atomic<bool> g_pendingRaceMenuFaceReapply = false;
 std::atomic<bool> g_pendingRaceMenuFaceReapplyInFlight = false;
 std::atomic<int> g_pendingRaceMenuFaceReapplyAttempts = 0;
 std::atomic<std::uint64_t> g_pendingRaceMenuFaceReapplyNextMs = 0;
+std::atomic<float> g_pendingRaceMenuFaceReapplyThin = 0.0f;
+std::atomic<float> g_pendingRaceMenuFaceReapplyMuscular = 0.0f;
+std::atomic<float> g_pendingRaceMenuFaceReapplyFat = 0.0f;
+std::atomic<bool> g_pendingRaceMenuFaceReapplyHasValues = false;
+std::atomic<std::uint64_t> g_faceReplayGeneration = 0;
+std::atomic<bool> g_pendingFaceReplayAfterSwitchTransition = false;
+std::atomic<float> g_switchTransitionReplayThin = 0.0f;
+std::atomic<float> g_switchTransitionReplayMuscular = 0.0f;
+std::atomic<float> g_switchTransitionReplayFat = 0.0f;
+std::atomic<bool> g_switchTransitionReplayHasValues = false;
+std::atomic<bool> g_faceSwitchTransitionActive = false;
+std::atomic<std::uint64_t> g_faceSwitchTransitionUntilMs = 0;
+std::atomic<std::uint64_t> g_faceSwitchTransitionStartMs = 0;
+std::atomic<int> g_faceReadbackMismatchStreak = 0;
 thread_local std::string g_activeMorphTraceId;
 
 struct TextureSnapshotRequest
@@ -142,6 +162,7 @@ struct FaceSliderBinding
     bool resolved = false;
     std::string callbackName;
     std::string label;
+    bool hasInternalCallback = false;
     double sliderId = 0.0;
     bool hasSliderId = false;
     std::uint32_t entryIndex = std::numeric_limits<std::uint32_t>::max();
@@ -196,8 +217,7 @@ std::string g_lastFaceBindingSignature;
 bool g_hasFaceBindingSignature = false;
 bool g_hasTrackedRaceMenuSex = false;
 std::uint8_t g_lastTrackedRaceMenuSex = 0xFF;
-bool g_faceBaselineResetPending = false;
-bool g_bodyCategoryActive = false;
+std::atomic<bool> g_bodyCategoryActive = false;
 
 struct AxisNormalMapEntry
 {
@@ -223,6 +243,10 @@ std::vector<ComboNormalMapEntry> g_comboNormalMaps;
 std::vector<AxisNormalMapEntry> g_handMuscularNormalMaps;
 bool g_normalMapCatalogLoaded = false;
 bool g_handNormalMapCatalogLoaded = false;
+std::string g_loadedBodyNormalMapDataFolder;
+std::string g_loadedBodyNormalMapRelativeFolder;
+std::string g_loadedHandNormalMapDataFolder;
+std::string g_loadedHandNormalMapRelativeFolder;
 AxisNormalMapEntry g_handBaseNormalMap;
 bool g_hasHandBaseNormalMap = false;
 std::string g_selectedNormalMapPath;
@@ -242,14 +266,14 @@ void SetPhysiqueDesiredVisible(bool visible);
 bool GetPhysiqueDesiredVisible();
 
 bool TryAcquireRaceMenuBodyMorphInterface();
-bool ApplyMorphsNative(float thin, float muscular, float fat, bool isCommit);
+bool ApplyMorphsNative(float thin, float muscular, float fat, bool isCommit, bool* outFaceApplySucceeded = nullptr);
 bool RefreshCachedMorphStateFromNative();
 void TryAcquireOptionalRaceMenuInterfaces();
-void SetFaceMorphValue(RE::TESNPC* actorBase, const char* sliderName, float value);
+void SetFaceMorphValue(RE::TESNPC* actorBase, const char* sliderName, float value, std::string_view reason = {});
 FaceMorphTriplet ReadFaceMorphValues(RE::TESNPC* actorBase);
 bool AreFaceMorphValuesClose(const FaceMorphTriplet& a, const FaceMorphTriplet& b);
 bool ApplyFaceMorphsDirectStable(float thin, float muscular, float fat, bool isCommit);
-void FlushRaceMenuActorUpdates(RE::PlayerCharacter* player);
+bool FlushRaceMenuActorUpdates(RE::PlayerCharacter* player, bool force = false, std::string_view reason = {});
 bool ApplyFaceMorphsViaRaceMenuSliders(float thin, float muscular, float fat, bool requestUiUpdate);
 bool TryReadFaceSliderValue(std::string_view targetSlider, float& outValue);
 const char* FaceSliderDispatchModeName(FaceSliderDispatchMode mode);
@@ -274,8 +298,8 @@ bool RegisterScaleform(RE::GFxMovieView* a_view, RE::GFxValue* a_root);
 void SetWeightSyncValue(float value);
 float GetWeightSyncValue();
 bool ApplyWeightToCurrentDirection(float weight);
-void LoadNormalMapCatalog();
-void LoadHandNormalMapCatalog();
+void LoadNormalMapCatalog(std::string_view dataFolder, std::string_view relativeFolder);
+void LoadHandNormalMapCatalog(std::string_view dataFolder, std::string_view relativeFolder);
 std::string SelectNormalMapRelativePath(float thin, float muscular, float fat);
 std::string SelectHandNormalMapRelativePath(float thin, float muscular, float fat);
 void UpdateSelectedNormalMapCandidate(float thin, float muscular, float fat);
@@ -295,59 +319,459 @@ void ApplyVertexDiffs(RE::PlayerCharacter* player, bool includeFirstPerson);
 std::string BuildGeneratedMorphTraceId(std::string_view source);
 std::string_view CurrentMorphTraceId();
 void CacheMorphState(float thin, float muscular, float fat);
-void QueueRaceMenuFaceReapply(std::string_view reason, std::uint64_t delayMs = kPendingFaceReapplyInitialDelayMs);
+void QueueRaceMenuFaceReapply(
+    std::string_view reason,
+    std::uint64_t delayMs = kPendingFaceReapplyInitialDelayMs,
+    float thin = std::numeric_limits<float>::quiet_NaN(),
+    float muscular = std::numeric_limits<float>::quiet_NaN(),
+    float fat = std::numeric_limits<float>::quiet_NaN());
+void PauseRaceMenuFaceReapplySchedule(std::string_view reason);
 void ClearRaceMenuFaceReapply(std::string_view reason);
 void UpdatePendingRaceMenuFaceReapply();
+void QueueNativeFaceRestore(std::string_view reason, float thin, float muscular, float fat);
 bool ShouldVerifyFaceReadback(bool isCommit);
 bool VerifyFaceReadback(float thin, float muscular, float fat, bool isCommit);
+bool TryFlushRaceMenuActorUpdatesSEH(IActorUpdateManager* updateManager, RE::PlayerCharacter* player, std::uint32_t& outExceptionCode);
+void BeginFaceSwitchTransition(std::string_view reason, std::uint64_t settleMs = kFaceSwitchTransitionSettleMs);
+void EndFaceSwitchTransition(std::string_view reason);
+bool IsFaceSwitchTransitionActive();
+void PollFaceSwitchTransitionExpiry();
+std::uint64_t AdvanceFaceReplayGeneration(std::string_view reason);
 
-void MarkRaceMenuFaceStateDirty(std::string_view reason)
+std::uint64_t AdvanceFaceReplayGeneration(std::string_view reason)
 {
+    const std::uint64_t generation = g_faceReplayGeneration.fetch_add(1) + 1;
+    spdlog::info(
+        "Face replay generation advanced reason={} generation={}",
+        reason.empty() ? "<none>" : std::string(reason),
+        generation);
+    return generation;
+}
+
+void MarkRaceMenuFaceStateDirty(std::string_view reason, bool pauseBurst = true)
+{
+    const bool pendingBefore = g_pendingRaceMenuFaceReapply.load();
+    const int attemptsBefore = g_pendingRaceMenuFaceReapplyAttempts.load();
+    const std::uint64_t nextBefore = g_pendingRaceMenuFaceReapplyNextMs.load();
+    const bool inFlightBefore = g_pendingRaceMenuFaceReapplyInFlight.load();
+    const bool hasValuesBefore = g_pendingRaceMenuFaceReapplyHasValues.load();
+    const std::uint64_t generation = AdvanceFaceReplayGeneration(reason.empty() ? "face_state_dirty" : reason);
+
     ResetFaceSliderBindingCache();
     g_faceSliderDispatchMode = FaceSliderDispatchMode::kUnknown;
-    g_faceBaselineResetPending = true;
-    g_hasSavedState = false;
+    g_hasSavedState.store(false);
+
+    // Discard stale queued morph tasks captured before RaceMenu rebuilt
+    // slider bindings (sex/race/category transitions).
+    ++g_previewDispatchSequence;
+    ++g_commitDispatchSequence;
+    g_lastPreviewApplyTimeMs.store(0);
+    g_lastFacePreviewApplyTimeMs.store(0);
+
+    if (pauseBurst) {
+        PauseRaceMenuFaceReapplySchedule("face_state_dirty");
+    }
 
     // Force fresh rebind/reprobe logs on the next wheel apply pass.
     g_faceSliderBridgeUnavailableLogged = false;
 
     if (!reason.empty()) {
-        spdlog::info("Marked RaceMenu face state dirty reason={}", reason);
+        const bool pendingAfter = g_pendingRaceMenuFaceReapply.load();
+        const int attemptsAfter = g_pendingRaceMenuFaceReapplyAttempts.load();
+        const std::uint64_t nextAfter = g_pendingRaceMenuFaceReapplyNextMs.load();
+        const bool inFlightAfter = g_pendingRaceMenuFaceReapplyInFlight.load();
+        spdlog::info(
+            "Marked RaceMenu face state dirty reason={} pauseBurst={} generation={} pendingBefore={} pendingAfter={} attemptsBefore={} attemptsAfter={} nextBefore={} nextAfter={} inFlightBefore={} inFlightAfter={} hadValues={} pendingSurvived={}",
+            reason,
+            pauseBurst ? 1 : 0,
+            generation,
+            pendingBefore ? 1 : 0,
+            pendingAfter ? 1 : 0,
+            attemptsBefore,
+            attemptsAfter,
+            nextBefore,
+            nextAfter,
+            inFlightBefore ? 1 : 0,
+            inFlightAfter ? 1 : 0,
+            hasValuesBefore ? 1 : 0,
+            (pendingBefore && pendingAfter) ? 1 : 0);
     }
-
-    QueueRaceMenuFaceReapply(reason);
 }
 
-void QueueRaceMenuFaceReapply(std::string_view reason, std::uint64_t delayMs)
+void BeginFaceSwitchTransition(std::string_view reason, std::uint64_t settleMs)
 {
     if (!g_raceMenuOpen.load()) {
         return;
     }
 
     const std::uint64_t nowMs = GetTickCount64();
+    const std::uint64_t clampedSettleMs = std::clamp<std::uint64_t>(settleMs, 100, 5000);
+    const std::uint64_t requestedUntilMs = nowMs + clampedSettleMs;
+    const std::uint64_t previousUntilMs = g_faceSwitchTransitionUntilMs.load();
+    const bool wasActive = g_faceSwitchTransitionActive.exchange(true);
+    std::uint64_t startMs = wasActive ? g_faceSwitchTransitionStartMs.load() : nowMs;
+    if (startMs == 0 || !wasActive) {
+        startMs = nowMs;
+        g_faceSwitchTransitionStartMs.store(startMs);
+    }
+
+    const std::uint64_t hardCapUntilMs = startMs + kFaceSwitchTransitionHardCapMs;
+    std::uint64_t effectiveUntilMs = std::max(previousUntilMs, requestedUntilMs);
+    if (effectiveUntilMs > hardCapUntilMs) {
+        effectiveUntilMs = hardCapUntilMs;
+    }
+    g_faceSwitchTransitionUntilMs.store(effectiveUntilMs);
+
+    // During switch/reinit callback dispatch can be unstable.
+    g_faceSliderDispatchMode = FaceSliderDispatchMode::kUnknown;
+
+    // Ensure we perform exactly one post-transition face replay using the
+    // latest captured target values instead of dispatching repeatedly while
+    // RaceMenu is rebuilding slider state.
+    g_pendingFaceReplayAfterSwitchTransition.store(true);
+
+    // Snapshot replay target for post-transition dispatch. This must not rely
+    // on g_hasSavedState because dirty-marking intentionally clears that flag.
+    float replayThin = 0.0f;
+    float replayMuscular = 0.0f;
+    float replayFat = 0.0f;
+
+    // Always snapshot from g_lastThin — it is updated by CacheMorphState on every
+    // apply and therefore always reflects the most recently committed wheel values.
+    // Pending reapply values may belong to a prior (possibly stale) burst and would
+    // overwrite a fresher snapshot captured by the caller just before BeginFaceSwitchTransition.
+    replayThin     = std::clamp(g_lastThin.load(),     0.0f, 1.0f);
+    replayMuscular = std::clamp(g_lastMuscular.load(), 0.0f, 1.0f);
+    replayFat      = std::clamp(g_lastFat.load(),      0.0f, 1.0f);
+
+    g_switchTransitionReplayThin.store(replayThin);
+    g_switchTransitionReplayMuscular.store(replayMuscular);
+    g_switchTransitionReplayFat.store(replayFat);
+    g_switchTransitionReplayHasValues.store(true);
+
+    spdlog::info(
+        "Entered face switch transition reason={} activeBefore={} generation={} settleMs={} untilMs={} startMs={} hardCapUntilMs={} replayValues=({:.3f},{:.3f},{:.3f})",
+        reason.empty() ? "<none>" : std::string(reason),
+        wasActive ? 1 : 0,
+        g_faceReplayGeneration.load(),
+        clampedSettleMs,
+        effectiveUntilMs,
+        startMs,
+        hardCapUntilMs,
+        replayThin,
+        replayMuscular,
+        replayFat);
+}
+
+void EndFaceSwitchTransition(std::string_view reason)
+{
+    if (!g_faceSwitchTransitionActive.exchange(false)) {
+        return;
+    }
+
+    g_faceSwitchTransitionUntilMs.store(0);
+    g_faceSwitchTransitionStartMs.store(0);
+    spdlog::info(
+        "Exited face switch transition reason={} generation={} pendingReplayAfterSwitch={} pendingValues={}",
+        reason.empty() ? "<none>" : std::string(reason),
+        g_faceReplayGeneration.load(),
+        g_pendingFaceReplayAfterSwitchTransition.load() ? 1 : 0,
+        g_pendingRaceMenuFaceReapplyHasValues.load() ? 1 : 0);
+
+    if (reason != "settled" || !g_raceMenuOpen.load()) {
+        g_pendingFaceReplayAfterSwitchTransition.store(false);
+        g_switchTransitionReplayHasValues.store(false);
+        return;
+    }
+
+    const bool shouldReplay = g_pendingFaceReplayAfterSwitchTransition.exchange(false);
+    if (!shouldReplay) {
+        return;
+    }
+
+    float replayThin = std::numeric_limits<float>::quiet_NaN();
+    float replayMuscular = std::numeric_limits<float>::quiet_NaN();
+    float replayFat = std::numeric_limits<float>::quiet_NaN();
+
+    if (g_pendingRaceMenuFaceReapplyHasValues.load()) {
+        replayThin = std::clamp(g_pendingRaceMenuFaceReapplyThin.load(), 0.0f, 1.0f);
+        replayMuscular = std::clamp(g_pendingRaceMenuFaceReapplyMuscular.load(), 0.0f, 1.0f);
+        replayFat = std::clamp(g_pendingRaceMenuFaceReapplyFat.load(), 0.0f, 1.0f);
+    } else if (g_switchTransitionReplayHasValues.load()) {
+        replayThin = std::clamp(g_switchTransitionReplayThin.load(), 0.0f, 1.0f);
+        replayMuscular = std::clamp(g_switchTransitionReplayMuscular.load(), 0.0f, 1.0f);
+        replayFat = std::clamp(g_switchTransitionReplayFat.load(), 0.0f, 1.0f);
+    }
+
+    g_switchTransitionReplayHasValues.store(false);
+    if (!std::isfinite(replayThin) || !std::isfinite(replayMuscular) || !std::isfinite(replayFat)) {
+        return;
+    }
+
+    QueueRaceMenuFaceReapply(
+        "switch_transition_settled_replay",
+        25,
+        replayThin,
+        replayMuscular,
+        replayFat);
+
+    // GFx burst above handles face geometry restore. Do NOT call SetFaceMorphValue
+    // here: SKEE crashes (AV at skee64.dll+0x60afb) if called during or shortly
+    // after a male body rebuild, even after the 1200ms settle. The SKSE task from
+    // a previous switch can also fire during the next switch's rebuild window before
+    // our Papyrus BeginFaceSwitchTransition callback has updated the guard flag.
+}
+
+bool IsFaceSwitchTransitionActive()
+{
+    return g_raceMenuOpen.load() && g_faceSwitchTransitionActive.load();
+}
+
+void PollFaceSwitchTransitionExpiry()
+{
+    if (!g_raceMenuOpen.load() || !g_faceSwitchTransitionActive.load()) {
+        return;
+    }
+
+    const std::uint64_t nowMs = GetTickCount64();
+    const std::uint64_t startMs = g_faceSwitchTransitionStartMs.load();
+    if (startMs != 0 && nowMs >= (startMs + kFaceSwitchTransitionHardCapMs)) {
+        EndFaceSwitchTransition("hard_cap");
+        return;
+    }
+
+    const std::uint64_t untilMs = g_faceSwitchTransitionUntilMs.load();
+    if (nowMs >= untilMs) {
+        EndFaceSwitchTransition("settled");
+    }
+}
+
+void QueueRaceMenuFaceReapply(
+    std::string_view reason,
+    std::uint64_t delayMs,
+    float thin,
+    float muscular,
+    float fat)
+{
+    if (!g_raceMenuOpen.load()) {
+        return;
+    }
+
+    const std::uint64_t nowMs = GetTickCount64();
+    const std::uint64_t generation = g_faceReplayGeneration.load();
     const std::uint64_t clampedDelayMs = std::min<std::uint64_t>(delayMs, 5000);
+    const bool hasExplicitValues =
+        std::isfinite(thin) &&
+        std::isfinite(muscular) &&
+        std::isfinite(fat);
+    const bool hasStoredValues = g_pendingRaceMenuFaceReapplyHasValues.load();
+    const bool hasSavedStateFallback = g_hasSavedState.load();
+
+    if (!hasExplicitValues && !hasStoredValues && !hasSavedStateFallback) {
+        spdlog::debug(
+            "QueueRaceMenuFaceReapply skipped reason={} delayMs={} generation={} pending={} hasStoredValues={} hasSavedState=0 cause=no_target_values",
+            reason.empty() ? "<none>" : std::string(reason),
+            clampedDelayMs,
+            generation,
+            g_pendingRaceMenuFaceReapply.load() ? 1 : 0,
+            hasStoredValues ? 1 : 0);
+        return;
+    }
+
+    const float targetThin = hasExplicitValues ?
+        std::clamp(thin, 0.0f, 1.0f) :
+        (hasStoredValues ?
+            std::clamp(g_pendingRaceMenuFaceReapplyThin.load(), 0.0f, 1.0f) :
+            std::clamp(g_lastThin.load(), 0.0f, 1.0f));
+    const float targetMuscular = hasExplicitValues ?
+        std::clamp(muscular, 0.0f, 1.0f) :
+        (hasStoredValues ?
+            std::clamp(g_pendingRaceMenuFaceReapplyMuscular.load(), 0.0f, 1.0f) :
+            std::clamp(g_lastMuscular.load(), 0.0f, 1.0f));
+    const float targetFat = hasExplicitValues ?
+        std::clamp(fat, 0.0f, 1.0f) :
+        (hasStoredValues ?
+            std::clamp(g_pendingRaceMenuFaceReapplyFat.load(), 0.0f, 1.0f) :
+            std::clamp(g_lastFat.load(), 0.0f, 1.0f));
+
+    // If a reapply cycle is already active, keep the in-flight budget and just
+    // refresh targets. Resetting attempts on every queue call can create a
+    // permanent retry storm during sex-switch transition.
+    if (g_pendingRaceMenuFaceReapply.load() && g_pendingRaceMenuFaceReapplyAttempts.load() > 0) {
+        if (hasExplicitValues) {
+            g_pendingRaceMenuFaceReapplyThin.store(targetThin);
+            g_pendingRaceMenuFaceReapplyMuscular.store(targetMuscular);
+            g_pendingRaceMenuFaceReapplyFat.store(targetFat);
+            g_pendingRaceMenuFaceReapplyHasValues.store(true);
+        }
+
+        const std::uint64_t requestedNextMs = nowMs + clampedDelayMs;
+        const std::uint64_t currentNextMs = g_pendingRaceMenuFaceReapplyNextMs.load();
+        if (currentNextMs == 0 || requestedNextMs < currentNextMs) {
+            g_pendingRaceMenuFaceReapplyNextMs.store(requestedNextMs);
+        }
+
+        spdlog::debug(
+            "QueueRaceMenuFaceReapply updated reason={} attemptsReset=0 delayMs={} nextMs={} generation={} values=({:.3f},{:.3f},{:.3f}) attemptsLeft={} inFlight={}",
+            reason.empty() ? "<none>" : std::string(reason),
+            clampedDelayMs,
+            g_pendingRaceMenuFaceReapplyNextMs.load(),
+            generation,
+            targetThin,
+            targetMuscular,
+            targetFat,
+            g_pendingRaceMenuFaceReapplyAttempts.load(),
+            g_pendingRaceMenuFaceReapplyInFlight.load() ? 1 : 0);
+        return;
+    }
+
+    g_pendingRaceMenuFaceReapplyThin.store(targetThin);
+    g_pendingRaceMenuFaceReapplyMuscular.store(targetMuscular);
+    g_pendingRaceMenuFaceReapplyFat.store(targetFat);
     g_pendingRaceMenuFaceReapply.store(true);
     g_pendingRaceMenuFaceReapplyAttempts.store(kPendingFaceReapplyMaxAttempts);
     g_pendingRaceMenuFaceReapplyNextMs.store(nowMs + clampedDelayMs);
+    g_pendingRaceMenuFaceReapplyHasValues.store(true);
 
     spdlog::info(
-        "Queued pending RaceMenu face reapply reason={} delayMs={} values=({:.3f},{:.3f},{:.3f})",
+        "QueueRaceMenuFaceReapply scheduled reason={} attemptsReset=1 delayMs={} nextMs={} generation={} values=({:.3f},{:.3f},{:.3f}) attemptsLeft={}",
         reason.empty() ? "<none>" : std::string(reason),
         clampedDelayMs,
-        g_lastThin,
-        g_lastMuscular,
-        g_lastFat);
+        g_pendingRaceMenuFaceReapplyNextMs.load(),
+        generation,
+        targetThin,
+        targetMuscular,
+        targetFat,
+        g_pendingRaceMenuFaceReapplyAttempts.load());
+}
+
+void PauseRaceMenuFaceReapplySchedule(std::string_view reason)
+{
+    const bool pendingBefore = g_pendingRaceMenuFaceReapply.load();
+    const int attemptsBefore = g_pendingRaceMenuFaceReapplyAttempts.load();
+    const std::uint64_t nextBefore = g_pendingRaceMenuFaceReapplyNextMs.load();
+    const bool inFlightBefore = g_pendingRaceMenuFaceReapplyInFlight.load();
+    g_pendingRaceMenuFaceReapply.store(false);
+    g_pendingRaceMenuFaceReapplyAttempts.store(0);
+    g_pendingRaceMenuFaceReapplyNextMs.store(0);
+    g_pendingRaceMenuFaceReapplyInFlight.store(false);
+
+    if (!reason.empty()) {
+        spdlog::debug(
+            "Paused pending RaceMenu face reapply schedule reason={} generation={} pendingBefore={} attemptsBefore={} nextBefore={} inFlightBefore={}",
+            reason,
+            g_faceReplayGeneration.load(),
+            pendingBefore ? 1 : 0,
+            attemptsBefore,
+            nextBefore,
+            inFlightBefore ? 1 : 0);
+    }
 }
 
 void ClearRaceMenuFaceReapply(std::string_view reason)
 {
-    g_pendingRaceMenuFaceReapply.store(false);
-    g_pendingRaceMenuFaceReapplyAttempts.store(0);
-    g_pendingRaceMenuFaceReapplyNextMs.store(0);
+    PauseRaceMenuFaceReapplySchedule({});
+    g_pendingRaceMenuFaceReapplyHasValues.store(false);
+    g_pendingRaceMenuFaceReapplyThin.store(0.0f);
+    g_pendingRaceMenuFaceReapplyMuscular.store(0.0f);
+    g_pendingRaceMenuFaceReapplyFat.store(0.0f);
 
     if (!reason.empty()) {
         spdlog::debug("Cleared pending RaceMenu face reapply reason={}", reason);
     }
+}
+
+void QueueNativeFaceRestore(std::string_view reason, float thin, float muscular, float fat)
+{
+    if (!g_raceMenuOpen.load()) {
+        return;
+    }
+
+    const std::uint64_t capturedGeneration = g_faceReplayGeneration.load();
+    if (reason == "rsm_initialized_early_write") {
+        spdlog::warn(
+            "NativeFaceRestore skipped reason={} generation={} cause=diagnostic_gfx_only_path values=({:.3f},{:.3f},{:.3f})",
+            reason,
+            capturedGeneration,
+            std::clamp(thin, 0.0f, 1.0f),
+            std::clamp(muscular, 0.0f, 1.0f),
+            std::clamp(fat, 0.0f, 1.0f));
+        return;
+    }
+
+    auto* taskInterface = SKSE::GetTaskInterface();
+    if (!taskInterface) {
+        spdlog::error("QueueNativeFaceRestore: no SKSE task interface reason={}", reason);
+        return;
+    }
+
+    const float t = std::clamp(thin, 0.0f, 1.0f);
+    const float m = std::clamp(muscular, 0.0f, 1.0f);
+    const float f = std::clamp(fat, 0.0f, 1.0f);
+    const std::string reasonStr(reason);
+
+    spdlog::info(
+        "NativeFaceRestore queued reason={} generation={} values=({:.3f},{:.3f},{:.3f})",
+        reasonStr,
+        capturedGeneration,
+        t,
+        m,
+        f);
+
+    taskInterface->AddTask([t, m, f, reasonStr, capturedGeneration]() {
+        const std::uint64_t currentGeneration = g_faceReplayGeneration.load();
+        spdlog::debug(
+            "NativeFaceRestore task entry reason={} capturedGeneration={} currentGeneration={} raceMenuOpen={} transitionActive={}",
+            reasonStr,
+            capturedGeneration,
+            currentGeneration,
+            g_raceMenuOpen.load() ? 1 : 0,
+            IsFaceSwitchTransitionActive() ? 1 : 0);
+        if (capturedGeneration != currentGeneration) {
+            spdlog::info(
+                "NativeFaceRestore skipped reason={} capturedGeneration={} currentGeneration={} cause=stale_generation",
+                reasonStr,
+                capturedGeneration,
+                currentGeneration);
+            return;
+        }
+
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!player || !g_raceMenuOpen.load()) {
+            spdlog::debug(
+                "NativeFaceRestore skipped reason={} generation={} cause=missing_player_or_menu_closed",
+                reasonStr,
+                capturedGeneration);
+            return;
+        }
+        // Skip if SKEE is mid-rebuild — SetMorphValue crashes (AV in skee64.dll+0x60afb)
+        // when called during the sex switch body rebuild window.
+        if (IsFaceSwitchTransitionActive()) {
+            spdlog::debug(
+                "NativeFaceRestore skipped reason={} generation={} cause=transition_active",
+                reasonStr,
+                capturedGeneration);
+            return;
+        }
+        auto* actorBase = player->GetActorBase();
+        if (!actorBase) {
+            spdlog::debug(
+                "NativeFaceRestore skipped reason={} generation={} cause=missing_actor_base",
+                reasonStr,
+                capturedGeneration);
+            return;
+        }
+        SetFaceMorphValue(actorBase, kFaceSliderThinName, t, reasonStr);
+        SetFaceMorphValue(actorBase, kFaceSliderMuscularName, m, reasonStr);
+        SetFaceMorphValue(actorBase, kFaceSliderFatName, f, reasonStr);
+        spdlog::info(
+            "NativeFaceRestore applied reason={} generation={} values=({:.3f},{:.3f},{:.3f})",
+            reasonStr,
+            capturedGeneration,
+            t,
+            m,
+            f);
+    });
 }
 
 void UpdatePendingRaceMenuFaceReapply()
@@ -356,53 +780,150 @@ void UpdatePendingRaceMenuFaceReapply()
         return;
     }
 
+    const std::uint64_t generation = g_faceReplayGeneration.load();
+    const std::uint64_t nowMs = GetTickCount64();
+    const std::uint64_t nextAttemptMs = g_pendingRaceMenuFaceReapplyNextMs.load();
+
     if (!g_raceMenuOpen.load()) {
+        spdlog::debug(
+            "UpdatePendingRaceMenuFaceReapply tick skipped reason=racemenu_closed generation={} pending=1 attemptsLeft={} nextMs={} nowMs={}",
+            generation,
+            g_pendingRaceMenuFaceReapplyAttempts.load(),
+            nextAttemptMs,
+            nowMs);
         ClearRaceMenuFaceReapply("racemenu_closed");
         return;
     }
 
-    if (!g_bodyCategoryActive) {
-        // Wait until body category is active; callbacks are unstable/absent outside it.
-        return;
-    }
-
     if (g_pendingRaceMenuFaceReapplyInFlight.load()) {
+        if (nowMs >= nextAttemptMs) {
+            spdlog::debug(
+                "UpdatePendingRaceMenuFaceReapply tick skipped reason=in_flight generation={} attemptsLeft={} nextMs={} nowMs={}",
+                generation,
+                g_pendingRaceMenuFaceReapplyAttempts.load(),
+                nextAttemptMs,
+                nowMs);
+        }
         return;
     }
 
-    const std::uint64_t nowMs = GetTickCount64();
-    const std::uint64_t nextAttemptMs = g_pendingRaceMenuFaceReapplyNextMs.load();
     if (nowMs < nextAttemptMs) {
         return;
     }
 
+    if (IsFaceSwitchTransitionActive()) {
+        // Do not dispatch callbacks while sex/race transition is active.
+        const std::uint64_t retryMs = nowMs + kPendingFaceReapplyRetryDelayMs;
+        g_pendingRaceMenuFaceReapplyNextMs.store(retryMs);
+        spdlog::debug(
+            "UpdatePendingRaceMenuFaceReapply tick skipped reason=switch_transition_active generation={} attemptsLeft={} nextMs={} nowMs={} values=({:.3f},{:.3f},{:.3f})",
+            generation,
+            g_pendingRaceMenuFaceReapplyAttempts.load(),
+            retryMs,
+            nowMs,
+            g_pendingRaceMenuFaceReapplyThin.load(),
+            g_pendingRaceMenuFaceReapplyMuscular.load(),
+            g_pendingRaceMenuFaceReapplyFat.load());
+        return;
+    }
+
+    if (!g_bodyCategoryActive.load()) {
+        // Wait for the Body category to be active; slider callbacks are not
+        // guaranteed outside that page.
+        const std::uint64_t retryMs = nowMs + kPendingFaceReapplyRetryDelayMs;
+        g_pendingRaceMenuFaceReapplyNextMs.store(retryMs);
+        spdlog::debug(
+            "UpdatePendingRaceMenuFaceReapply tick skipped reason=body_category_inactive generation={} attemptsLeft={} nextMs={} nowMs={} values=({:.3f},{:.3f},{:.3f})",
+            generation,
+            g_pendingRaceMenuFaceReapplyAttempts.load(),
+            retryMs,
+            nowMs,
+            g_pendingRaceMenuFaceReapplyThin.load(),
+            g_pendingRaceMenuFaceReapplyMuscular.load(),
+            g_pendingRaceMenuFaceReapplyFat.load());
+        return;
+    }
+
     if (g_pendingRaceMenuFaceReapplyAttempts.load() <= 0) {
-        spdlog::warn("Pending RaceMenu face reapply exhausted attempts without success");
+        spdlog::warn(
+            "UpdatePendingRaceMenuFaceReapply tick skipped reason=attempts_exhausted generation={} values=({:.3f},{:.3f},{:.3f})",
+            generation,
+            g_pendingRaceMenuFaceReapplyThin.load(),
+            g_pendingRaceMenuFaceReapplyMuscular.load(),
+            g_pendingRaceMenuFaceReapplyFat.load());
         ClearRaceMenuFaceReapply("attempts_exhausted");
         return;
     }
 
     auto* taskInterface = SKSE::GetTaskInterface();
     if (!taskInterface) {
-        spdlog::error("Failed to get SKSE task interface for pending RaceMenu face reapply");
+        spdlog::error(
+            "UpdatePendingRaceMenuFaceReapply tick skipped reason=no_task_interface generation={} attemptsLeft={}",
+            generation,
+            g_pendingRaceMenuFaceReapplyAttempts.load());
         ClearRaceMenuFaceReapply("no_task_interface");
         return;
     }
 
-    const float thin = g_lastThin;
-    const float muscular = g_lastMuscular;
-    const float fat = g_lastFat;
+    const float thin = std::clamp(g_pendingRaceMenuFaceReapplyThin.load(), 0.0f, 1.0f);
+    const float muscular = std::clamp(g_pendingRaceMenuFaceReapplyMuscular.load(), 0.0f, 1.0f);
+    const float fat = std::clamp(g_pendingRaceMenuFaceReapplyFat.load(), 0.0f, 1.0f);
     const std::string traceId = BuildGeneratedMorphTraceId("rsm-pending-reapply");
+    const int attemptsBefore = g_pendingRaceMenuFaceReapplyAttempts.load();
+    const int attemptNumber = std::max((kPendingFaceReapplyMaxAttempts - attemptsBefore) + 1, 1);
+    const std::uint64_t capturedGeneration = generation;
     g_pendingRaceMenuFaceReapplyInFlight.store(true);
 
-    taskInterface->AddTask([thin, muscular, fat, traceId = std::move(traceId)]() mutable {
+    spdlog::debug(
+        "UpdatePendingRaceMenuFaceReapply scheduling task trace={} generation={} attempt={} attemptsLeftBefore={} nowMs={} values=({:.3f},{:.3f},{:.3f})",
+        traceId,
+        capturedGeneration,
+        attemptNumber,
+        attemptsBefore,
+        nowMs,
+        thin,
+        muscular,
+        fat);
+
+    taskInterface->AddTask([thin, muscular, fat, traceId = std::move(traceId), capturedGeneration, attemptNumber]() mutable {
         ScopedMorphTrace traceScope(std::move(traceId));
 
         const auto finalizeAttempt = []() {
             g_pendingRaceMenuFaceReapplyInFlight.store(false);
         };
 
-        if (!g_pendingRaceMenuFaceReapply.load() || !g_raceMenuOpen.load() || !g_bodyCategoryActive) {
+        const std::uint64_t currentGeneration = g_faceReplayGeneration.load();
+        const bool pendingAtEntry = g_pendingRaceMenuFaceReapply.load();
+        spdlog::debug(
+            "GFxReplayBurst task entry trace={} capturedGeneration={} currentGeneration={} pending={} attempt={} raceMenuOpen={} bodyCategoryActive={}",
+            CurrentMorphTraceId(),
+            capturedGeneration,
+            currentGeneration,
+            pendingAtEntry ? 1 : 0,
+            attemptNumber,
+            g_raceMenuOpen.load() ? 1 : 0,
+            g_bodyCategoryActive.load() ? 1 : 0);
+
+        if (capturedGeneration != currentGeneration) {
+            spdlog::info(
+                "GFxReplayBurst task aborted trace={} capturedGeneration={} currentGeneration={} attempt={} reason=stale_generation",
+                CurrentMorphTraceId(),
+                capturedGeneration,
+                currentGeneration,
+                attemptNumber);
+            finalizeAttempt();
+            return;
+        }
+
+        if (!g_pendingRaceMenuFaceReapply.load() || !g_raceMenuOpen.load()) {
+            spdlog::debug(
+                "GFxReplayBurst task aborted trace={} capturedGeneration={} currentGeneration={} attempt={} pending={} raceMenuOpen={} reason=pending_cleared_or_menu_closed",
+                CurrentMorphTraceId(),
+                capturedGeneration,
+                currentGeneration,
+                attemptNumber,
+                g_pendingRaceMenuFaceReapply.load() ? 1 : 0,
+                g_raceMenuOpen.load() ? 1 : 0);
             finalizeAttempt();
             return;
         }
@@ -413,10 +934,12 @@ void UpdatePendingRaceMenuFaceReapply()
 
         if (applied) {
             CacheMorphState(thin, muscular, fat);
-            ClearRaceMenuFaceReapply("applied");
+            ClearRaceMenuFaceReapply("burst_applied");
             spdlog::info(
-                "Pending RaceMenu face reapply succeeded trace={} attemptsLeft={} values=({:.3f},{:.3f},{:.3f})",
+                "GFxReplayBurst applied trace={} generation={} attempt={} attemptsLeft={} values=({:.3f},{:.3f},{:.3f})",
                 CurrentMorphTraceId(),
+                capturedGeneration,
+                attemptNumber,
                 attemptsLeft,
                 thin,
                 muscular,
@@ -427,8 +950,10 @@ void UpdatePendingRaceMenuFaceReapply()
 
         if (attemptsLeft <= 0) {
             spdlog::warn(
-                "Pending RaceMenu face reapply failed after max retries trace={} values=({:.3f},{:.3f},{:.3f})",
+                "Pending RaceMenu face reapply failed after max retries trace={} generation={} attempt={} values=({:.3f},{:.3f},{:.3f})",
                 CurrentMorphTraceId(),
+                capturedGeneration,
+                attemptNumber,
                 thin,
                 muscular,
                 fat);
@@ -439,9 +964,15 @@ void UpdatePendingRaceMenuFaceReapply()
 
         g_pendingRaceMenuFaceReapplyNextMs.store(GetTickCount64() + kPendingFaceReapplyRetryDelayMs);
         spdlog::debug(
-            "Pending RaceMenu face reapply retry scheduled trace={} attemptsLeft={}",
+            "Pending RaceMenu face reapply retry scheduled trace={} generation={} attempt={} attemptsLeft={} nextMs={} values=({:.3f},{:.3f},{:.3f})",
             CurrentMorphTraceId(),
-            attemptsLeft);
+            capturedGeneration,
+            attemptNumber,
+            attemptsLeft,
+            g_pendingRaceMenuFaceReapplyNextMs.load(),
+            thin,
+            muscular,
+            fat);
         finalizeAttempt();
     });
 }
@@ -643,20 +1174,66 @@ bool TryParseCompactNormalMapStem(
     muscularPercent = 0;
     thinPercent = 0;
 
+    // Strict parse: requires H then M then T in order, all optional.
     std::size_t position = 0;
-    if (!TryParseCompactAxisToken(stem, position, 'H', hasHeavy, heavyPercent)) {
-        return false;
+    if (TryParseCompactAxisToken(stem, position, 'H', hasHeavy, heavyPercent) &&
+        TryParseCompactAxisToken(stem, position, 'M', hasMuscular, muscularPercent) &&
+        TryParseCompactAxisToken(stem, position, 'T', hasThin, thinPercent) &&
+        position == stem.size() &&
+        (hasHeavy || hasMuscular || hasThin)) {
+        return true;
     }
 
-    if (!TryParseCompactAxisToken(stem, position, 'M', hasMuscular, muscularPercent)) {
-        return false;
+    // Loose parse: any order of H/M/T, each followed immediately by digits.
+    hasHeavy = false;
+    hasMuscular = false;
+    hasThin = false;
+    heavyPercent = 0;
+    muscularPercent = 0;
+    thinPercent = 0;
+    position = 0;
+
+    while (position < stem.size()) {
+        const char axis = static_cast<char>(std::toupper(static_cast<unsigned char>(stem[position])));
+        ++position;
+
+        const std::size_t start = position;
+        while (position < stem.size() &&
+               std::isdigit(static_cast<unsigned char>(stem[position]))) {
+            ++position;
+        }
+
+        if (start == position) {
+            return false;
+        }
+
+        int percent = 0;
+        if (!TryParsePercentToken(stem.substr(start, position - start), percent)) {
+            return false;
+        }
+
+        switch (axis) {
+        case 'H':
+            if (hasHeavy) { return false; }
+            hasHeavy = true;
+            heavyPercent = percent;
+            break;
+        case 'M':
+            if (hasMuscular) { return false; }
+            hasMuscular = true;
+            muscularPercent = percent;
+            break;
+        case 'T':
+            if (hasThin) { return false; }
+            hasThin = true;
+            thinPercent = percent;
+            break;
+        default:
+            return false;
+        }
     }
 
-    if (!TryParseCompactAxisToken(stem, position, 'T', hasThin, thinPercent)) {
-        return false;
-    }
-
-    return position == stem.size() && (hasHeavy || hasMuscular || hasThin);
+    return hasHeavy || hasMuscular || hasThin;
 }
 
 bool TryParseHandNormalMapStem(
@@ -1142,9 +1719,9 @@ bool ApplySelectedNormalMapTextureSet(bool persist, std::string_view applySource
         spdlog::warn(
             "ApplySelectedNormalMapTextureSet skipped because no normal map was selected (source={}, thin={:.3f}, muscular={:.3f}, heavy={:.3f})",
             applySource,
-            g_lastThin,
-            g_lastMuscular,
-            g_lastFat);
+            g_lastThin.load(),
+            g_lastMuscular.load(),
+            g_lastFat.load());
         return false;
     }
 
@@ -1155,9 +1732,9 @@ bool ApplySelectedNormalMapTextureSet(bool persist, std::string_view applySource
             persist,
             hasNormalPath ? g_selectedNormalMapPath : "<no-path>",
             hasHandNormalPath ? g_selectedHandNormalMapPath : "<no-hand-path>",
-            g_lastThin,
-            g_lastMuscular,
-            g_lastFat);
+            g_lastThin.load(),
+            g_lastMuscular.load(),
+            g_lastFat.load());
         return true;
     }
 
@@ -1182,9 +1759,9 @@ bool ApplySelectedNormalMapTextureSet(bool persist, std::string_view applySource
         hasHandNormalPath ? g_selectedHandNormalMapPath : "<no-hand-path>",
         persist,
         applySource,
-        g_lastThin,
-        g_lastMuscular,
-        g_lastFat);
+        g_lastThin.load(),
+        g_lastMuscular.load(),
+        g_lastFat.load());
 
     const std::string_view handNormalPath =
         hasHandNormalPath ? std::string_view(g_selectedHandNormalMapPath) : std::string_view{};
@@ -1275,20 +1852,114 @@ int MorphValueToPercent(float value)
     return static_cast<int>(std::lround(std::clamp(value, 0.0f, 1.0f) * 100.0f));
 }
 
-void LoadNormalMapCatalog()
+struct NormalMapFolderSelection
 {
-    if (g_normalMapCatalogLoaded) {
+    std::string profile;
+    std::string bodyDataFolder;
+    std::string bodyRelativeFolder;
+    std::string handDataFolder;
+    std::string handRelativeFolder;
+};
+
+std::string GetNormalMapSexFolderToken()
+{
+    auto* player = RE::PlayerCharacter::GetSingleton();
+    if (!player) {
+        return {};
+    }
+
+    auto* actorBase = player->GetActorBase();
+    if (!actorBase) {
+        return {};
+    }
+
+    const std::uint8_t sex = static_cast<std::uint8_t>(actorBase->GetSex());
+    return sex == 0 ? "male" : "female";
+}
+
+std::string FindExistingSexFolderName(std::string_view sexToken)
+{
+    if (sexToken.empty()) {
+        return {};
+    }
+
+    const std::filesystem::path rootPath(kNormalMapDataFolder);
+    if (!std::filesystem::exists(rootPath)) {
+        return {};
+    }
+
+    const std::string expected = ToLowerCopy(std::string(sexToken));
+    for (const auto& entry : std::filesystem::directory_iterator(rootPath)) {
+        if (!entry.is_directory()) {
+            continue;
+        }
+
+        const std::string folderName = entry.path().filename().string();
+        if (ToLowerCopy(folderName) == expected) {
+            return folderName;
+        }
+    }
+
+    return {};
+}
+
+NormalMapFolderSelection ResolveNormalMapFolderSelection()
+{
+    NormalMapFolderSelection selection{};
+    selection.profile = "legacy";
+    selection.bodyDataFolder = kNormalMapDataFolder;
+    selection.bodyRelativeFolder = kNormalMapRelativeFolder;
+    selection.handDataFolder = kHandNormalMapDataFolder;
+    selection.handRelativeFolder = kHandNormalMapRelativeFolder;
+
+    const std::string sexFolder = FindExistingSexFolderName(GetNormalMapSexFolderToken());
+    if (sexFolder.empty()) {
+        return selection;
+    }
+
+    const std::string sexBodyDataFolder = std::string(kNormalMapDataFolder) + "\\" + sexFolder;
+    if (!std::filesystem::exists(std::filesystem::path(sexBodyDataFolder))) {
+        return selection;
+    }
+
+    selection.profile = sexFolder;
+    selection.bodyDataFolder = sexBodyDataFolder;
+    selection.bodyRelativeFolder = std::string(kNormalMapRelativeFolder) + "\\" + sexFolder;
+
+    const std::string sexHandDataFolder = sexBodyDataFolder + "\\Hands";
+    if (std::filesystem::exists(std::filesystem::path(sexHandDataFolder))) {
+        selection.handDataFolder = sexHandDataFolder;
+        selection.handRelativeFolder = selection.bodyRelativeFolder + "\\Hands";
+    } else if (!std::filesystem::exists(std::filesystem::path(kHandNormalMapDataFolder))) {
+        // If the legacy Hands folder is absent, allow hand variants in the sex root folder.
+        selection.handDataFolder = selection.bodyDataFolder;
+        selection.handRelativeFolder = selection.bodyRelativeFolder;
+    }
+
+    return selection;
+}
+
+void LoadNormalMapCatalog(std::string_view dataFolder, std::string_view relativeFolder)
+{
+    const std::string requestedDataFolder(dataFolder);
+    const std::string requestedRelativeFolder(relativeFolder);
+
+    if (g_normalMapCatalogLoaded &&
+        g_loadedBodyNormalMapDataFolder == requestedDataFolder &&
+        g_loadedBodyNormalMapRelativeFolder == requestedRelativeFolder) {
         return;
     }
 
     g_normalMapCatalogLoaded = true;
+    g_loadedBodyNormalMapDataFolder = requestedDataFolder;
+    g_loadedBodyNormalMapRelativeFolder = requestedRelativeFolder;
     g_thinNormalMaps.clear();
     g_heavyNormalMaps.clear();
     g_muscularNormalMaps.clear();
     g_comboNormalMaps.clear();
 
     try {
-        const std::filesystem::path basePath(kNormalMapDataFolder);
+        const std::filesystem::path basePath(requestedDataFolder);
         if (!std::filesystem::exists(basePath)) {
             spdlog::warn("Normal map folder not found: {}", basePath.string());
             return;
@@ -1348,7 +2019,7 @@ void LoadNormalMapCatalog()
             }
 
             const std::string relativePath =
-                std::string(kNormalMapRelativeFolder) + "\\" + entry.path().filename().string();
+                requestedRelativeFolder + "\\" + entry.path().filename().string();
             const std::string textureSetEditorID = BuildTextureSetEditorID(stem);
 
             if (hasHeavy && hasMuscular && hasThin &&
@@ -1405,7 +2076,9 @@ void LoadNormalMapCatalog()
         });
 
         spdlog::info(
-            "Loaded normal map catalog: {} thin, {} heavy, {} muscular, {} heavy/muscular combinations",
+            "Loaded normal map catalog from {} (relativeRoot={}): {} thin, {} heavy, {} muscular, {} heavy/muscular combinations",
+            requestedDataFolder,
+            requestedRelativeFolder,
             g_thinNormalMaps.size(),
             g_heavyNormalMaps.size(),
             g_muscularNormalMaps.size(),
@@ -1416,19 +2089,26 @@ void LoadNormalMapCatalog()
     }
 }
 
-void LoadHandNormalMapCatalog()
+void LoadHandNormalMapCatalog(std::string_view dataFolder, std::string_view relativeFolder)
 {
-    if (g_handNormalMapCatalogLoaded) {
+    const std::string requestedDataFolder(dataFolder);
+    const std::string requestedRelativeFolder(relativeFolder);
+
+    if (g_handNormalMapCatalogLoaded &&
+        g_loadedHandNormalMapDataFolder == requestedDataFolder &&
+        g_loadedHandNormalMapRelativeFolder == requestedRelativeFolder) {
         return;
     }
 
     g_handNormalMapCatalogLoaded = true;
+    g_loadedHandNormalMapDataFolder = requestedDataFolder;
+    g_loadedHandNormalMapRelativeFolder = requestedRelativeFolder;
     g_handMuscularNormalMaps.clear();
     g_handBaseNormalMap = {};
     g_hasHandBaseNormalMap = false;
 
     try {
-        const std::filesystem::path basePath(kHandNormalMapDataFolder);
+        const std::filesystem::path basePath(requestedDataFolder);
         if (!std::filesystem::exists(basePath)) {
             spdlog::warn("Hand normal map folder not found: {}", basePath.string());
             return;
@@ -1453,7 +2133,7 @@ void LoadHandNormalMapCatalog()
             }
 
             const std::string relativePath =
-                std::string(kHandNormalMapRelativeFolder) + "\\" + entry.path().filename().string();
+                requestedRelativeFolder + "\\" + entry.path().filename().string();
             const std::string textureSetEditorID = BuildTextureSetEditorID(stem);
 
             if (isBaseEntry) {
@@ -1475,7 +2155,9 @@ void LoadHandNormalMapCatalog()
         });
 
         spdlog::info(
-            "Loaded hand normal map catalog: base={} muscularVariants={}",
+            "Loaded hand normal map catalog from {} (relativeRoot={}): base={} muscularVariants={}",
+            requestedDataFolder,
+            requestedRelativeFolder,
             g_hasHandBaseNormalMap ? g_handBaseNormalMap.relativePath : "<missing>",
             g_handMuscularNormalMaps.size());
 
@@ -1530,7 +2212,8 @@ void LogNormalMapTextureSetPlan()
 
 std::string SelectNormalMapRelativePath(float thin, float muscular, float fat)
 {
-    LoadNormalMapCatalog();
+    const NormalMapFolderSelection folders = ResolveNormalMapFolderSelection();
+    LoadNormalMapCatalog(folders.bodyDataFolder, folders.bodyRelativeFolder);
 
     if (g_thinNormalMaps.empty() &&
         g_heavyNormalMaps.empty() &&
@@ -1647,7 +2330,8 @@ std::string SelectNormalMapRelativePath(float thin, float muscular, float fat)
 
 std::string SelectHandNormalMapRelativePath(float, float muscular, float)
 {
-    LoadHandNormalMapCatalog();
+    const NormalMapFolderSelection folders = ResolveNormalMapFolderSelection();
+    LoadHandNormalMapCatalog(folders.handDataFolder, folders.handRelativeFolder);
 
     const int muscularPercent = MorphValueToPercent(muscular);
     if (muscularPercent > 0) {
@@ -1695,14 +2379,50 @@ void UpdateSelectedNormalMapCandidate(float thin, float muscular, float fat)
 
 void SetPhysiqueVisibilityForCategory(std::string_view categoryKey, std::uint32_t categoryFlag = 0)
 {
-    const bool isBodyCategory = categoryFlag == kBodyCategoryFlag;
-    const bool wasBodyCategory = g_bodyCategoryActive;
-    g_bodyCategoryActive = isBodyCategory;
+    const std::string trimmedCategoryKey = TrimAscii(categoryKey);
+    const std::string normalizedCategoryKey = ToLowerCopy(trimmedCategoryKey);
+    const bool bodyByFlag = categoryFlag == kBodyCategoryFlag;
+    const bool bodyByKey =
+        normalizedCategoryKey == "body" ||
+        normalizedCategoryKey == kPhysiqueCategoryKey;
+    const bool isBodyCategory = bodyByFlag || bodyByKey;
+    const bool wasBodyCategory = g_bodyCategoryActive.load();
+
+    // RaceMenu briefly emits category=0 with an empty key during sex-switch UI rebuild.
+    // Treat that as transient while a switch transition is active so we don't freeze
+    // face updates waiting for a callback that may not be re-emitted.
+    if (!isBodyCategory &&
+        wasBodyCategory &&
+        g_raceMenuOpen.load() &&
+        IsFaceSwitchTransitionActive() &&
+        categoryFlag == 0 &&
+        trimmedCategoryKey.empty()) {
+        spdlog::debug(
+            "Ignoring transient category drop during switch transition flag={} key=<empty>",
+            categoryFlag);
+        return;
+    }
+
+    g_bodyCategoryActive.store(isBodyCategory);
 
     // RaceMenu can rebuild/rebind face sliders during category/race transitions.
-    // Forcing a rebind+baseline on first body-category activation avoids stale carryover.
+    // Force a rebind on first body-category activation without cancelling any
+    // pending sex-switch recovery replay.
     if (isBodyCategory && !wasBodyCategory && g_raceMenuOpen.load()) {
-        MarkRaceMenuFaceStateDirty("body_category_activated");
+        const bool hasPendingValues = g_pendingRaceMenuFaceReapplyHasValues.load();
+        const bool hadSavedState = g_hasSavedState.load();
+        const float replayThin     = hasPendingValues ? g_pendingRaceMenuFaceReapplyThin.load()     : g_lastThin.load();
+        const float replayMuscular = hasPendingValues ? g_pendingRaceMenuFaceReapplyMuscular.load() : g_lastMuscular.load();
+        const float replayFat      = hasPendingValues ? g_pendingRaceMenuFaceReapplyFat.load()      : g_lastFat.load();
+        MarkRaceMenuFaceStateDirty("body_category_activated", /*pauseBurst=*/false);
+        // Dirty-state invalidation must not cancel the recovery burst; queue/update
+        // the latest target after bindings are invalidated.
+        if (hasPendingValues || hadSavedState) {
+            QueueRaceMenuFaceReapply(
+                "body_category_reactivated",
+                kPendingFaceReapplyRetryDelayMs,
+                replayThin, replayMuscular, replayFat);
+        }
     }
 
     SetPhysiqueDesiredVisible(isBodyCategory);
@@ -1788,9 +2508,10 @@ public:
 
         g_raceMenuOpen.store(a_event->opening);
         if (a_event->opening) {
+            EndFaceSwitchTransition("menu_open");
             ResetRaceMenuSexTracking();
             PrimeRaceMenuSexTracking();
-            g_bodyCategoryActive = false;
+            g_bodyCategoryActive.store(false);
             spdlog::info("RaceMenu open detected; physique wheel hidden until body category is active");
             CancelPreviewNormalApply();
             SchedulePlayerTextureSnapshotSeries("racemenu_open_event", false);
@@ -1857,7 +2578,6 @@ void ResetRaceMenuSexTracking()
 {
     g_hasTrackedRaceMenuSex = false;
     g_lastTrackedRaceMenuSex = 0xFF;
-    g_faceBaselineResetPending = false;
 }
 
 void PrimeRaceMenuSexTracking()
@@ -1909,24 +2629,45 @@ bool DidRaceMenuSexChange()
         return false;
     }
 
+    const auto previousSex = g_lastTrackedRaceMenuSex;
     g_lastTrackedRaceMenuSex = currentSex;
-    ResetFaceSliderBindingCache();
-    g_faceBaselineResetPending = true;
-    g_hasSavedState = false;
+    const bool transitionActive = IsFaceSwitchTransitionActive();
+    if (!transitionActive) {
+        // Do not pause the burst — it may be the currently executing burst attempt, and
+        // killing it here prevents retry.  The burst has correct replay values from
+        // RSM_Initialized and will dispatch with fresh bindings on the next attempt after
+        // sex tracking is updated (DidRaceMenuSexChange returns false on the second attempt).
+        MarkRaceMenuFaceStateDirty("sex_changed_detected", /*pauseBurst=*/false);
+    } else {
+        // Mod callback events typically already dirtied state for this transition.
+        // Avoid re-dirtying/requeue churn here; just ensure the next apply pass fully rebinds.
+        AdvanceFaceReplayGeneration("sex_changed_detected_transition_active");
+        g_hasSavedState.store(false);
+        ResetFaceSliderBindingCache();
+    }
+
+    g_faceSliderDispatchMode = FaceSliderDispatchMode::kUnknown;
     g_faceSliderBridgeCallsDisabled = false;
     g_faceSliderBridgeDisabledLogged = false;
     g_faceSliderBridgeUnavailableLogged = false;
-    spdlog::info("Detected RaceMenu sex switch; resetting face slider bindings");
-    QueueRaceMenuFaceReapply("sex_changed");
+    spdlog::info(
+        "Detected RaceMenu sex switch oldSex={} newSex={} generation={} transitionActive={} burstActive={} burstAttempts={} pendingValues={}",
+        static_cast<int>(previousSex),
+        static_cast<int>(currentSex),
+        g_faceReplayGeneration.load(),
+        transitionActive ? 1 : 0,
+        g_pendingRaceMenuFaceReapply.load() ? 1 : 0,
+        g_pendingRaceMenuFaceReapplyAttempts.load(),
+        g_pendingRaceMenuFaceReapplyHasValues.load() ? 1 : 0);
     return true;
 }
 
 void CacheMorphState(float thin, float muscular, float fat)
 {
-    g_lastThin = thin;
-    g_lastMuscular = muscular;
-    g_lastFat = fat;
-    g_hasSavedState = true;
+    g_lastThin.store(thin);
+    g_lastMuscular.store(muscular);
+    g_lastFat.store(fat);
+    g_hasSavedState.store(true);
     UpdateSelectedNormalMapCandidate(thin, muscular, fat);
 
     const float total = std::clamp(thin + muscular + fat, 0.0f, 1.0f);
@@ -1942,10 +2683,10 @@ void CacheMorphState(float thin, float muscular, float fat)
 
 bool IsSameAsCached(float thin, float muscular, float fat)
 {
-    return g_hasSavedState &&
-        NearlyEqual(thin, g_lastThin) &&
-        NearlyEqual(muscular, g_lastMuscular) &&
-        NearlyEqual(fat, g_lastFat);
+    return g_hasSavedState.load() &&
+        NearlyEqual(thin, g_lastThin.load()) &&
+        NearlyEqual(muscular, g_lastMuscular.load()) &&
+        NearlyEqual(fat, g_lastFat.load());
 }
 
 void SetOrClearMorph(RE::TESObjectREFR* actor, const char* morphName, float value)
@@ -1962,13 +2703,20 @@ void SetOrClearMorph(RE::TESObjectREFR* actor, const char* morphName, float valu
     }
 }
 
-void SetFaceMorphValue(RE::TESNPC* actorBase, const char* sliderName, float value)
+void SetFaceMorphValue(RE::TESNPC* actorBase, const char* sliderName, float value, std::string_view reason)
 {
     if (!g_faceMorphInterface || !actorBase || !sliderName) {
         return;
     }
 
     const float clampedValue = std::fabs(value) <= kMorphClearThreshold ? 0.0f : value;
+    spdlog::info(
+        "Direct native SetFaceMorphValue saved-state write slider={} value={:.3f} reason={} trace={} generation={} note=not_gfx_geometry_dispatch",
+        sliderName,
+        clampedValue,
+        reason.empty() ? "<none>" : std::string(reason),
+        CurrentMorphTraceId(),
+        g_faceReplayGeneration.load());
     g_faceMorphInterface->SetMorphValue(actorBase, RE::BSFixedString(sliderName), clampedValue);
 }
 
@@ -1991,6 +2739,14 @@ FaceMorphTriplet ReadFaceMorphValues(RE::TESNPC* actorBase)
         g_faceMorphInterface->GetMorphValueByName(actorBase, RE::BSFixedString(kFaceSliderFatName)),
         0.0f,
         1.0f);
+
+    spdlog::debug(
+        "Face saved-state readback source=ReadFaceMorphValues trace={} generation={} values=({:.3f},{:.3f},{:.3f}) note=not_geometry_verification",
+        CurrentMorphTraceId(),
+        g_faceReplayGeneration.load(),
+        values.thin,
+        values.muscular,
+        values.fat);
 
     return values;
 }
@@ -2026,6 +2782,13 @@ bool TryReadFaceSliderValue(std::string_view targetSlider, float& outValue)
         g_faceMorphInterface->GetMorphValueByName(actorBase, RE::BSFixedString(morphName)),
         0.0f,
         1.0f);
+    spdlog::debug(
+        "Face saved-state readback source=TryReadFaceSliderValue trace={} generation={} slider={} morphName={} value={:.3f} note=not_geometry_verification",
+        CurrentMorphTraceId(),
+        g_faceReplayGeneration.load(),
+        targetSlider,
+        morphName,
+        outValue);
     return true;
 }
 
@@ -2071,9 +2834,10 @@ bool VerifyFaceReadback(float thin, float muscular, float fat, bool isCommit)
 
     if (g_raceMenuOpen.load()) {
         spdlog::debug(
-            "Skipping face readback verification while RaceMenu is open trace={} mode={}",
+            "Skipping face saved-state readback verification while RaceMenu is open trace={} mode={} generation={} note=readback_is_not_geometry_verification",
             CurrentMorphTraceId(),
-            isCommit ? "commit" : "preview");
+            isCommit ? "commit" : "preview",
+            g_faceReplayGeneration.load());
         return true;
     }
 
@@ -2086,9 +2850,11 @@ bool VerifyFaceReadback(float thin, float muscular, float fat, bool isCommit)
 
     const FaceMorphTriplet immediate = ReadFaceMorphValues(actorBase);
     if (AreFaceMorphValuesClose(immediate, expected)) {
+        g_faceReadbackMismatchStreak.store(0);
         spdlog::debug(
-            "Face readback OK phase=immediate trace={} expected=({:.3f},{:.3f},{:.3f}) observed=({:.3f},{:.3f},{:.3f})",
+            "Face saved-state readback OK phase=immediate trace={} generation={} expected=({:.3f},{:.3f},{:.3f}) observed=({:.3f},{:.3f},{:.3f}) note=not_geometry_verification",
             traceId,
+            g_faceReplayGeneration.load(),
             expected.thin,
             expected.muscular,
             expected.fat,
@@ -2099,8 +2865,9 @@ bool VerifyFaceReadback(float thin, float muscular, float fat, bool isCommit)
     }
 
     spdlog::error(
-        "MORPH_MISMATCH phase=immediate trace={} expected=({:.3f},{:.3f},{:.3f}) observed=({:.3f},{:.3f},{:.3f}) mode={}",
+        "MORPH_MISMATCH saved-state-readback phase=immediate trace={} generation={} expected=({:.3f},{:.3f},{:.3f}) observed=({:.3f},{:.3f},{:.3f}) mode={} note=not_geometry_verification",
         traceId,
+        g_faceReplayGeneration.load(),
         expected.thin,
         expected.muscular,
         expected.fat,
@@ -2110,84 +2877,38 @@ bool VerifyFaceReadback(float thin, float muscular, float fat, bool isCommit)
         isCommit ? "commit" : "preview");
 
     if (isCommit) {
-        Sleep(static_cast<DWORD>(kCommitFaceVerifyDelayMs));
-        const FaceMorphTriplet delayed = ReadFaceMorphValues(actorBase);
-        if (AreFaceMorphValuesClose(delayed, expected)) {
-            spdlog::warn(
-                "Face readback converged after delayed verify trace={} expected=({:.3f},{:.3f},{:.3f}) observed=({:.3f},{:.3f},{:.3f})",
+        const int mismatchStreak = g_faceReadbackMismatchStreak.fetch_add(1) + 1;
+        if (mismatchStreak >= kFaceReadbackDisableThreshold) {
+            g_faceSliderBridgeCallsDisabled = true;
+            g_faceSliderBridgeDisabledLogged = false;
+            spdlog::error(
+                "Disabling face slider bridge after consecutive readback mismatches trace={} streak={}",
                 traceId,
-                expected.thin,
-                expected.muscular,
-                expected.fat,
-                delayed.thin,
-                delayed.muscular,
-                delayed.fat);
-            return true;
+                mismatchStreak);
+        } else {
+            spdlog::warn(
+                "Face readback mismatch streak={} below disable threshold={} trace={}",
+                mismatchStreak,
+                kFaceReadbackDisableThreshold,
+                traceId);
         }
-
-        spdlog::error(
-            "MORPH_MISMATCH phase=delayed trace={} expected=({:.3f},{:.3f},{:.3f}) observed=({:.3f},{:.3f},{:.3f}) mode=commit",
-            traceId,
-            expected.thin,
-            expected.muscular,
-            expected.fat,
-            delayed.thin,
-            delayed.muscular,
-            delayed.fat);
-    }
-
-    if (isCommit) {
-        g_faceSliderBridgeCallsDisabled = true;
-        g_faceSliderBridgeDisabledLogged = false;
     }
     return false;
 }
 
 bool ApplyFaceMorphsDirectStable(float thin, float muscular, float fat, bool isCommit)
 {
-    if (!g_faceMorphInterface) {
-        if (!g_faceMorphUnavailableLogged) {
-            spdlog::warn("RaceMenu FaceMorph interface unavailable; skipping direct face morph apply");
-            g_faceMorphUnavailableLogged = true;
-        }
-        return false;
-    }
-
-    auto* player = RE::PlayerCharacter::GetSingleton();
-    if (!player) {
-        spdlog::error("PlayerCharacter singleton was null while applying direct face morphs");
-        return false;
-    }
-
-    auto* actorBase = player->GetActorBase();
-    if (!actorBase) {
-        spdlog::warn("Player actor base was null while applying RaceMenu face morphs");
-        return false;
-    }
-
-    const float thinTarget = std::clamp(thin, 0.0f, 1.0f);
-    const float muscularTarget = std::clamp(muscular, 0.0f, 1.0f);
-    const float fatTarget = std::clamp(fat, 0.0f, 1.0f);
-
-    if (!isCommit) {
-        const std::uint64_t nowMs = GetTickCount64();
-        const std::uint64_t previousApplyMs = g_lastFacePreviewApplyTimeMs.load();
-        if (nowMs > previousApplyMs &&
-            (nowMs - previousApplyMs) < kFacePreviewApplyMinIntervalMs) {
-            return true;
-        }
-        g_lastFacePreviewApplyTimeMs.store(nowMs);
-    }
-
-    SetFaceMorphValue(actorBase, kFaceSliderThinName, thinTarget);
-    SetFaceMorphValue(actorBase, kFaceSliderMuscularName, muscularTarget);
-    SetFaceMorphValue(actorBase, kFaceSliderFatName, fatTarget);
-
-    if (isCommit) {
-        player->Update3DModel();
-    }
-
-    return true;
+    // Disabled deliberately. Direct FaceMorphInterface::SetMorphValue and native FaceGen
+    // geometry paths have both proven unsafe in this setup (distortion/CTD).
+    // Face preview/replay must stay on the normal RaceMenu GFx ChangeDoubleMorph path.
+    spdlog::debug(
+        "Direct face morph fallback disabled trace={} mode={} values=({:.3f},{:.3f},{:.3f})",
+        CurrentMorphTraceId(),
+        isCommit ? "commit" : "preview",
+        thin,
+        muscular,
+        fat);
+    return false;
 }
 
 std::string NormalizeSliderLabel(std::string_view label)
@@ -2293,6 +3014,23 @@ bool TryResolveFaceSliderBindingFromEntry(
     std::string_view target,
     FaceSliderBinding& outBinding)
 {
+    bool hasEnabledFlag = false;
+    bool isEnabled = true;
+    RE::GFxValue enabledValue;
+    if (entry.GetMember("enabled", std::addressof(enabledValue)) && enabledValue.IsBool()) {
+        hasEnabledFlag = true;
+        isEnabled = enabledValue.GetBool();
+    }
+
+    bool hasFilterFlag = false;
+    bool hasBodyCategoryFlag = false;
+    RE::GFxValue filterFlagValue;
+    if (entry.GetMember("filterFlag", std::addressof(filterFlagValue)) && filterFlagValue.IsNumber()) {
+        hasFilterFlag = true;
+        const std::uint32_t filterFlag = static_cast<std::uint32_t>(filterFlagValue.GetUInt());
+        hasBodyCategoryFlag = (filterFlag & kBodyCategoryFlag) != 0;
+    }
+
     int bestMemberMatchScore = 0;
     std::string matchedRawLabel;
 
@@ -2319,16 +3057,24 @@ bool TryResolveFaceSliderBindingFromEntry(
     considerMember("text");
     considerMember("name");
     considerMember("callbackName");
+    considerMember("callback");
     if (bestMemberMatchScore <= 0) {
         return false;
     }
 
-    RE::GFxValue callbackNameValue;
-    if (!entry.GetMember("callbackName", std::addressof(callbackNameValue)) || !callbackNameValue.IsString()) {
+    RE::GFxValue callbackValue;
+    const bool hasCallbackNameMember =
+        entry.GetMember("callbackName", std::addressof(callbackValue)) &&
+        callbackValue.IsString();
+    const bool hasCallbackMember =
+        !hasCallbackNameMember &&
+        entry.GetMember("callback", std::addressof(callbackValue)) &&
+        callbackValue.IsString();
+    if (!hasCallbackNameMember && !hasCallbackMember) {
         return false;
     }
 
-    const char* callbackName = callbackNameValue.GetString();
+    const char* callbackName = callbackValue.GetString();
     if (!callbackName || callbackName[0] == '\0') {
         return false;
     }
@@ -2336,11 +3082,6 @@ bool TryResolveFaceSliderBindingFromEntry(
     const std::string normalizedCallback = NormalizeSliderLabel(callbackName);
     const bool callbackHasFaceToken = normalizedCallback.find("face") != std::string::npos;
     const bool callbackMentionsTarget = CallbackMentionsTarget(normalizedCallback, target);
-
-    // Generic labels like rmthin/rlythin are ambiguous; require a face callback signal.
-    if (bestMemberMatchScore < 100 && !callbackHasFaceToken && !callbackMentionsTarget) {
-        return false;
-    }
 
     int bindingScore = bestMemberMatchScore;
     if (callbackHasFaceToken) {
@@ -2355,16 +3096,68 @@ bool TryResolveFaceSliderBindingFromEntry(
         bindingScore -= 40;
     }
 
-    if (outBinding.resolved && bindingScore <= outBinding.score) {
-        return false;
+    if (bestMemberMatchScore < 100 && !callbackHasFaceToken && !callbackMentionsTarget) {
+        // Keep generic rm/rly labels eligible, but prefer stronger face-scoped candidates.
+        bindingScore -= 20;
+    }
+
+    if (hasEnabledFlag) {
+        bindingScore += isEnabled ? 10 : -5;
+    }
+
+    if (hasFilterFlag) {
+        // Keep this as a soft preference only; some RaceMenu builds/use-cases
+        // can surface valid face entries with non-body filter flags.
+        bindingScore += hasBodyCategoryFlag ? 15 : -5;
     }
 
     RE::GFxValue sliderIdValue;
-    const bool hasSliderId = entry.GetMember("sliderID", std::addressof(sliderIdValue)) && sliderIdValue.IsNumber();
+    bool hasSliderId = false;
+    constexpr std::array sliderIdMemberCandidates{
+        "sliderID",
+        "sliderId",
+        "id",
+        "sliderIndex"
+    };
+    for (const char* memberName : sliderIdMemberCandidates) {
+        if (entry.GetMember(memberName, std::addressof(sliderIdValue)) && sliderIdValue.IsNumber()) {
+            hasSliderId = true;
+            break;
+        }
+    }
+    const bool hasInternalCallback = entry.HasMember("internalCallback");
+
+    if (outBinding.resolved) {
+        if (bindingScore < outBinding.score) {
+            return false;
+        }
+
+        if (bindingScore == outBinding.score) {
+            // During RaceMenu rebuilds there can be duplicate face-slider entries
+            // with equivalent labels/callbacks. Prefer internalCallback-capable
+            // entries, then candidates with slider id, then latest entry index.
+            if (outBinding.hasInternalCallback && !hasInternalCallback) {
+                return false;
+            }
+
+            if (hasInternalCallback && !outBinding.hasInternalCallback) {
+                // Replace existing binding with this stronger candidate.
+            } else if (outBinding.hasSliderId && !hasSliderId) {
+                return false;
+            }
+
+            if (hasSliderId && !outBinding.hasSliderId) {
+                // Replace existing binding with this stronger candidate.
+            } else if (entryIndex <= outBinding.entryIndex) {
+                return false;
+            }
+        }
+    }
 
     outBinding.resolved = true;
     outBinding.callbackName = callbackName;
     outBinding.label = matchedRawLabel;
+    outBinding.hasInternalCallback = hasInternalCallback;
     outBinding.hasSliderId = hasSliderId;
     outBinding.sliderId = hasSliderId ? sliderIdValue.GetNumber() : 0.0;
     outBinding.entryIndex = entryIndex;
@@ -2399,20 +3192,69 @@ bool ResolveFaceSliderBindings(RE::GFxValue& entryList)
                           g_faceSliderHeavyBinding.resolved;
     if (resolved) {
         spdlog::debug(
-            "Resolved RaceMenu face slider bindings trace={} thin=({},{},idx={},score={}) muscular=({},{},idx={},score={}) heavy=({},{},idx={},score={})",
+            "Resolved RaceMenu face slider bindings trace={} generation={} thin=({},{},sliderId={},idx={},score={},internal={}) muscular=({},{},sliderId={},idx={},score={},internal={}) heavy=({},{},sliderId={},idx={},score={},internal={})",
             CurrentMorphTraceId(),
+            g_faceReplayGeneration.load(),
             g_faceSliderThinBinding.label,
             g_faceSliderThinBinding.callbackName,
+            g_faceSliderThinBinding.hasSliderId ? g_faceSliderThinBinding.sliderId : -1.0,
             g_faceSliderThinBinding.entryIndex,
             g_faceSliderThinBinding.score,
+            g_faceSliderThinBinding.hasInternalCallback ? 1 : 0,
             g_faceSliderMuscularBinding.label,
             g_faceSliderMuscularBinding.callbackName,
+            g_faceSliderMuscularBinding.hasSliderId ? g_faceSliderMuscularBinding.sliderId : -1.0,
             g_faceSliderMuscularBinding.entryIndex,
             g_faceSliderMuscularBinding.score,
+            g_faceSliderMuscularBinding.hasInternalCallback ? 1 : 0,
             g_faceSliderHeavyBinding.label,
             g_faceSliderHeavyBinding.callbackName,
+            g_faceSliderHeavyBinding.hasSliderId ? g_faceSliderHeavyBinding.sliderId : -1.0,
             g_faceSliderHeavyBinding.entryIndex,
-            g_faceSliderHeavyBinding.score);
+            g_faceSliderHeavyBinding.score,
+            g_faceSliderHeavyBinding.hasInternalCallback ? 1 : 0);
+    } else {
+        std::uint32_t entriesWithTextOrName = 0;
+        std::uint32_t entriesWithCallbackName = 0;
+        std::uint32_t entriesWithCallback = 0;
+        std::uint32_t entriesWithInternalCallback = 0;
+
+        for (std::uint32_t index = 0; index < entryCount; ++index) {
+            RE::GFxValue entry;
+            if (!entryList.GetElement(index, std::addressof(entry)) || !entry.IsObject()) {
+                continue;
+            }
+
+            RE::GFxValue member;
+            if ((entry.GetMember("text", std::addressof(member)) && member.IsString()) ||
+                (entry.GetMember("name", std::addressof(member)) && member.IsString())) {
+                ++entriesWithTextOrName;
+            }
+
+            if (entry.GetMember("callbackName", std::addressof(member)) && member.IsString()) {
+                ++entriesWithCallbackName;
+            }
+
+            if (entry.GetMember("callback", std::addressof(member)) && member.IsString()) {
+                ++entriesWithCallback;
+            }
+
+            if (entry.HasMember("internalCallback")) {
+                ++entriesWithInternalCallback;
+            }
+        }
+
+        spdlog::debug(
+            "Face slider bind unresolved trace={} entryCount={} textOrName={} callbackName={} callback={} internalCallback={} thinResolved={} muscularResolved={} heavyResolved={}",
+            CurrentMorphTraceId(),
+            entryCount,
+            entriesWithTextOrName,
+            entriesWithCallbackName,
+            entriesWithCallback,
+            entriesWithInternalCallback,
+            g_faceSliderThinBinding.resolved ? 1 : 0,
+            g_faceSliderMuscularBinding.resolved ? 1 : 0,
+            g_faceSliderHeavyBinding.resolved ? 1 : 0);
     }
 
     return resolved;
@@ -2546,17 +3388,20 @@ const char* FaceSliderDispatchModeName(FaceSliderDispatchMode mode)
 std::string BuildFaceBindingSignature()
 {
     return std::format(
-        "thin:{}:{}:{}:{}|muscular:{}:{}:{}:{}|heavy:{}:{}:{}:{}",
+        "thin:{}:{}:{}:{}:{}|muscular:{}:{}:{}:{}:{}|heavy:{}:{}:{}:{}:{}",
         g_faceSliderThinBinding.callbackName,
         g_faceSliderThinBinding.entryIndex,
+        g_faceSliderThinBinding.hasInternalCallback ? 1 : 0,
         g_faceSliderThinBinding.hasSliderId ? 1 : 0,
         g_faceSliderThinBinding.hasSliderId ? g_faceSliderThinBinding.sliderId : -1.0,
         g_faceSliderMuscularBinding.callbackName,
         g_faceSliderMuscularBinding.entryIndex,
+        g_faceSliderMuscularBinding.hasInternalCallback ? 1 : 0,
         g_faceSliderMuscularBinding.hasSliderId ? 1 : 0,
         g_faceSliderMuscularBinding.hasSliderId ? g_faceSliderMuscularBinding.sliderId : -1.0,
         g_faceSliderHeavyBinding.callbackName,
         g_faceSliderHeavyBinding.entryIndex,
+        g_faceSliderHeavyBinding.hasInternalCallback ? 1 : 0,
         g_faceSliderHeavyBinding.hasSliderId ? 1 : 0,
         g_faceSliderHeavyBinding.hasSliderId ? g_faceSliderHeavyBinding.sliderId : -1.0);
 }
@@ -2659,6 +3504,17 @@ bool TryDispatchFaceSliderViaDelegate(
     invokeArguments[0].SetString(binding.callbackName.c_str());
     invokeArguments[1] = callbackArguments;
 
+    spdlog::debug(
+        "RaceMenu GFx dispatch attempt trace={} generation={} slider={} callback={} sliderId={} entryIndex={} targetValue={:.3f} mode={}",
+        CurrentMorphTraceId(),
+        g_faceReplayGeneration.load(),
+        targetSlider,
+        binding.callbackName,
+        binding.hasSliderId ? binding.sliderId : -1.0,
+        binding.entryIndex,
+        clampedValue,
+        FaceSliderDispatchModeName(mode));
+
     return TryInvokeRaceMenuSliderCallback(
         delegate,
         invokeArguments.data(),
@@ -2707,6 +3563,14 @@ bool ApplyBoundFaceSliderViaRaceMenu(
     const bool havePreviousValue = TryReadFaceSliderValue(targetSlider, previousValue);
     const bool hasMeaningfulDelta =
         havePreviousValue && (std::fabs(previousValue - static_cast<float>(clampedValue)) > (kFaceMorphWriteDeltaThreshold * 2.0f));
+    const std::string_view activeTraceId = CurrentMorphTraceId();
+    const bool isPreviewTrace = activeTraceId.rfind("preview-", 0) == 0;
+    const bool isDoubleMorphCallback = NormalizeSliderLabel(binding.callbackName) == "changedoublemorph";
+    // ChangeDoubleMorph via GameDelegate does not synchronously update GetMorphValueByName,
+    // so strict readback while RaceMenu is open always observes 0 and fails every mode,
+    // causing all three arg-order variants to fire in sequence and corrupt unrelated morphs.
+    // Match VerifyFaceReadback: trust the callback invocation, skip strict readback.
+    const bool strictReadbackWhileOpen = false;
 
     const auto dispatchByMode = [&](FaceSliderDispatchMode mode, bool& delegateInvoked, bool& internalInvoked) {
         delegateInvoked = false;
@@ -2725,52 +3589,68 @@ bool ApplyBoundFaceSliderViaRaceMenu(
                 binding,
                 clampedValue,
                 mode);
+
+            // Pair with internalCallback for non-preview traces only to keep
+            // RaceMenu's UI-side slider metadata/descriptors coherent after
+            // the GameDelegate dispatch. It is not visual FaceGen proof.
+            if (binding.hasInternalCallback && !isPreviewTrace) {
+                internalInvoked = TryInvokeRaceMenuInternalCallback(boundEntry, targetSlider, binding.callbackName);
+            }
         }
+
+        // internalCallback only refreshes RaceMenu UI-side entry metadata. It is
+        // useful after a real delegate dispatch, but it is not visual FaceGen
+        // proof and must not make a failed GameDelegate ChangeDoubleMorph call
+        // look successful.
         return delegateInvoked;
     };
 
-    const auto verifyDispatched = [&](bool callbackInvoked) {
+    const auto verifyDispatched = [&](bool callbackInvoked, bool strictReadbackWhileRaceMenuOpen) {
         if (!callbackInvoked) {
             return false;
-        }
-
-        // When RaceMenu is open, callback dispatch itself is the source of truth.
-        // Readback can lag because ValueSet/slider state is updated asynchronously.
-        if (g_raceMenuOpen.load()) {
-            return true;
         }
 
         if (!havePreviousValue) {
             return true;
         }
 
-        const float targetValue = static_cast<float>(clampedValue);
-        float observedValue = 0.0f;
-        for (int attempt = 0; attempt < 3; ++attempt) {
-            if (!TryReadFaceSliderValue(targetSlider, observedValue)) {
-                return true;
-            }
-
-            if (std::fabs(observedValue - targetValue) <= (kFaceMorphReadbackTolerance * 2.0f)) {
-                return true;
-            }
-
-            if (!hasMeaningfulDelta) {
-                return true;
-            }
-
-            const float previousError = std::fabs(previousValue - targetValue);
-            const float observedError = std::fabs(observedValue - targetValue);
-            if (observedError + 0.001f < previousError) {
-                return true;
-            }
-
-            // Give RaceMenu a brief moment to commit ValueSet changes before re-checking.
-            if (attempt < 2) {
-                Sleep(1);
-            }
+        if (g_raceMenuOpen.load() && !strictReadbackWhileRaceMenuOpen) {
+            // Preview and queued replay paths are noisy/asynchronous while RaceMenu is open.
+            // Treat a successful callback dispatch as success and reserve strict readback
+            // checks for commit-like flows.
+            return true;
         }
 
+        const float targetValue = static_cast<float>(clampedValue);
+        const float previousError = std::fabs(previousValue - targetValue);
+        float observedValue = 0.0f;
+        if (!TryReadFaceSliderValue(targetSlider, observedValue)) {
+            // Preserve compatibility with environments where readback is unavailable.
+            return true;
+        }
+
+        if (std::fabs(observedValue - targetValue) <= (kFaceMorphReadbackTolerance * 2.0f)) {
+            return true;
+        }
+
+        if (!hasMeaningfulDelta) {
+            return true;
+        }
+
+        const float observedError = std::fabs(observedValue - targetValue);
+        if (observedError + 0.001f < previousError) {
+            return true;
+        }
+
+        spdlog::debug(
+            "RaceMenu face slider readback made no progress trace={} slider={} callback={} value={:.3f} observed={:.3f} previous={:.3f} strict={}",
+            CurrentMorphTraceId(),
+            targetSlider,
+            binding.callbackName,
+            clampedValue,
+            observedValue,
+            previousValue,
+            strictReadbackWhileRaceMenuOpen ? 1 : 0);
         return false;
     };
 
@@ -2784,6 +3664,73 @@ bool ApplyBoundFaceSliderViaRaceMenu(
     bool lastAttemptDelegateInvoked = false;
     bool lastAttemptInternalInvoked = false;
 
+    if (isDoubleMorphCallback) {
+        // RaceMenu SKEE DoubleMorph callback contract is (value, sliderId).
+        // Keep dispatch deterministic for this callback to avoid partial/distorted
+        // morph writes caused by mixed argument shapes.
+        FaceSliderDispatchMode preferredMode = FaceSliderDispatchMode::kDelegateValueSliderId;
+        if (!binding.hasSliderId) {
+            spdlog::warn(
+                "RaceMenu double morph binding missing sliderId; falling back to value-only trace={} slider={} callback={} entryIndex={}",
+                CurrentMorphTraceId(),
+                targetSlider,
+                binding.callbackName,
+                binding.entryIndex);
+            preferredMode = FaceSliderDispatchMode::kDelegateValueOnly;
+        }
+
+        bool delegateInvoked = false;
+        bool internalInvoked = false;
+        const bool callbackInvoked = dispatchByMode(preferredMode, delegateInvoked, internalInvoked);
+        lastAttemptMode = preferredMode;
+        lastAttemptDelegateInvoked = delegateInvoked;
+        lastAttemptInternalInvoked = internalInvoked;
+
+        if (verifyDispatched(callbackInvoked, strictReadbackWhileOpen)) {
+            if (g_faceSliderDispatchMode != preferredMode && hasMeaningfulDelta) {
+                g_faceSliderDispatchMode = preferredMode;
+            }
+
+            spdlog::debug(
+                "Applied RaceMenu face slider {} trace={} label={} callback={} sliderId={} entryIndex={} score={} value={:.3f} mode={} delegateInvoked={} internalInvoked={}",
+                targetSlider,
+                CurrentMorphTraceId(),
+                binding.label.empty() ? "<unknown>" : binding.label,
+                binding.callbackName,
+                binding.hasSliderId ? binding.sliderId : -1.0,
+                binding.entryIndex,
+                binding.score,
+                clampedValue,
+                FaceSliderDispatchModeName(preferredMode),
+                delegateInvoked ? 1 : 0,
+                internalInvoked ? 1 : 0);
+            return true;
+        }
+
+        g_faceSliderDispatchMode = FaceSliderDispatchMode::kUnknown;
+        spdlog::warn(
+            "RaceMenu face slider dispatch failed trace={} slider={} callback={} value={:.3f} lastMode={} lastDelegateInvoked={} lastInternalInvoked={}",
+            CurrentMorphTraceId(),
+            targetSlider,
+            binding.callbackName,
+            clampedValue,
+            FaceSliderDispatchModeName(lastAttemptMode),
+            lastAttemptDelegateInvoked ? 1 : 0,
+            lastAttemptInternalInvoked ? 1 : 0);
+        return false;
+    }
+
+    if (g_faceSliderDispatchMode == FaceSliderDispatchMode::kInternalCallback) {
+        // Internal callback dispatch can report success without committing
+        // slider changes to the same path used by the visible face update.
+        // Do not keep or reuse it as a calibrated mode.
+        spdlog::warn(
+            "Discarding unsupported calibrated RaceMenu face slider mode trace={} mode={}",
+            CurrentMorphTraceId(),
+            FaceSliderDispatchModeName(g_faceSliderDispatchMode));
+        g_faceSliderDispatchMode = FaceSliderDispatchMode::kUnknown;
+    }
+
     if (g_faceSliderDispatchMode != FaceSliderDispatchMode::kUnknown) {
         bool delegateInvoked = false;
         bool internalInvoked = false;
@@ -2791,8 +3738,7 @@ bool ApplyBoundFaceSliderViaRaceMenu(
         lastAttemptMode = g_faceSliderDispatchMode;
         lastAttemptDelegateInvoked = delegateInvoked;
         lastAttemptInternalInvoked = internalInvoked;
-
-        if (verifyDispatched(callbackInvoked)) {
+        if (verifyDispatched(callbackInvoked, strictReadbackWhileOpen)) {
             spdlog::debug(
                 "Applied RaceMenu face slider {} trace={} label={} callback={} sliderId={} entryIndex={} score={} value={:.3f} mode={} delegateInvoked={} internalInvoked={}",
                 targetSlider,
@@ -2818,21 +3764,26 @@ bool ApplyBoundFaceSliderViaRaceMenu(
             FaceSliderDispatchModeName(g_faceSliderDispatchMode),
             delegateInvoked ? 1 : 0,
             internalInvoked ? 1 : 0);
-        return false;
+        g_faceSliderDispatchMode = FaceSliderDispatchMode::kUnknown;
     }
 
     for (FaceSliderDispatchMode mode : orderedModes) {
+        if (mode == lastAttemptMode) {
+            continue;
+        }
+
         bool delegateInvoked = false;
         bool internalInvoked = false;
         const bool callbackInvoked = dispatchByMode(mode, delegateInvoked, internalInvoked);
         lastAttemptMode = mode;
         lastAttemptDelegateInvoked = delegateInvoked;
         lastAttemptInternalInvoked = internalInvoked;
-        if (!verifyDispatched(callbackInvoked)) {
+        if (!verifyDispatched(callbackInvoked, strictReadbackWhileOpen)) {
             continue;
         }
 
-        if (hasMeaningfulDelta && g_faceSliderDispatchMode != mode) {
+        const bool allowCalibration = hasMeaningfulDelta;
+        if (allowCalibration && g_faceSliderDispatchMode != mode) {
             g_faceSliderDispatchMode = mode;
             spdlog::info(
                 "Calibrated RaceMenu face slider dispatch mode trace={} mode={}",
@@ -2872,10 +3823,33 @@ bool ApplyFaceMorphsViaRaceMenuSliders(float thin, float muscular, float fat, bo
 {
     DidRaceMenuSexChange();
 
+    spdlog::debug(
+        "ApplyFaceMorphsViaRaceMenuSliders entry trace={} generation={} values=({:.3f},{:.3f},{:.3f}) requestUiUpdate={} pending={} attemptsLeft={} bodyCategoryActive={}",
+        CurrentMorphTraceId(),
+        g_faceReplayGeneration.load(),
+        thin,
+        muscular,
+        fat,
+        requestUiUpdate ? 1 : 0,
+        g_pendingRaceMenuFaceReapply.load() ? 1 : 0,
+        g_pendingRaceMenuFaceReapplyAttempts.load(),
+        g_bodyCategoryActive.load() ? 1 : 0);
+
+    if (IsFaceSwitchTransitionActive()) {
+        spdlog::debug(
+            "Deferring RaceMenu face slider dispatch during switch transition trace={} generation={} values=({:.3f},{:.3f},{:.3f})",
+            CurrentMorphTraceId(),
+            g_faceReplayGeneration.load(),
+            thin,
+            muscular,
+            fat);
+        return false;
+    }
+
     if (g_faceSliderBridgeCallsDisabled) {
         if (!g_faceSliderBridgeDisabledLogged) {
             spdlog::warn(
-                "RaceMenu slider callback bridge disabled for this session after a prior exception; using direct face morph fallback trace={}",
+                "RaceMenu slider callback bridge disabled for this session after a prior exception; direct face morph fallback remains disabled trace={}",
                 CurrentMorphTraceId());
             g_faceSliderBridgeDisabledLogged = true;
         }
@@ -2918,8 +3892,6 @@ bool ApplyFaceMorphsViaRaceMenuSliders(float thin, float muscular, float fat, bo
             g_lastFaceBindingSignature,
             bindingSignature);
         g_lastFaceBindingSignature = bindingSignature;
-        g_faceBaselineResetPending = true;
-        g_hasSavedState = false;
         g_faceSliderDispatchMode = FaceSliderDispatchMode::kUnknown;
     }
 
@@ -2929,6 +3901,7 @@ bool ApplyFaceMorphsViaRaceMenuSliders(float thin, float muscular, float fat, bo
             spdlog::warn("Unable to resolve RaceMenu GameDelegate for face slider bridge trace={}", CurrentMorphTraceId());
             g_faceSliderBridgeUnavailableLogged = true;
         }
+        return false;
     }
 
     auto dispatchAll = [&](float thinValue, float muscularValue, float fatValue) {
@@ -2938,21 +3911,7 @@ bool ApplyFaceMorphsViaRaceMenuSliders(float thin, float muscular, float fat, bo
         return thinOk && muscularOk && fatOk;
     };
 
-    bool allApplied = true;
-    if (g_faceBaselineResetPending) {
-        const bool resetApplied = dispatchAll(0.0f, 0.0f, 0.0f);
-        if (!resetApplied) {
-            spdlog::warn(
-                "Face baseline reset after sex switch failed trace={}",
-                CurrentMorphTraceId());
-            allApplied = false;
-        } else {
-            g_faceBaselineResetPending = false;
-        }
-    }
-
-    const bool targetApplied = dispatchAll(thin, muscular, fat);
-    allApplied = allApplied && targetApplied;
+    const bool allApplied = dispatchAll(thin, muscular, fat);
 
     if (allApplied && requestUiUpdate && itemList.IsObject()) {
         itemList.Invoke("requestUpdate");
@@ -2960,20 +3919,83 @@ bool ApplyFaceMorphsViaRaceMenuSliders(float thin, float muscular, float fat, bo
 
     if (allApplied) {
         g_faceSliderBridgeUnavailableLogged = false;
+
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (player && !g_raceMenuOpen.load() && requestUiUpdate) {
+            FlushRaceMenuActorUpdates(player, false, "commit_ui_update");
+        }
     }
 
     return allApplied;
 }
 
-void FlushRaceMenuActorUpdates(RE::PlayerCharacter* player)
+bool FlushRaceMenuActorUpdates(RE::PlayerCharacter* player, bool force, std::string_view reason)
 {
-    static bool onceLogged = false;
-    if (!onceLogged) {
-        spdlog::warn(
-            "RaceMenu ActorUpdateManager flush path disabled due instability");
-        onceLogged = true;
+    if (g_actorUpdateManagerCallsDisabled) {
+        return false;
     }
-    (void)player;
+
+    if (!g_actorUpdateManagerInterface) {
+        if (!g_actorUpdateManagerUnavailableLogged) {
+            spdlog::warn(
+                "RaceMenu ActorUpdateManager interface unavailable; face morph updates may lag");
+            g_actorUpdateManagerUnavailableLogged = true;
+        }
+        return false;
+    }
+
+    const std::uint64_t nowMs = GetTickCount64();
+    const std::uint64_t previousFlushMs = g_lastActorUpdateFlushMs.load();
+    if (!force &&
+        nowMs > previousFlushMs &&
+        (nowMs - previousFlushMs) < kActorUpdateFlushMinIntervalMs) {
+        return true;
+    }
+
+    const auto interfaceValue = reinterpret_cast<std::uintptr_t>(g_actorUpdateManagerInterface);
+    if (interfaceValue < 0x10000 || interfaceValue == std::numeric_limits<std::uintptr_t>::max()) {
+        spdlog::error(
+            "RaceMenu ActorUpdateManager pointer looked invalid ({}); disabling calls",
+            static_cast<const void*>(g_actorUpdateManagerInterface));
+        g_actorUpdateManagerCallsDisabled = true;
+        return false;
+    }
+
+    std::uint32_t exceptionCode = 0;
+    if (!TryFlushRaceMenuActorUpdatesSEH(g_actorUpdateManagerInterface, player, exceptionCode)) {
+        spdlog::error(
+            "RaceMenu ActorUpdateManager call raised SEH exception 0x{:08X}; disabling calls",
+            exceptionCode);
+        g_actorUpdateManagerCallsDisabled = true;
+        return false;
+    }
+
+    g_lastActorUpdateFlushMs.store(nowMs);
+    spdlog::debug(
+        "Flushed RaceMenu ActorUpdateManager trace={} reason={} force={}",
+        CurrentMorphTraceId(),
+        reason.empty() ? "<none>" : std::string(reason),
+        force ? 1 : 0);
+    return true;
+}
+
+bool TryFlushRaceMenuActorUpdatesSEH(IActorUpdateManager* updateManager, RE::PlayerCharacter* player, std::uint32_t& outExceptionCode)
+{
+    outExceptionCode = 0;
+    if (!updateManager) {
+        return false;
+    }
+
+    __try {
+        if (player) {
+            updateManager->AddBodyUpdate(player->GetFormID());
+        }
+        updateManager->Flush();
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        outExceptionCode = static_cast<std::uint32_t>(GetExceptionCode());
+        return false;
+    }
 }
 
 void TryAcquireOptionalRaceMenuInterfaces()
@@ -3008,6 +4030,28 @@ void TryAcquireOptionalRaceMenuInterfaces()
     }
 }
 
+bool ApplyPreSwitchGFxFaceClear(std::string_view reason, float snapshotThin, float snapshotMuscular, float snapshotFat)
+{
+    if (!g_raceMenuOpen.load()) {
+        return false;
+    }
+
+    ScopedMorphTrace traceScope(BuildGeneratedMorphTraceId("pre-switch-gfx-clear"));
+    const bool cleared = ApplyFaceMorphsViaRaceMenuSliders(0.0f, 0.0f, 0.0f, false);
+
+    spdlog::info(
+        "PreSwitchGFxClear reason={} result={} generation={} snapshot=({:.3f},{:.3f},{:.3f}) trace={} note=gfx_slider_path_not_native_setmorphvalue",
+        reason.empty() ? "<none>" : std::string(reason),
+        cleared ? 1 : 0,
+        g_faceReplayGeneration.load(),
+        snapshotThin,
+        snapshotMuscular,
+        snapshotFat,
+        CurrentMorphTraceId());
+
+    return cleared;
+}
+
 class RleyModCallbackHandler : public RE::BSTEventSink<SKSE::ModCallbackEvent>
 {
 public:
@@ -3026,11 +4070,14 @@ public:
 
         if (eventNameView.rfind("RSM_", 0) == 0) {
             spdlog::info(
-                "RaceMenu mod event name={} strArg={} numArg={:.3f} sender={:08X}",
+                "RaceMenu mod event name={} strArg={} numArg={:.3f} sender={:08X} generation={} pending={} attemptsLeft={}",
                 eventName,
                 strArg,
                 a_event->numArg,
-                a_event->sender ? a_event->sender->GetFormID() : 0u);
+                a_event->sender ? a_event->sender->GetFormID() : 0u,
+                g_faceReplayGeneration.load(),
+                g_pendingRaceMenuFaceReapply.load() ? 1 : 0,
+                g_pendingRaceMenuFaceReapplyAttempts.load());
         }
 
         if (a_event->eventName == "Rley_OpenPhysique") {
@@ -3039,11 +4086,55 @@ public:
         else if (a_event->eventName == "Rley_ClosePhysique") {
             SetPhysiqueDesiredVisible(false);
         }
-        else if (a_event->eventName == "RSM_Initialized" || a_event->eventName == "RSM_Reinitialized") {
+        else if (a_event->eventName == "RSM_SliderChange" && a_event->strArg == "ChangeSex") {
+            const bool wasActive = g_faceSwitchTransitionActive.load();
+
+            const float snapshotThin = std::clamp(g_lastThin.load(), 0.0f, 1.0f);
+            const float snapshotMuscular = std::clamp(g_lastMuscular.load(), 0.0f, 1.0f);
+            const float snapshotFat = std::clamp(g_lastFat.load(), 0.0f, 1.0f);
+            g_switchTransitionReplayThin.store(snapshotThin);
+            g_switchTransitionReplayMuscular.store(snapshotMuscular);
+            g_switchTransitionReplayFat.store(snapshotFat);
+            g_switchTransitionReplayHasValues.store(true);
+            g_pendingFaceReplayAfterSwitchTransition.store(true);
+
+            ApplyPreSwitchGFxFaceClear("RSM_SliderChange:ChangeSex", snapshotThin, snapshotMuscular, snapshotFat);
+
+            BeginFaceSwitchTransition("RSM_SliderChange:ChangeSex");
+            if (!wasActive) {
+                MarkRaceMenuFaceStateDirty("RSM_SliderChange:ChangeSex", /*pauseBurst=*/false);
+            } else {
+                spdlog::debug(
+                    "Ignored duplicate face dirty mark during active switch transition reason=RSM_SliderChange:ChangeSex");
+            }
+        }
+        else if (a_event->eventName == "RSM_Reinitialized") {
+            const bool wasActive = g_faceSwitchTransitionActive.load();
+            BeginFaceSwitchTransition("RSM_Reinitialized");
+            if (!wasActive) {
+                // RaceMenu rebuilds slider lists during race/sex transitions. If we keep cached
+                // bindings/cached morph state across that boundary, wheel values can desync.
+                MarkRaceMenuFaceStateDirty(a_event->eventName.c_str(), /*pauseBurst=*/false);
+            } else {
+                spdlog::debug(
+                    "Ignored duplicate face dirty mark during active switch transition reason=RSM_Reinitialized");
+            }
+        }
+        else if (a_event->eventName == "RSM_Initialized") {
             // RaceMenu rebuilds slider lists during race/sex transitions. If we keep cached
             // bindings/cached morph state across that boundary, wheel values can desync.
-            MarkRaceMenuFaceStateDirty(a_event->eventName.c_str());
-            PrimeRaceMenuSexTracking();
+            MarkRaceMenuFaceStateDirty(a_event->eventName.c_str(), /*pauseBurst=*/false);
+            // Always use g_lastThin as the replay source — it is the most recently committed
+            // wheel value (updated by CacheMorphState on every apply). Pending reapply values
+            // may belong to a stale burst from a prior switch cycle.
+            const float replayThin     = std::clamp(g_lastThin.load(),     0.0f, 1.0f);
+            const float replayMuscular = std::clamp(g_lastMuscular.load(), 0.0f, 1.0f);
+            const float replayFat      = std::clamp(g_lastFat.load(),      0.0f, 1.0f);
+            QueueRaceMenuFaceReapply("RSM_Initialized", kPendingFaceReapplyInitialDelayMs, replayThin, replayMuscular, replayFat);
+            // QueueNativeFaceRestore disabled for diagnostic: testing GFx-only path.
+            // Direct SetMorphValue writes could pre-populate SKEE's ValueMap and cause
+            // the GFx slider replay to compute zero delta and do nothing visually.
+            // QueueNativeFaceRestore("rsm_initialized_early_write", replayThin, replayMuscular, replayFat);
         }
 
         return RE::BSEventNotifyControl::kContinue;
@@ -3132,8 +4223,12 @@ void ApplyVertexDiffs(RE::PlayerCharacter* player, bool includeFirstPerson)
     }
 }
 
-bool ApplyMorphsNative(float thin, float muscular, float fat, bool isCommit)
+bool ApplyMorphsNative(float thin, float muscular, float fat, bool isCommit, bool* outFaceApplySucceeded)
 {
+    if (outFaceApplySucceeded) {
+        *outFaceApplySucceeded = false;
+    }
+
     if (!TryAcquireRaceMenuBodyMorphInterface()) {
         return false;
     }
@@ -3144,11 +4239,23 @@ bool ApplyMorphsNative(float thin, float muscular, float fat, bool isCommit)
         return false;
     }
 
+    // Always keep pending-reapply targets in sync with the latest requested wheel state
+    // so any deferred retry uses fresh values instead of stale pre-switch morphs.
+    if (g_raceMenuOpen.load()) {
+        g_pendingRaceMenuFaceReapplyThin.store(std::clamp(thin, 0.0f, 1.0f));
+        g_pendingRaceMenuFaceReapplyMuscular.store(std::clamp(muscular, 0.0f, 1.0f));
+        g_pendingRaceMenuFaceReapplyFat.store(std::clamp(fat, 0.0f, 1.0f));
+        g_pendingRaceMenuFaceReapplyHasValues.store(true);
+    }
+
     bool faceApplySucceeded = ApplyFaceMorphsViaRaceMenuSliders(
         thin,
         muscular,
         fat,
         isCommit);
+    if (outFaceApplySucceeded) {
+        *outFaceApplySucceeded = faceApplySucceeded;
+    }
     if (faceApplySucceeded && ShouldVerifyFaceReadback(isCommit)) {
         if (!VerifyFaceReadback(thin, muscular, fat, isCommit)) {
             spdlog::error(
@@ -3156,23 +4263,26 @@ bool ApplyMorphsNative(float thin, float muscular, float fat, bool isCommit)
                 CurrentMorphTraceId(),
                 isCommit ? "commit" : "preview");
             faceApplySucceeded = false;
+            if (outFaceApplySucceeded) {
+                *outFaceApplySucceeded = false;
+            }
         }
     }
 
     if (!faceApplySucceeded) {
-        const bool canUseDirectFallback = !g_raceMenuOpen.load();
-        if (canUseDirectFallback) {
-            faceApplySucceeded = ApplyFaceMorphsDirectStable(thin, muscular, fat, isCommit);
-            if (!faceApplySucceeded) {
-                spdlog::warn(
-                    "Face morph direct fallback was unavailable; body morph apply continued trace={}",
-                    CurrentMorphTraceId());
-            }
-        } else {
-            spdlog::warn(
-                "Face morph fallback skipped because RaceMenu is open trace={} mode={}",
-                CurrentMorphTraceId(),
-                isCommit ? "commit" : "preview");
+        spdlog::warn(
+            "Face slider GFx apply failed; direct FaceMorph fallback is disabled for safety trace={} mode={} raceMenuOpen={}",
+            CurrentMorphTraceId(),
+            isCommit ? "commit" : "preview",
+            g_raceMenuOpen.load() ? 1 : 0);
+
+        if (g_raceMenuOpen.load() && isCommit) {
+            QueueRaceMenuFaceReapply(
+                "commit_face_apply_failed",
+                kPendingFaceReapplyRetryDelayMs,
+                thin,
+                muscular,
+                fat);
         }
     }
 
@@ -3186,7 +4296,7 @@ bool ApplyMorphsNative(float thin, float muscular, float fat, bool isCommit)
 
     g_bodyMorphInterface->UpdateModelWeight(player, isCommit);
     ApplyVertexDiffs(player, isCommit);
-    return faceApplySucceeded;
+    return true;
 }
 
 void SetWeightSyncValue(float value)
@@ -3202,16 +4312,29 @@ float GetWeightSyncValue()
 bool ApplyWeightToCurrentDirection(float weight)
 {
     const float clampedWeight = std::clamp(weight, 0.0f, 1.0f);
+    SetWeightSyncValue(clampedWeight);
+
+    if (g_raceMenuOpen.load()) {
+        // Ignore RaceMenu-driven weight synchronization while slider lists are
+        // rebuilding or when Body category is not active. Applying morph logic
+        // outside the body page can interfere with sex/race transitions.
+        if (IsFaceSwitchTransitionActive() || !g_bodyCategoryActive.load()) {
+            return true;
+        }
+    }
 
     float dirThin = 0.0f;
     float dirMuscular = 1.0f;
     float dirFat = 0.0f;
 
-    const float currentTotal = g_lastThin + g_lastMuscular + g_lastFat;
+    const float cachedThin = g_lastThin.load();
+    const float cachedMuscular = g_lastMuscular.load();
+    const float cachedFat = g_lastFat.load();
+    const float currentTotal = cachedThin + cachedMuscular + cachedFat;
     if (currentTotal > kWeightSyncThreshold) {
-        dirThin = g_lastThin / currentTotal;
-        dirMuscular = g_lastMuscular / currentTotal;
-        dirFat = g_lastFat / currentTotal;
+        dirThin = cachedThin / currentTotal;
+        dirMuscular = cachedMuscular / currentTotal;
+        dirFat = cachedFat / currentTotal;
     } else if (g_hasSavedDirection) {
         dirThin = g_lastDirectionThin;
         dirMuscular = g_lastDirectionMuscular;
@@ -3223,7 +4346,7 @@ bool ApplyWeightToCurrentDirection(float weight)
     const float fat = dirFat * clampedWeight;
 
     const bool sexChanged = DidRaceMenuSexChange();
-    const bool unchanged = !sexChanged && !g_faceBaselineResetPending && IsSameAsCached(thin, muscular, fat);
+    const bool unchanged = !sexChanged && IsSameAsCached(thin, muscular, fat);
 
     if (!unchanged) {
         if (!ApplyMorphsNative(thin, muscular, fat, false)) {
@@ -3234,7 +4357,7 @@ bool ApplyWeightToCurrentDirection(float weight)
         ApplySelectedNormalMapTextureSet(true, "weight_sync");
     }
 
-    if (g_prisma && g_view && g_prisma->IsValid(g_view) && g_menuOpen) {
+    if (g_prisma && g_view && g_prisma->IsValid(g_view) && g_menuOpen.load()) {
         char buffer[64];
         sprintf_s(buffer, "%f,%f,%f", thin, muscular, fat);
         g_prisma->InteropCall(g_view, "restoreMorphs", buffer);
@@ -3255,7 +4378,7 @@ void OpenMenu()
         return;
     }
 
-    if (g_menuOpen) {
+    if (g_menuOpen.load()) {
         return;
     }
 
@@ -3264,13 +4387,13 @@ void OpenMenu()
     g_prisma->Show(g_view);
     g_prisma->Focus(g_view, false, true);
 
-    if (g_hasSavedState) {
+    if (g_hasSavedState.load()) {
         char buffer[64];
-        sprintf_s(buffer, "%f,%f,%f", g_lastThin, g_lastMuscular, g_lastFat);
+        sprintf_s(buffer, "%f,%f,%f", g_lastThin.load(), g_lastMuscular.load(), g_lastFat.load());
         g_prisma->InteropCall(g_view, "restoreMorphs", buffer);
     }
 
-    g_menuOpen = true;
+    g_menuOpen.store(true);
 }
 
 void CloseMenu()
@@ -3283,18 +4406,18 @@ void CloseMenu()
         return;
     }
 
-    if (!g_menuOpen) {
+    if (!g_menuOpen.load()) {
         return;
     }
 
     g_prisma->Unfocus(g_view);
     g_prisma->Hide(g_view);
-    g_menuOpen = false;
+    g_menuOpen.store(false);
 }
 
 void ToggleMenu()
 {
-    if (g_menuOpen) {
+    if (g_menuOpen.load()) {
         CloseMenu();
     }
     else {
@@ -3356,15 +4479,18 @@ bool RegisterScaleform(RE::GFxMovieView* a_view, RE::GFxValue* a_root)
 void ResetRaceMenuBridgeState()
 {
     g_raceMenuOpen.store(false);
-    g_bodyCategoryActive = false;
+    g_bodyCategoryActive.store(false);
     ResetRaceMenuSexTracking();
     ResetFaceSliderBindingCache();
     g_faceSliderBridgeCallsDisabled = false;
     g_faceSliderBridgeUnavailableLogged = false;
     g_faceSliderBridgeDisabledLogged = false;
-    g_faceBaselineResetPending = false;
+    g_pendingFaceReplayAfterSwitchTransition.store(false);
+    g_switchTransitionReplayHasValues.store(false);
+    EndFaceSwitchTransition("bridge_reset");
     g_pendingRaceMenuFaceReapplyInFlight.store(false);
     ClearRaceMenuFaceReapply("bridge_reset");
+    g_lastActorUpdateFlushMs.store(0);
     g_lastFaceVerifyTimeMs.store(0);
 }
 
@@ -3387,8 +4513,23 @@ void ExecuteMorphPreviewOnMainThread(
 
     ScopedMorphTrace traceScope(std::move(traceId));
 
+    if (g_raceMenuOpen.load() && IsFaceSwitchTransitionActive()) {
+        g_pendingRaceMenuFaceReapplyThin.store(std::clamp(thin, 0.0f, 1.0f));
+        g_pendingRaceMenuFaceReapplyMuscular.store(std::clamp(muscular, 0.0f, 1.0f));
+        g_pendingRaceMenuFaceReapplyFat.store(std::clamp(fat, 0.0f, 1.0f));
+        g_pendingRaceMenuFaceReapplyHasValues.store(true);
+        g_pendingFaceReplayAfterSwitchTransition.store(true);
+        spdlog::debug(
+            "Captured preview morph during switch transition trace={} values=({:.3f},{:.3f},{:.3f})",
+            CurrentMorphTraceId(),
+            thin,
+            muscular,
+            fat);
+        return;
+    }
+
     const bool sexChanged = DidRaceMenuSexChange();
-    const bool unchanged = !sexChanged && !g_faceBaselineResetPending && IsSameAsCached(thin, muscular, fat);
+    const bool unchanged = !sexChanged && IsSameAsCached(thin, muscular, fat);
     if (unchanged) {
         return;
     }
@@ -3400,12 +4541,15 @@ void ExecuteMorphPreviewOnMainThread(
     }
     g_lastPreviewApplyTimeMs.store(nowMs);
 
-    if (!ApplyMorphsNative(thin, muscular, fat, false)) {
+    bool faceApplySucceeded = false;
+    if (!ApplyMorphsNative(thin, muscular, fat, false, &faceApplySucceeded)) {
         return;
     }
 
     CacheMorphState(thin, muscular, fat);
-    ClearRaceMenuFaceReapply("preview_applied");
+    if (faceApplySucceeded) {
+        ClearRaceMenuFaceReapply("preview_applied");
+    }
     SchedulePreviewNormalApply();
 }
 
@@ -3428,14 +4572,30 @@ void ExecuteMorphCommitOnMainThread(
 
     ScopedMorphTrace traceScope(std::move(traceId));
 
-    DidRaceMenuSexChange();
+    if (g_raceMenuOpen.load() && IsFaceSwitchTransitionActive()) {
+        g_pendingRaceMenuFaceReapplyThin.store(std::clamp(thin, 0.0f, 1.0f));
+        g_pendingRaceMenuFaceReapplyMuscular.store(std::clamp(muscular, 0.0f, 1.0f));
+        g_pendingRaceMenuFaceReapplyFat.store(std::clamp(fat, 0.0f, 1.0f));
+        g_pendingRaceMenuFaceReapplyHasValues.store(true);
+        g_pendingFaceReplayAfterSwitchTransition.store(true);
+        spdlog::debug(
+            "Captured commit morph during switch transition trace={} values=({:.3f},{:.3f},{:.3f})",
+            CurrentMorphTraceId(),
+            thin,
+            muscular,
+            fat);
+        return;
+    }
 
-    if (!ApplyMorphsNative(thin, muscular, fat, true)) {
+    bool faceApplySucceeded = false;
+    if (!ApplyMorphsNative(thin, muscular, fat, true, &faceApplySucceeded)) {
         return;
     }
 
     CacheMorphState(thin, muscular, fat);
-    ClearRaceMenuFaceReapply("commit_applied");
+    if (faceApplySucceeded) {
+        ClearRaceMenuFaceReapply("commit_applied");
+    }
     CancelPreviewNormalApply();
     RefreshCachedMorphStateFromNative();
     ApplySelectedNormalMapTextureSet(true, "commit_slider");
@@ -3450,7 +4610,19 @@ void QueueMorphPreviewApply(float thin, float muscular, float fat, std::string t
     }
 
     const std::uint64_t sequence = ++g_previewDispatchSequence;
-    taskInterface->AddTask([thin, muscular, fat, traceId = std::move(traceId), sequence]() mutable {
+    const std::uint64_t capturedGeneration = g_faceReplayGeneration.load();
+    taskInterface->AddTask([thin, muscular, fat, traceId = std::move(traceId), sequence, capturedGeneration]() mutable {
+        const std::uint64_t currentGeneration = g_faceReplayGeneration.load();
+        if (capturedGeneration != currentGeneration) {
+            spdlog::debug(
+                "Skipping stale preview morph task trace={} capturedGeneration={} currentGeneration={} seq={} latestSeq={}",
+                traceId,
+                capturedGeneration,
+                currentGeneration,
+                sequence,
+                g_previewDispatchSequence.load());
+            return;
+        }
         ExecuteMorphPreviewOnMainThread(thin, muscular, fat, std::move(traceId), sequence);
     });
 }
@@ -3467,7 +4639,19 @@ void QueueMorphCommitApply(float thin, float muscular, float fat, std::string tr
     ++g_previewDispatchSequence;
 
     const std::uint64_t sequence = ++g_commitDispatchSequence;
-    taskInterface->AddTask([thin, muscular, fat, traceId = std::move(traceId), sequence]() mutable {
+    const std::uint64_t capturedGeneration = g_faceReplayGeneration.load();
+    taskInterface->AddTask([thin, muscular, fat, traceId = std::move(traceId), sequence, capturedGeneration]() mutable {
+        const std::uint64_t currentGeneration = g_faceReplayGeneration.load();
+        if (capturedGeneration != currentGeneration) {
+            spdlog::debug(
+                "Skipping stale commit morph task trace={} capturedGeneration={} currentGeneration={} seq={} latestSeq={}",
+                traceId,
+                capturedGeneration,
+                currentGeneration,
+                sequence,
+                g_commitDispatchSequence.load());
+            return;
+        }
         ExecuteMorphCommitOnMainThread(thin, muscular, fat, std::move(traceId), sequence);
     });
 }
@@ -3545,7 +4729,7 @@ void OnDataLoaded()
     g_prisma->RegisterJSListener(g_view, "onMorphsPreview", OnMorphsPreview);
     g_prisma->RegisterJSListener(g_view, "onMorphsCommit", OnMorphsCommit);
     g_prisma->Hide(g_view);
-    g_menuOpen = false;
+    g_menuOpen.store(false);
 
     TryAcquireRaceMenuBodyMorphInterface();
     RefreshCachedMorphStateFromNative();
@@ -3618,16 +4802,21 @@ void UpdateLoop()
     while (true) {
         const bool shouldBeVisible = GetPhysiqueDesiredVisible();
 
-        if (shouldBeVisible && !g_menuOpen) {
+        if (shouldBeVisible && !g_menuOpen.load()) {
             OpenMenu();
         }
-        else if (!shouldBeVisible && g_menuOpen) {
+        else if (!shouldBeVisible && g_menuOpen.load()) {
             CloseMenu();
         }
 
         if (GetAsyncKeyState(VK_F7) & 1) {
             ToggleMenu();
         }
+
+        // Transition expiry must be polled even when no morph payloads are arriving.
+        // Otherwise repeated ChangeSex/Reinitialized events can leave the transition
+        // gate effectively latched until the next slider callback happens.
+        PollFaceSwitchTransitionExpiry();
 
         UpdateScheduledTextureSnapshots();
         UpdatePendingRaceMenuFaceReapply();
@@ -3638,7 +4827,12 @@ void UpdateLoop()
                     remainingPreviewNormalApplyTicks,
                     remainingPreviewNormalApplyTicks - 1)) {
                 if (remainingPreviewNormalApplyTicks == 1) {
-                    ApplySelectedNormalMapTextureSet(false, "preview_slider_debounced");
+                    auto* taskInterface = SKSE::GetTaskInterface();
+                    if (taskInterface) {
+                        taskInterface->AddTask([]() {
+                            ApplySelectedNormalMapTextureSet(false, "preview_slider_debounced");
+                        });
+                    }
                 }
             }
         }
