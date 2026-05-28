@@ -49,9 +49,22 @@ MPPatcher.exe          migrate_legacy.py
 
 ## Artifact 1 — MPPatcher.exe (Public Tool)
 
+### Development Sequence
+
+**Phase 1 — CLI prototype (internal use, validates approach)**
+Build `mppatcher-cli.exe` first — no Qt GUI, just command-line arguments:
+```
+mppatcher-cli.exe --project "FOS - Vanilla Outfits 3BA Refit.osp" --reference "Rley COR - CBBE Body" --dry-run
+```
+`--dry-run` logs what would be done without writing anything. Used internally for the legacy migration and to confirm the C++ fork is viable before investing in the GUI.
+
+**Phase 2 — Qt GUI wrapper (public release)**
+Once the CLI core is proven, wrap it in the Qt5 SliderGroup picker window for public distribution.
+
 ### Technology
 - C++ fork of **BodySlide and Outfit Studio** (`ousnius/BodySlide-and-Outfit-Studio`)
-- Qt5 GUI (separate from OutfitStudio's main window — new lightweight window)
+- Phase 1: CLI only (`mppatcher-cli.exe`)
+- Phase 2: Qt5 GUI on top of the same core (`MPPatcher.exe`)
 - Build: CMake + Qt5 SDK + MSVC or MinGW
 - Distribution: standalone `.exe` + Qt DLLs, registered as MO2 executable
 
@@ -151,17 +164,34 @@ One-time migration of the user's existing "Fat People of Skyrim" BodySlide patch
 
 ### Pipeline
 
-**Phase 1 — Pre-process (run before MPPatcher)**
+**Phase 0 — Scan (mandatory before anything else)**
+```
+migrate_legacy.py --scan --source E:\Sculpting\...\Packages
+```
+Reads all `.osp`/`.osd` files and produces a manifest without modifying anything. Output per SliderSet:
+- Outfit name, shapes list
+- Detected reference shape
+- Legacy sliders found (`Chubby Refit`, `Fat Morph`, etc.)
+- RM_* sliders already present (skip candidates)
+- OSD path
+- Suggested action (`migrate`, `coalesce+migrate`, `skip — already patched`, `skip — no legacy slider`, `manual review`)
+- Risk flags (e.g. coalesce candidate, missing OSD entry, vertex count mismatch)
+
+Review the manifest before running `--pre`. No batch operation runs blind on 650 outfits.
+
+**Phase 1 — Pre-process (run after reviewing scan)**
 ```
 migrate_legacy.py --pre --source E:\Sculpting\...\Packages
 ```
 For each SliderSet in each source `.osp`:
-1. If the outfit has `Rley CBBE Shoulder` + `Rley CBBE Outfit`: coalesce their deltas (sum vertex-by-vertex) into a single combined delta
+1. If the outfit has `Rley CBBE Shoulder` + `Rley CBBE Outfit`: coalesce their deltas (sum vertex-by-vertex) into a single combined delta. Log explicitly: which shapes were affected, vertex counts, whether any vertices overlap between the two sliders.
 2. Extract vertex delta data for the legacy slider from the `.osd` file
 3. Save as `<outfit_name>.legacy.json` — a backup of all vertex deltas per shape
 
-**Phase 2 — Patch**  
-Run MPPatcher.exe normally. Outputs patched projects with `RM_Heavy` from Conform All.
+> **Coalesce note:** summing deltas is mathematically correct when the two sliders target independent vertex regions (which `Shoulder` + `Outfit` likely do). The scan phase flags any overlap so you can verify before committing.
+
+**Phase 2 — Patch**
+Run MPPatcher CLI / MPPatcher.exe normally. Outputs patched projects with `RM_Heavy` from Conform All.
 
 **Phase 3 — Post-process (run after MPPatcher)**
 ```
@@ -192,13 +222,17 @@ Total: ~650+ outfit SliderSets to migrate
 ## Full Migration Flow (Internal Use)
 
 ```
+Step 0: migrate_legacy.py --scan
+         └─ audits all 650+ outfits, produces manifest
+         └─ flags coalesce candidates, missing OSD, already-patched
+         └─ REVIEW BEFORE PROCEEDING
+
 Step 1: migrate_legacy.py --pre
          └─ reads all legacy .osp/.osd
-         └─ coalesces split sliders where needed
+         └─ coalesces split sliders where needed (logged explicitly)
          └─ outputs backup .legacy.json per outfit
 
-Step 2: MPPatcher.exe (via MO2)
-         └─ user selects all relevant SliderGroups
+Step 2: mppatcher-cli.exe (via MO2, Phase 1) or MPPatcher.exe (Phase 2)
          └─ swap reference → Conform All → save
          └─ outputs new projects with RM_Heavy/Muscular/Thin
 
