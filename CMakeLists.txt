@@ -32,6 +32,19 @@ endif()
 
 # Otherwise, you can set OUTPUT_FOLDER to any place you'd like :)
 # set(OUTPUT_FOLDER "C:/path/to/any/folder")
+#
+# Project-local deploy root override:
+# If set, this path is used as-is and takes priority over SKYRIM_FOLDER /
+# SKYRIM_MODS_FOLDER environment variables above.
+set(
+    MPS_DEPLOY_OUTPUT
+    ""
+    CACHE PATH
+    "Deploy output root folder (contains SKSE/Plugins)"
+)
+if(MPS_DEPLOY_OUTPUT)
+    set(OUTPUT_FOLDER "${MPS_DEPLOY_OUTPUT}")
+endif()
 
 # Setup your SKSE plugin as an SKSE plugin!
 find_package(CommonLibSSE CONFIG REQUIRED)

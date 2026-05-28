@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cctype>
 #include <cstdint>
+#include <string>
 #include "RE/B/BSFixedString.h"
 
 namespace RE
@@ -15,6 +17,49 @@ using skee_u32 = std::uint32_t;
 using skee_i32 = std::int32_t;
 using skee_u16 = std::uint16_t;
 using skee_u8 = std::uint8_t;
+
+class SKEEFixedString
+{
+public:
+	SKEEFixedString() :
+		m_hash(HashLower(m_internal.c_str(), m_internal.size()))
+	{}
+
+	SKEEFixedString(const char* str) :
+		m_internal(str ? str : ""),
+		m_hash(HashLower(m_internal.c_str(), m_internal.size()))
+	{}
+
+	SKEEFixedString(const std::string& str) :
+		m_internal(str),
+		m_hash(HashLower(m_internal.c_str(), m_internal.size()))
+	{}
+
+	SKEEFixedString(const RE::BSFixedString& str) :
+		m_internal(str.c_str() ? str.c_str() : ""),
+		m_hash(HashLower(m_internal.c_str(), m_internal.size()))
+	{}
+
+	const char* c_str() const { return m_internal.c_str(); }
+	std::size_t GetHash() const { return m_hash; }
+
+private:
+	static std::size_t HashLower(const char* str, std::size_t count)
+	{
+		constexpr std::size_t kFnvOffsetBasis = 14695981039346656037ULL;
+		constexpr std::size_t kFnvPrime = 1099511628211ULL;
+
+		std::size_t value = kFnvOffsetBasis;
+		for (std::size_t index = 0; index < count; ++index) {
+			value ^= static_cast<std::size_t>(std::tolower(static_cast<unsigned char>(str[index])));
+			value *= kFnvPrime;
+		}
+		return value;
+	}
+
+	std::string m_internal;
+	std::size_t m_hash;
+};
 
 class IPluginInterface
 {
@@ -124,8 +169,12 @@ public:
 		kCurrentPluginVersion = 1
 	};
 
-	virtual float GetMorphValueByName(RE::TESNPC* npc, const RE::BSFixedString& name) = 0;
-	virtual void SetMorphValue(RE::TESNPC* npc, const RE::BSFixedString& name, float value) = 0;
+	// Keep the reserved slots before SetMorphValue so a ValueMap write cannot
+	// accidentally land on SKEE's save/serialize path.
+	virtual float GetMorphValueByName(RE::TESNPC* npc, const SKEEFixedString& name) = 0;
+	virtual void SKEEReserved_Serialize(void*, void*, unsigned int) = 0;
+	virtual unsigned int SKEEReserved_GetByHash(void*, unsigned long long, char*) = 0;
+	virtual void SetMorphValue(RE::TESNPC* npc, const SKEEFixedString& name, float value) = 0;
 };
 
 class IAddonAttachmentInterface;

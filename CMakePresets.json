@@ -83,6 +83,10 @@
                 "CMAKE_BUILD_TYPE": {
                     "type": "STRING",
                     "value": "Debug"
+                },
+                "MPS_DEPLOY_OUTPUT": {
+                    "type": "PATH",
+                    "value": "E:/Wabbajack/InstallPacks/mods/ModernPhysiquePicker"
                 }
             }
         },
@@ -103,6 +107,10 @@
                 "CMAKE_BUILD_TYPE": {
                     "type": "STRING",
                     "value": "Release"
+                },
+                "MPS_DEPLOY_OUTPUT": {
+                    "type": "PATH",
+                    "value": "E:/Wabbajack/InstallPacks/mods/ModernPhysiquePicker"
                 }
             }
         }
