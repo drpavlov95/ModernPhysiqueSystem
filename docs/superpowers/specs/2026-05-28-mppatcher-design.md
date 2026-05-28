@@ -92,9 +92,17 @@ MPPatcher must be launched through MO2 so the process inherits MO2's VFS hooks. 
 │      Output folder: [E:\...\MPP Patches]  [...] │
 │  ○ Overwrite existing projects                   │
 │      ☑ Generate backup before overwriting        │
+│      Backup folder: [E:\...\MPP Backups]  [...]  │
 │                                                  │
 │  [  Patch  ]               0 / 0 outfits        │
 │  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │
+│                                                  │
+│  ──────────── Restore Backup ────────────────── │
+│  ┌────────────────────────────────────────────┐  │
+│  │ 2026-05-28 18:30 — CBBE Vanilla (42 files)│  │
+│  │ 2026-05-27 14:10 — HIMBO Vanilla (61 files│  │
+│  └────────────────────────────────────────────┘  │
+│  [  Restore Selected  ]                          │
 └──────────────────────────────────────────────────┘
 ```
 
@@ -126,6 +134,14 @@ All six are available in the MPP SliderGroups `Rley COR CBBE` / `Rley COR HIMBO`
 8. Save `.osp` and `.osd`
 
 The rule is simple: **always leave the project in the same reference state it was in.**
+
+### Backup & Restore (Overwrite mode only)
+
+**Backup format:** `.zip` — single archive per patch run, contains all `.osp` and `.osd` files that would be overwritten, preserving their relative paths.
+
+**Naming:** `MPPatcher_backup_YYYY-MM-DD_HH-MM-SS.zip` stored in a user-specified backup folder (defaults to `<output folder>/backups/`).
+
+**Restore:** The UI lists available backups by timestamp and the SliderGroup that was patched. Selecting one and clicking "Restore Selected" unpacks the zip back to the original paths, overwriting the patched files. Restore is a destructive operation — the UI prompts for confirmation.
 
 ### Special Cases
 
