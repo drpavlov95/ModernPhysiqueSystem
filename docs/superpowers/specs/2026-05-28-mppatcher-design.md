@@ -84,33 +84,53 @@ MPPatcher must be launched through MO2 so the process inherits MO2's VFS hooks. 
 └──────────────────────────────────────────────────┘
 ```
 
+### MPP Reference Bodies
+
+| Mesh type | Female (CBBE) | Male (HIMBO) |
+|---|---|---|
+| Body | `Rley COR - CBBE Body` | `Rley HIMBO BODY 2` |
+| Hands | `Rley COR - CBBE Hands` | `Rley HIMBO Hands` |
+| Feet | `Rley COR - CBBE Feet` | `Rley HIMBO Feet` |
+
+All six are available in the MPP SliderGroups `Rley COR CBBE` / `Rley COR HIMBO`.
+
 ### Processing Pipeline (per outfit)
 
 1. Load `.osp` — parse the SliderSet XML
-2. Identify the current reference shape
-3. Remove the current reference shape from the project
-4. Load the appropriate MPP reference body:
-   - CBBE / 3BA outfits → `Rley COR - CBBE Body` (group `Rley COR CBBE`)
-   - HIMBO outfits → `Rley HIMBO BODY 2` (group `Rley COR HIMBO`)
+2. Determine mesh type (body / hands / feet) — see Reference Detection below
+3. Determine gender (CBBE / HIMBO) — see Reference Detection below
+4. **Reference state check:**
+   - **Had reference** → remove it, load the matching MPP reference
+   - **Had no reference** → load the matching MPP reference temporarily
 5. Run Conform All — adds `RM_Heavy`, `RM_Muscular`, `RM_Thin` deltas for all outfit shapes
-6. Apply output mode:
+6. **Restore reference state:**
+   - **Had reference** → keep MPP reference in project (replaces the old one)
+   - **Had no reference** → remove the MPP reference before saving
+7. Apply output mode:
    - **New project:** rename SliderGroup to `MPP_<original>`, rename SliderSet entries to `MPP_<original>`, write to output folder
    - **Overwrite:** write back to original paths
-7. Save `.osp` and `.osd`
+8. Save `.osp` and `.osd`
+
+The rule is simple: **always leave the project in the same reference state it was in.**
 
 ### Special Cases
 
 | Case | Handling |
 |---|---|
-| Outfit has no reference shape | Load MPP body as reference, Conform All, then remove it before saving |
-| Hand/foot outfits | Use appropriate MPP hand/foot reference if available; otherwise skip with warning |
-| Gender detection | Determined by SliderGroup membership or existing reference name |
 | Outfit already has RM_* sliders | Skip with warning — already patched |
+| Mesh type cannot be determined | Skip with warning, log for manual review |
+| Head / hat outfits (no body morph needed) | Skip — no MPP reference for head meshes |
 
-### Reference Detection (CBBE vs HIMBO)
-- Check SliderGroup name for known HIMBO keywords (`HIMBO`, `himbo`)
-- Check current reference shape name
-- Fallback: let user manually set gender per group in UI
+### Reference Detection (mesh type + gender)
+
+**Gender:**
+- Check SliderGroup name for known keywords (`HIMBO`, `himbo` → male; `CBBE`, `3BA` → female)
+- Fallback: check current reference shape name in the `.osp`
+
+**Mesh type:**
+- Check current reference shape name for known keywords (`hand`, `foot`, `feet`, `boot`)
+- Check the output file path in the `.osp` (e.g. output to `meshes/.../hands/` → hands)
+- Default: assume body if neither hand nor foot keyword found
 
 ---
 
