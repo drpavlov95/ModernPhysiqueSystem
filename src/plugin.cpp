@@ -157,6 +157,7 @@ constexpr int kFaceReadbackDisableThreshold = 3;
 constexpr bool kEnableTextureSnapshotDiagnostics = false;
 constexpr bool kEnableRaceMenuSliderReloadAfterSexSwitch = true;
 constexpr int kPostRaceMenuSliderReloadSettleTicks = 30;
+constexpr int kPostRaceMenuSliderReloadReinitTimeoutTicks = 180;
 
 std::atomic<bool> g_shouldPhysiqueBeVisible = false;
 std::atomic<bool> g_raceMenuOpen = false;
@@ -203,6 +204,8 @@ std::atomic<std::uint64_t> g_faceSwitchTransitionStartMs = 0;
 std::atomic<bool> g_faceGeometryDirtyAfterRebuild = false;
 std::atomic<int> g_faceReadbackMismatchStreak = 0;
 std::atomic<bool> g_raceMenuSliderReloadInFlight = false;
+std::atomic<bool> g_postRaceMenuSliderReloadAwaitingReinitialized = false;
+std::atomic<int> g_postRaceMenuSliderReloadReinitTimeoutTicks = 0;
 std::atomic<bool> g_postRaceMenuSliderReloadReplayPending = false;
 std::atomic<int> g_postRaceMenuSliderReloadSettleTicks = 0;
 std::atomic<std::uint64_t> g_postRaceMenuSliderReloadReplayGeneration = 0;
@@ -517,6 +520,8 @@ bool TryFlushRaceMenuActorUpdatesSEH(IActorUpdateManager* updateManager, RE::Pla
 void BeginFaceSwitchTransition(std::string_view reason, std::uint64_t settleMs = kFaceSwitchTransitionSettleMs);
 void EndFaceSwitchTransition(std::string_view reason);
 bool QueueRaceMenuSliderReloadAfterSwitch(float thin, float muscular, float fat);
+void AwaitPostRaceMenuSliderReloadReinitialized(float thin, float muscular, float fat, std::string_view reason);
+void CompletePostRaceMenuSliderReloadReinitialized(std::string_view reason);
 void QueuePostRaceMenuSliderReloadReplayAfterSettle(float thin, float muscular, float fat, std::string_view reason);
 void UpdatePostRaceMenuSliderReloadReplayAfterSettle();
 bool IsFaceSwitchTransitionActive();
@@ -799,11 +804,11 @@ bool QueueRaceMenuSliderReloadAfterSwitch(float thin, float muscular, float fat)
             reloadInvoked ? "post_reload_preserve_target" : "post_reload_failed_preserve_target");
 
         if (reloadInvoked) {
-            QueuePostRaceMenuSliderReloadReplayAfterSettle(
+            AwaitPostRaceMenuSliderReloadReinitialized(
                 latestTarget.thin,
                 latestTarget.muscular,
                 latestTarget.fat,
-                "post_switch_charGen_ReloadSliders_settle_gate");
+                "post_switch_charGen_ReloadSliders_wait_for_RSM_Reinitialized");
         } else {
             g_pendingRaceMenuFaceReapplyAttempts.store(0);
             QueueRaceMenuFaceReapply(
@@ -822,7 +827,7 @@ bool QueueRaceMenuSliderReloadAfterSwitch(float thin, float muscular, float fat)
             "FACE_RACEMENU_HARD_RELOAD",
             std::format(
                 "action=task_exit reason={} capturedGeneration={} currentGeneration={} replayGeneration={} values=({:.3f},{:.3f},{:.3f}) pendingReplay={} attemptsLeft={}",
-                reloadInvoked ? "reload_invoked_settle_gate_queued" : "reload_failed_replay_queued",
+                reloadInvoked ? "reload_invoked_waiting_for_RSM_Reinitialized" : "reload_failed_replay_queued",
                 capturedGeneration,
                 currentGeneration,
                 g_faceReplayGeneration.load(),
@@ -836,6 +841,70 @@ bool QueueRaceMenuSliderReloadAfterSwitch(float thin, float muscular, float fat)
     });
 
     return true;
+}
+
+void AwaitPostRaceMenuSliderReloadReinitialized(float thin, float muscular, float fat, std::string_view reason)
+{
+    const float targetThin = std::clamp(thin, 0.0f, 1.0f);
+    const float targetMuscular = std::clamp(muscular, 0.0f, 1.0f);
+    const float targetFat = std::clamp(fat, 0.0f, 1.0f);
+
+    StoreDesiredFaceTarget(targetThin, targetMuscular, targetFat, reason.empty() ? "post_reload_await_reinitialized_target" : reason);
+    g_pendingRaceMenuFaceReapplyThin.store(targetThin);
+    g_pendingRaceMenuFaceReapplyMuscular.store(targetMuscular);
+    g_pendingRaceMenuFaceReapplyFat.store(targetFat);
+    g_pendingRaceMenuFaceReapplyHasValues.store(true);
+    g_postRaceMenuSliderReloadReplayThin.store(targetThin);
+    g_postRaceMenuSliderReloadReplayMuscular.store(targetMuscular);
+    g_postRaceMenuSliderReloadReplayFat.store(targetFat);
+    g_postRaceMenuSliderReloadReinitTimeoutTicks.store(kPostRaceMenuSliderReloadReinitTimeoutTicks);
+    const bool wasAwaiting = g_postRaceMenuSliderReloadAwaitingReinitialized.exchange(true);
+
+    LogFaceFlagChange(
+        "postRaceMenuSliderReloadAwaitingReinitialized",
+        wasAwaiting ? "1" : "0",
+        "1",
+        reason.empty() ? "post_reload_wait_for_reinitialized" : reason);
+    LogFaceDiag(
+        "FACE_RACEMENU_HARD_RELOAD",
+        std::format(
+            "action=await_RSM_Reinitialized reason={} timeoutTicks={} generation={} values=({:.3f},{:.3f},{:.3f}) oldAwaiting={}",
+            reason.empty() ? "<none>" : std::string(reason),
+            kPostRaceMenuSliderReloadReinitTimeoutTicks,
+            g_faceReplayGeneration.load(),
+            targetThin,
+            targetMuscular,
+            targetFat,
+            wasAwaiting ? 1 : 0));
+    spdlog::info(
+        "Awaiting RSM_Reinitialized after CharGen.ReloadSliders reason={} timeoutTicks={} generation={} values=({:.3f},{:.3f},{:.3f}) note=SWF_SetSliders_completes_asynchronously",
+        reason.empty() ? "<none>" : std::string(reason),
+        kPostRaceMenuSliderReloadReinitTimeoutTicks,
+        g_faceReplayGeneration.load(),
+        targetThin,
+        targetMuscular,
+        targetFat);
+}
+
+void CompletePostRaceMenuSliderReloadReinitialized(std::string_view reason)
+{
+    if (!g_postRaceMenuSliderReloadAwaitingReinitialized.load()) {
+        return;
+    }
+
+    const bool oldAwaiting = g_postRaceMenuSliderReloadAwaitingReinitialized.exchange(false);
+    g_postRaceMenuSliderReloadReinitTimeoutTicks.store(0);
+    LogFaceFlagChange(
+        "postRaceMenuSliderReloadAwaitingReinitialized",
+        oldAwaiting ? "1" : "0",
+        "0",
+        reason.empty() ? "post_reload_RSM_Reinitialized" : reason);
+
+    QueuePostRaceMenuSliderReloadReplayAfterSettle(
+        g_postRaceMenuSliderReloadReplayThin.load(),
+        g_postRaceMenuSliderReloadReplayMuscular.load(),
+        g_postRaceMenuSliderReloadReplayFat.load(),
+        reason.empty() ? "post_reload_RSM_Reinitialized" : reason);
 }
 
 void QueuePostRaceMenuSliderReloadReplayAfterSettle(float thin, float muscular, float fat, std::string_view reason)
@@ -886,6 +955,47 @@ void QueuePostRaceMenuSliderReloadReplayAfterSettle(float thin, float muscular, 
 
 void UpdatePostRaceMenuSliderReloadReplayAfterSettle()
 {
+    if (g_postRaceMenuSliderReloadAwaitingReinitialized.load()) {
+        if (!g_raceMenuOpen.load()) {
+            const bool oldAwaiting = g_postRaceMenuSliderReloadAwaitingReinitialized.exchange(false);
+            g_postRaceMenuSliderReloadReinitTimeoutTicks.store(0);
+            LogFaceFlagChange(
+                "postRaceMenuSliderReloadAwaitingReinitialized",
+                oldAwaiting ? "1" : "0",
+                "0",
+                "post_reload_await_aborted_racemenu_closed");
+            return;
+        }
+
+        int timeoutTicks = g_postRaceMenuSliderReloadReinitTimeoutTicks.load();
+        while (timeoutTicks > 0) {
+            if (g_postRaceMenuSliderReloadReinitTimeoutTicks.compare_exchange_weak(timeoutTicks, timeoutTicks - 1)) {
+                return;
+            }
+        }
+
+        const bool oldAwaiting = g_postRaceMenuSliderReloadAwaitingReinitialized.exchange(false);
+        LogFaceFlagChange(
+            "postRaceMenuSliderReloadAwaitingReinitialized",
+            oldAwaiting ? "1" : "0",
+            "0",
+            "post_reload_RSM_Reinitialized_timeout");
+        LogFaceDiag(
+            "FACE_RACEMENU_HARD_RELOAD",
+            std::format(
+                "action=await_RSM_Reinitialized_timeout generation={} values=({:.3f},{:.3f},{:.3f}) note=fallback_to_settle_gate",
+                g_faceReplayGeneration.load(),
+                g_postRaceMenuSliderReloadReplayThin.load(),
+                g_postRaceMenuSliderReloadReplayMuscular.load(),
+                g_postRaceMenuSliderReloadReplayFat.load()));
+        QueuePostRaceMenuSliderReloadReplayAfterSettle(
+            g_postRaceMenuSliderReloadReplayThin.load(),
+            g_postRaceMenuSliderReloadReplayMuscular.load(),
+            g_postRaceMenuSliderReloadReplayFat.load(),
+            "post_reload_RSM_Reinitialized_timeout");
+        return;
+    }
+
     if (!g_postRaceMenuSliderReloadReplayPending.load()) {
         return;
     }
@@ -6915,6 +7025,7 @@ public:
             // bindings here, even during an active transition, but preserve any
             // pending recovery replay by keeping pauseBurst=false.
             MarkRaceMenuFaceStateDirty(a_event->eventName.c_str(), /*pauseBurst=*/false);
+            CompletePostRaceMenuSliderReloadReinitialized("post_reload_RSM_Reinitialized");
         }
         else if (a_event->eventName == "RSM_Initialized") {
             const bool transitionActive = IsFaceSwitchTransitionActive();

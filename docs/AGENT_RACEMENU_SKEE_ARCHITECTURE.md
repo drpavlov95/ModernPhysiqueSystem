@@ -1630,10 +1630,16 @@ expensive and should stay off during normal play.
 
 Follow-up: disabling the heavy logs showed that the previous diagnostic build
 was also acting as an accidental settle barrier after
-`CharGen.ReloadSliders()`. MPS now keeps tracing disabled by default, but uses an
-explicit post-reload settle gate before queuing the face replay. This is tied to
-SKEE's `ReloadSliders` implementation calling `QueueNiNodeUpdate(true)`; the
-face replay should not run in the same immediate task as the reload.
+`CharGen.ReloadSliders()`. The first explicit tick-based gate was still not
+enough. Source review shows why: RaceMenu's SWF `SetSliders()` completes by
+setting `_updateInterval = setInterval(this, "InitializeSliders", 500)`, and
+`InitializeSliders()` is what sends `RSM_Reinitialized`.
+
+MPS must therefore treat `CharGen.ReloadSliders()` as asynchronous. After
+calling it, wait for the reload-generated `RSM_Reinitialized`, then apply the
+post-reload settle gate and only then queue the face replay. If the event is not
+seen, a timeout fallback may queue the settle gate, but the preferred proof of
+readiness is `RSM_Reinitialized`.
 
 ---
 
