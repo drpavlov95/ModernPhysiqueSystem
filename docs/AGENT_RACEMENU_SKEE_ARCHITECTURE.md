@@ -1628,6 +1628,13 @@ For a short diagnostic run, set `Level=info` or `Level=debug` and enable only
 the specific diagnostic needed. `FaceNodeSnapshot` and `RaceMenuEntryDump` are
 expensive and should stay off during normal play.
 
+Follow-up: disabling the heavy logs showed that the previous diagnostic build
+was also acting as an accidental settle barrier after
+`CharGen.ReloadSliders()`. MPS now keeps tracing disabled by default, but uses an
+explicit post-reload settle gate before queuing the face replay. This is tied to
+SKEE's `ReloadSliders` implementation calling `QueueNiNodeUpdate(true)`; the
+face replay should not run in the same immediate task as the reload.
+
 ---
 
 *End of dossier. All facts sourced from files listed in Section 2 and Appendices D–E.*
