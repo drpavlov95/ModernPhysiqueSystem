@@ -91,6 +91,7 @@ MPPatcher must be launched through MO2 so the process inherits MO2's VFS hooks. 
 │  ● Save as new project (prefix: MPP_)            │
 │      Output folder: [E:\...\MPP Patches]  [...] │
 │  ○ Overwrite existing projects                   │
+│      ☑ Generate backup before overwriting        │
 │                                                  │
 │  [  Patch  ]               0 / 0 outfits        │
 │  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │
