@@ -116,63 +116,125 @@ Two batch modes available (`src/components/Automation.cpp`):
 
 ---
 
-## OSD Format
+## OSD Format — CONFIRMED
 
-**Location:** `src/program/OutfitProject.cpp` — `SaveSliderData()` and `OutfitProject::LoadOSDFile()`
+**Source:** `src/components/DiffData.cpp` — `OSDataFile::Write()` / `ReadOSDData()`
 
-**Format:** Binary — `src/components/SliderDataFileUtil.h` confirms extension check.
-The actual binary read/write is in `OutfitProject.cpp`.
+**Format:** Simple binary, no compression, no checksum.
 
-**IMPORTANT:** Do not write an OSD parser until verifying the binary format from `OutfitProject.cpp` around line 390. The Automation `ImportSliderData` step can import OSD files directly, which may make a custom parser unnecessary for the migration workflow.
+```
+[4 bytes]  magic    — "OSD\0" (0x4F534400)
+[4 bytes]  version  — uint32, always 1
+[4 bytes]  count    — uint32, number of morph entries
+
+For each morph entry:
+  [1 byte]  nameLen  — uint8, byte length of entry name
+  [N bytes] name     — char[nameLen], NOT null-terminated
+                        format: {shapeTargetName}{sliderName}
+                        e.g. "DraugrChubby Refit" or "3BBBFat Morph"
+  [2 bytes] diffSize — uint16, number of vertex deltas
+
+  For each delta (packed struct, no padding):
+    [2 bytes]  index — uint16, vertex index into the shape's vertex array
+    [4 bytes]  x     — float32, delta X
+    [4 bytes]  y     — float32, delta Y
+    [4 bytes]  z     — float32, delta Z
+```
+
+**Python rename is trivial:** read binary, find entries ending with `"Chubby Refit"` (space included), rename suffix to `"RM_Heavy"`, write back. No parsing library needed — pure `struct.unpack`.
 
 ---
 
 ## Slider Rename / Copy — Open Question 5
 
-**Finding:** There is NO `CopySlider` or `RenameSlider` step type in the Automation system.
+**Finding:** No `CopySlider` or `RenameSlider` automation step exists.
 
-`SetSliderProperties` can modify: hidden, zap, UV, invert, value — but NOT the slider name.
+`SetSliderProperties` can modify: hidden, zap, UV, invert, value — but NOT name.
 
-**Implication for legacy migration:**
-The step `Chubby Refit → RM_Heavy` still requires manipulating the OSD file externally (rename the morph entry in the binary file before re-importing). Python script for this step is still likely necessary, but it is now a much smaller scope:
-- Read .osd binary
-- Find the entry named "Chubby Refit" / "Fat Morph"
-- Rename it to "RM_Heavy"
-- Write back
-- Then the Automation `ImportSliderData` step re-imports it
+**Implication:** `Chubby Refit → RM_Heavy` rename requires external OSD manipulation. Python scope is tiny: read binary → find entries by name suffix → rename suffix → write back. See OSD format above.
 
 ---
 
-## Headless Viability
+## ClearReference vs SetReferenceShape Unset
 
-**Confirmed.** The core patching (LoadReference, ClearReference, ConformSliders, DeleteSlider, SaveProject) runs fully headlessly via `--automation script.xml`. No Qt window is shown.
+Two distinct operations confirmed from `AutomationDialogExecute.cpp`:
 
-The `AutomationDialog` is created but never shown (`frame->Show()` is never called in automation mode).
+**`ClearReference`** (line 815):
+```cpp
+project->DeleteShape(project->GetBaseShape());
+```
+Permanently removes the reference shape and all its data from the project.
+
+**`SetReferenceShape` with `<Unset>true</Unset>`** (line 1691):
+```cpp
+project->SetBaseShape(nullptr);
+```
+Keeps the shape in the project but unmarks it as the reference shape.
+
+**For our "no reference" case:** use `ClearReference` after ConformSliders — this removes the temporary MPP reference entirely, leaving the project in the same "no reference" state it was in.
 
 ---
 
-## Revised Architecture (replaces Phase 1 CLI plan)
+## Command Line — CONFIRMED
 
+From `src/program/OutfitStudio.h` line 869:
 ```
-MPPatcher (Python or simple C++)
-    ↓
-Generates XML automation script per batch
-    ↓
-OutfitStudio.exe --automation script.xml (headless)
-    ↓
-All 650+ outfits processed via SliderSets batch mode
+OutfitStudio.exe -automation <script_name>
 ```
 
-**Public patcher script (for other modders):**
+- Short flag: `-a`, long flag: `-automation`
+- `script_name` = filename WITHOUT `.xml` extension
+- Script must live in `<ProjectPath>/Automations/` folder
+  - `ProjectPath` = `Config["ProjectPath"]` (configurable in OS settings)
+  - Fallback: `Config["AppDir"]` = the directory where `OutfitStudio.exe` lives
+  - Typical MO2 location: `<game data>/CalienteTools/BodySlide/Automations/`
+
+**MPPatcher must:** write the generated XML to that folder, then call OS with `-automation <name>`.
+
+---
+
+## Headless Viability — CONFIRMED
+
+`RunHeadless()` in `AutomationDialog.cpp` line 2185 sets `headlessMode = true`. In headless mode:
+- Errors auto-continue (no dialog boxes)
+- Progress logged to wxLogMessage only
+- Exit code propagated correctly via `automationExitCode`
+
+---
+
+## Revised Architecture
+
+MPPatcher.exe is a **custom UI application** (own window, own branding) that uses OutfitStudio as a headless engine:
+
+```
+MPPatcher.exe (own Qt5 GUI)
+    ↓ user picks SliderGroups, output mode
+    ↓ generates XML automation script
+    ↓ writes to <OS data>/Automations/mppatcher_run.xml
+    ↓ spawns: OutfitStudio.exe -automation mppatcher_run
+    ↓ monitors process exit code
+    ↓ shows result / progress
+```
+
+The engine (Conform All, LoadReference, etc.) is OutfitStudio's own implementation. MPPatcher only needs to:
+- Read BodySlide SliderGroup XML files (to populate the picker)
+- Generate the automation XML
+- Call OutfitStudio as a subprocess
+
+**MPPatcher does NOT need to be a fork of the BS source.** It is a standalone app that drives OS headlessly.
+
+**Public automation script structure:**
 ```xml
 <AutomationScript>
     <Batch mode="SliderSets">
         <Folder>CalienteTools/BodySlide/SliderSets</Folder>
+        <SliderSetFilter>CBBE Vanilla</SliderSetFilter>
     </Batch>
     <Step type="ClearReference" />
     <Step type="LoadReference">
-        <SourceFile>...Rley COR - CBBE Body.osp</SourceFile>
+        <SourceFile>CalienteTools/BodySlide/SliderSets/Rley COR - CBBE Body.osp</SourceFile>
         <Set>Rley COR - CBBE Body</Set>
+        <MergeSliders>true</MergeSliders>
     </Step>
     <Step type="ConformSliders">
         <SliderNames>RM_Heavy,RM_Muscular,RM_Thin</SliderNames>
@@ -181,18 +243,11 @@ All 650+ outfits processed via SliderSets batch mode
 </AutomationScript>
 ```
 
-**Legacy migration script (your internal use):**
+**Legacy migration flow (your internal use):**
 ```
-Step 0: migrate_legacy.py --scan     → audit all outfits
-Step 1: migrate_legacy.py --pre      → export Chubby Refit / Fat Morph deltas, rename in OSD
-Step 2: OutfitStudio.exe --automation migrate.xml  → ClearRef, LoadRef MPP, ConformSliders (RM_*), ImportSliderData (renamed OSD), DeleteSlider (legacy), SaveProject
-Step 3: (no post step needed — ImportSliderData handles the injection)
+Step 0: migrate_legacy.py --scan
+Step 1: migrate_legacy.py --pre  → renames Chubby Refit entries in OSD to RM_Heavy
+Step 2: OutfitStudio.exe -automation migrate_cbbe
+        (ClearRef → LoadRef MPP → ConformSliders RM_* → ImportSliderData renamed OSD
+         → DeleteSlider legacy names → SetReferenceShape unset if needed → SaveProject)
 ```
-
----
-
-## Files to Read Next
-
-- `src/program/OutfitProject.cpp` lines 390-450: exact OSD binary format for Python parser
-- `src/program/AutomationDialogExecute.cpp` lines 530-600: `ClearReference` + `SetReferenceShape` exact behavior for no-reference case
-- `src/program/OutfitStudio.cpp` lines 695-720: exact command-line arg names (`--automation`, `--proj`, etc.)

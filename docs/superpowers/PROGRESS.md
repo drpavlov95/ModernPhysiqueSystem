@@ -50,7 +50,7 @@ Total: ~650+ SliderSets
 
 ---
 
-## Decisão de arquitetura (ATUALIZADA após audit)
+## Decisão de arquitetura (FINAL — audit completo 2026-05-28)
 
 ### ❌ Plano original: fork C++ do BodySlide source
 ### ✅ Plano atual: usar o modo headless nativo do OutfitStudio
@@ -65,22 +65,18 @@ OutfitStudio.exe --automation script.xml
 - `ConformSliders` aceita `SliderNames` para conformar apenas sliders específicos
 - `DeleteSlider` tem suporte a regex
 
-**Novo fluxo público (para outros modders):**
-```xml
-<AutomationScript>
-    <Batch mode="SliderSets">...</Batch>
-    <Step type="ClearReference" />
-    <Step type="LoadReference">...</Step>
-    <Step type="ConformSliders">
-        <SliderNames>RM_Heavy,RM_Muscular,RM_Thin</SliderNames>
-    </Step>
-    <Step type="SaveProject" />
-</AutomationScript>
-```
+**MPPatcher.exe = UI própria (Qt5) + chama OutfitStudio como engine headless.**
 
-**MPPatcher** = gera esse XML + chama OutfitStudio headlessly. Muito mais simples que um fork C++.
+O MPPatcher tem sua própria janela, seu próprio design, sua própria branding. O que mudou é que ele NÃO precisa reimplementar o Conform All — ele gera um XML de automação e chama `OutfitStudio.exe -automation <nome>`. O OutfitStudio roda sem janela e faz o trabalho pesado.
 
-**Limitação descoberta:** Não existe `RenameSlider` ou `CopySlider` no sistema de automação. Para renomear `Chubby Refit → RM_Heavy`, ainda é necessário manipular o arquivo `.osd` externamente (Python). Mas o escopo do Python é bem menor do que o planejado originalmente.
+**Fluxo:**
+1. Usuário abre MPPatcher.exe
+2. Seleciona SliderGroups, modo de output, etc.
+3. MPPatcher gera o XML e salva em `<OS data>/Automations/mppatcher_run.xml`
+4. Chama `OutfitStudio.exe -automation mppatcher_run` como subprocess
+5. Monitora exit code e mostra resultado
+
+**Limitação confirmada:** Não existe `RenameSlider` no sistema de automação. Para `Chubby Refit → RM_Heavy`, o Python ainda é necessário para renomear entradas no OSD binário. O OSD é simples (sem compressão/checksum) e o Python scope é mínimo.
 
 ---
 
@@ -93,16 +89,19 @@ OutfitStudio.exe --automation script.xml
 
 ### Próximos passos
 
-**⚠️ O plano Phase 1 (CLI C++) está desatualizado.** A descoberta do modo headless muda tudo.
+**⚠️ O plano Phase 1 (CLI C++) está desatualizado.** Audit completo — arquitetura confirmada.
 
-Antes de escrever código, precisa:
+O que está resolvido após o audit:
 
-1. **Verificar OSD binary format** — ler `OutfitProject.cpp` linhas 390-450 para entender o formato binário antes de escrever o parser Python
-2. **Verificar comportamento do SetReferenceShape** — como funciona o caso "sem reference" (`AutomationDialogExecute.cpp` linhas 530-600)
-3. **Escrever novo plano** baseado na arquitetura de automation XML:
-   - MPPatcher GUI (Python/Qt ou similar) gera automation XML
-   - Chama `OutfitStudio.exe --automation`
-   - migrate_legacy.py (Python) faz só o rename no OSD + re-import
+- OSD format: confirmado, trivial de parsear em Python
+- ClearReference vs SetReferenceShape: comportamentos distintos, ambos mapeados
+- Command line: `OutfitStudio.exe -automation <nome>`, script deve estar em `<ProjectPath>/Automations/`
+- Engine: não precisa reimplementar nada — OutfitStudio roda headless
+
+**Próximo passo imediato:** Escrever novo plano de implementação com a arquitetura correta:
+
+- Plano A: MPPatcher Qt5 (C++) — UI própria, chama OS como subprocess
+- Plano B: migrate_legacy.py — Python OSD rename + automation XML para migração interna
 
 ---
 
