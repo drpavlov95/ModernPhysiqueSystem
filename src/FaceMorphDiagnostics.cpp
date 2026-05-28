@@ -1,12 +1,26 @@
 #include "FaceMorphDiagnostics.h"
 
+#include <Windows.h>
+
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <cctype>
+#include <filesystem>
 #include <format>
+#include <string>
 
 #include <spdlog/spdlog.h>
 
 namespace
 {
+	constexpr const char* kConfigFileName = "ModernPhysiqueSystem.ini";
+
+	std::atomic_bool g_causalTrace{ FaceMorphDiagnostics::kEnableFaceCausalTrace };
+	std::atomic_bool g_faceNodeSnapshot{ FaceMorphDiagnostics::kEnableFaceNodeSnapshot };
+	std::atomic_bool g_raceMenuEntryDump{ FaceMorphDiagnostics::kEnableRaceMenuEntryDump };
+	std::atomic_bool g_verboseLogging{ false };
+
 	std::string Basename(std::string_view path)
 	{
 		const auto lastSlash = path.find_last_of("/\\");
@@ -15,23 +29,132 @@ namespace
 		}
 		return std::string(path.substr(lastSlash + 1));
 	}
+
+	bool FileExists(const std::filesystem::path& path)
+	{
+		std::error_code ec;
+		return std::filesystem::is_regular_file(path, ec);
+	}
+
+	std::filesystem::path FindConfigPath()
+	{
+		const std::array candidates{
+			std::filesystem::path("Data") / "SKSE" / "Plugins" / kConfigFileName,
+			std::filesystem::path("SKSE") / "Plugins" / kConfigFileName,
+			std::filesystem::path(kConfigFileName)
+		};
+
+		for (const auto& candidate : candidates) {
+			if (FileExists(candidate)) {
+				return candidate;
+			}
+		}
+
+		return candidates.front();
+	}
+
+	bool ReadBool(const std::filesystem::path& path, const char* section, const char* key, bool defaultValue)
+	{
+		return GetPrivateProfileIntA(section, key, defaultValue ? 1 : 0, path.string().c_str()) != 0;
+	}
+
+	std::string ReadString(
+		const std::filesystem::path& path,
+		const char* section,
+		const char* key,
+		std::string_view defaultValue)
+	{
+		std::array<char, 64> buffer{};
+		GetPrivateProfileStringA(
+			section,
+			key,
+			std::string(defaultValue).c_str(),
+			buffer.data(),
+			static_cast<DWORD>(buffer.size()),
+			path.string().c_str());
+		return std::string(buffer.data());
+	}
+
+	spdlog::level::level_enum ParseLogLevel(std::string value)
+	{
+		std::ranges::transform(value, value.begin(), [](unsigned char ch) {
+			return static_cast<char>(std::tolower(ch));
+		});
+
+		if (value == "trace") {
+			return spdlog::level::trace;
+		}
+		if (value == "debug") {
+			return spdlog::level::debug;
+		}
+		if (value == "info") {
+			return spdlog::level::info;
+		}
+		if (value == "warn" || value == "warning") {
+			return spdlog::level::warn;
+		}
+		if (value == "error" || value == "err") {
+			return spdlog::level::err;
+		}
+		if (value == "off") {
+			return spdlog::level::off;
+		}
+
+		return spdlog::level::info;
+	}
 }
 
 namespace FaceMorphDiagnostics
 {
+	void LoadConfig()
+	{
+		const auto configPath = FindConfigPath();
+		const bool configExists = FileExists(configPath);
+
+		const bool causalTrace = ReadBool(configPath, "Diagnostics", "FaceCausalTrace", kEnableFaceCausalTrace);
+		const bool faceNodeSnapshot = ReadBool(configPath, "Diagnostics", "FaceNodeSnapshot", kEnableFaceNodeSnapshot);
+		const bool raceMenuEntryDump = ReadBool(configPath, "Diagnostics", "RaceMenuEntryDump", kEnableRaceMenuEntryDump);
+		const bool verboseLogging = ReadBool(configPath, "Diagnostics", "VerboseLogging", false);
+		const std::string logLevelText = ReadString(configPath, "Logging", "Level", "warn");
+		const auto logLevel = ParseLogLevel(logLevelText);
+
+		g_causalTrace.store(causalTrace);
+		g_faceNodeSnapshot.store(faceNodeSnapshot);
+		g_raceMenuEntryDump.store(raceMenuEntryDump);
+		g_verboseLogging.store(verboseLogging);
+
+		spdlog::set_level(logLevel);
+		spdlog::flush_on(logLevel <= spdlog::level::debug ? spdlog::level::debug : spdlog::level::warn);
+
+		spdlog::info(
+			"ModernPhysiqueSystem config path={} exists={} logLevel={} FaceCausalTrace={} FaceNodeSnapshot={} RaceMenuEntryDump={} VerboseLogging={}",
+			configPath.string(),
+			configExists ? 1 : 0,
+			logLevelText,
+			causalTrace ? 1 : 0,
+			faceNodeSnapshot ? 1 : 0,
+			raceMenuEntryDump ? 1 : 0,
+			verboseLogging ? 1 : 0);
+	}
+
 	bool IsCausalTraceEnabled()
 	{
-		return kEnableFaceCausalTrace;
+		return g_causalTrace.load();
 	}
 
 	bool IsFaceNodeSnapshotEnabled()
 	{
-		return kEnableFaceNodeSnapshot && kEnableFaceCausalTrace;
+		return g_faceNodeSnapshot.load() && g_causalTrace.load();
 	}
 
 	bool IsRaceMenuEntryDumpEnabled()
 	{
-		return kEnableRaceMenuEntryDump && kEnableFaceCausalTrace;
+		return g_raceMenuEntryDump.load() && g_causalTrace.load();
+	}
+
+	bool IsVerboseLoggingEnabled()
+	{
+		return g_verboseLogging.load() || g_causalTrace.load();
 	}
 
 	void Log(std::string_view eventName, std::string_view fields, std::source_location location)

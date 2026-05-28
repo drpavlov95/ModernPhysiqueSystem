@@ -1604,6 +1604,30 @@ must not call private `ApplyMorphs`, and must not call FaceGenApplyMorph
 directly. The NiNode update in this path belongs to RaceMenu/SKEE's own public
 reload implementation, not to a separate MPS geometry fallback.
 
+### Diagnostic Logging Runtime Config - 2026-05-28
+
+The working reload fix should run with deep tracing disabled by default. The
+diagnostic subsystem now reads:
+
+`SKSE\Plugins\ModernPhysiqueSystem.ini`
+
+Default stable values:
+
+```ini
+[Logging]
+Level=warn
+
+[Diagnostics]
+FaceCausalTrace=0
+FaceNodeSnapshot=0
+RaceMenuEntryDump=0
+VerboseLogging=0
+```
+
+For a short diagnostic run, set `Level=info` or `Level=debug` and enable only
+the specific diagnostic needed. `FaceNodeSnapshot` and `RaceMenuEntryDump` are
+expensive and should stay off during normal play.
+
 ---
 
 *End of dossier. All facts sourced from files listed in Section 2 and Appendices D–E.*

@@ -7602,6 +7602,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
 {
     SKSE::Init(skse);
     SetupLog();
+    FaceMorphDiagnostics::LoadConfig();
     const std::uint32_t loadThreadId = GetCurrentThreadId();
     g_pluginMainThreadId.store(loadThreadId);
     LogPluginBuildIdentity();

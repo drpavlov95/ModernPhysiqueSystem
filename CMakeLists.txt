@@ -90,7 +90,6 @@ if(DEFINED OUTPUT_FOLDER)
     # Copy the SKSE plugin .dll files into the SKSE/Plugins/ folder
     set(DLL_FOLDER "${OUTPUT_FOLDER}/SKSE/Plugins")
 
-    set (CONFIG_FOLDER "Template_Plugin")
     set(SRC_CONFIG_FOLDER "${CMAKE_SOURCE_DIR}/config")
     
     message(STATUS "SKSE plugin output folder: ${DLL_FOLDER}")
@@ -106,7 +105,7 @@ if(DEFINED OUTPUT_FOLDER)
         add_custom_command(
             TARGET "${PROJECT_NAME}"
             POST_BUILD
-            COMMAND "${CMAKE_COMMAND}" -E copy_directory_if_different "${CMAKE_SOURCE_DIR}/config" "${DLL_FOLDER}/${CONFIG_FOLDER}"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${SRC_CONFIG_FOLDER}/ModernPhysiqueSystem.ini" "${DLL_FOLDER}/ModernPhysiqueSystem.ini"
             VERBATIM
         )
     endif()

@@ -8,13 +8,15 @@ namespace FaceMorphDiagnostics
 {
 	// Diagnostic tracing is opt-in. The deep RaceMenu/face-node probes are useful
 	// for targeted test builds, but they are too invasive for a stable DLL.
-	inline constexpr bool kEnableFaceCausalTrace = true;
+	inline constexpr bool kEnableFaceCausalTrace = false;
 	inline constexpr bool kEnableFaceNodeSnapshot = false;
-	inline constexpr bool kEnableRaceMenuEntryDump = true;
+	inline constexpr bool kEnableRaceMenuEntryDump = false;
 
+	void LoadConfig();
 	[[nodiscard]] bool IsCausalTraceEnabled();
 	[[nodiscard]] bool IsFaceNodeSnapshotEnabled();
 	[[nodiscard]] bool IsRaceMenuEntryDumpEnabled();
+	[[nodiscard]] bool IsVerboseLoggingEnabled();
 
 	void Log(
 		std::string_view eventName,
