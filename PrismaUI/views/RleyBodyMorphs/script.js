@@ -951,6 +951,11 @@ canvas.addEventListener("mousemove", (event) => {
 
     if (!pointerDown) return;
 
+    if (typeof event.buttons === "number" && (event.buttons & 1) === 0) {
+        cancelPointerInteraction();
+        return;
+    }
+
     const pos = getMousePos(event);
     setKnobFromPoint(pos.x, pos.y);
 });
@@ -958,6 +963,7 @@ canvas.addEventListener("mousemove", (event) => {
 canvas.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
+    finishPointerInteraction(event);
 });
 
 canvas.addEventListener("contextmenu", (event) => {
@@ -966,6 +972,8 @@ canvas.addEventListener("contextmenu", (event) => {
 });
 
 canvas.addEventListener("mouseleave", cancelPointerInteraction);
+canvas.addEventListener("mouseup", finishPointerInteraction);
+document.addEventListener("mouseup", finishPointerInteraction);
 window.addEventListener("blur", cancelPointerInteraction);
 window.addEventListener("mouseup", finishPointerInteraction);
 
