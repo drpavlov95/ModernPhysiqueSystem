@@ -6,27 +6,32 @@ const muscularValueEl = document.getElementById("muscularValue");
 const fatValueEl = document.getElementById("fatValue");
 const resetButton = document.getElementById("reset");
 const snapToggleEl = document.getElementById("snapToggle");
+const containerEl = document.querySelector(".container");
 
 const center = { x: canvas.width / 2, y: canvas.height / 2 };
 const radius = 138;
 const anchorRadius = 6;
 
+let pointerDown = false;
 let dragging = false;
+let dragStartPos = null;
 let knob = { x: center.x, y: center.y };
 
 let morphPreviewTimeout = null;
 let morphCommitTimeout = null;
 let lastPreviewSendTime = 0;
 
-const MORPH_PREVIEW_INTERVAL = 16;
+const MORPH_PREVIEW_INTERVAL = 48;
 const MORPH_COMMIT_DELAY = 120;
-const MORPH_DELTA_THRESHOLD = 0.001;
+const MORPH_DELTA_THRESHOLD = 0.01;
+const DRAG_START_DISTANCE = 5;
 
 let pendingMorphValues = { thin: 0, muscular: 0, fat: 0 };
 let lastPreviewSentValues = null;
 let lastCommitSentValues = null;
 let morphTraceSequence = 0;
 let snapEnabled = true;
+let drawFramePending = false;
 
 let snapLineState = {
     activeName: null,
@@ -153,6 +158,16 @@ function requestAnimatedRedraw() {
         if (Math.abs(snapLineState.targetAlpha - snapLineState.alpha) > 0.001) {
             requestAnimatedRedraw();
         }
+    });
+}
+
+function requestDraw() {
+    if (drawFramePending) return;
+
+    drawFramePending = true;
+    requestAnimationFrame(() => {
+        drawFramePending = false;
+        draw();
     });
 }
 
@@ -520,7 +535,9 @@ function flushCommitNow() {
     sendCommitMorphs(pendingMorphValues);
 }
 
-function scheduleMorphUpdate() {
+function scheduleMorphUpdate(options = {}) {
+    const commit = !!options.commit;
+
     pendingMorphValues = computeMorphsFromKnob();
     updateReadout(pendingMorphValues);
 
@@ -545,7 +562,9 @@ function scheduleMorphUpdate() {
         }
     }
 
-    scheduleMorphCommit();
+    if (commit) {
+        scheduleMorphCommit();
+    }
 }
 
 function drawLabel(text, x, y) {
@@ -757,7 +776,7 @@ function setKnobFromPoint(x, y) {
         knob.x = targetX;
         knob.y = targetY;
         markSlidingActivity();
-        draw();
+        requestDraw();
         scheduleMorphUpdate();
         return;
     }
@@ -801,7 +820,7 @@ function setKnobFromPoint(x, y) {
 
         markSlidingActivity();
 
-        draw();
+        requestDraw();
         scheduleMorphUpdate();
         return;
     }
@@ -868,35 +887,113 @@ function setKnobFromPoint(x, y) {
 
     markSlidingActivity();
 
-    draw();
+    requestDraw();
     scheduleMorphUpdate();
 }
 
-canvas.addEventListener("mousedown", (event) => {
-    dragging = true;
-    const pos = getMousePos(event);
-    setKnobFromPoint(pos.x, pos.y);
-});
+function finishPointerInteraction(event) {
+    if (!pointerDown) return;
 
-canvas.addEventListener("mousemove", (event) => {
-    if (!dragging) return;
-    const pos = getMousePos(event);
-    setKnobFromPoint(pos.x, pos.y);
-});
+    if (event) {
+        event.preventDefault();
+        event.stopPropagation();
+    }
 
-window.addEventListener("mouseup", () => {
+    const wasDragging = dragging;
+    const pos = event ? getMousePos(event) : null;
+
+    pointerDown = false;
     dragging = false;
+    dragStartPos = null;
 
     if (stopSlidingTimeout !== null) {
         clearTimeout(stopSlidingTimeout);
         stopSlidingTimeout = null;
     }
 
+    if (!wasDragging && pos) {
+        setKnobFromPoint(pos.x, pos.y);
+    }
+
     flushPreviewNow();
     flushCommitNow();
 
     setSnapLineHighlight(null, "off");
+}
+
+function cancelPointerInteraction() {
+    if (!pointerDown) return;
+
+    const wasDragging = dragging;
+
+    pointerDown = false;
+    dragging = false;
+    dragStartPos = null;
+
+    if (stopSlidingTimeout !== null) {
+        clearTimeout(stopSlidingTimeout);
+        stopSlidingTimeout = null;
+    }
+
+    if (wasDragging) {
+        flushPreviewNow();
+        flushCommitNow();
+    }
+
+    setSnapLineHighlight(null, "off");
+}
+
+canvas.addEventListener("mousedown", (event) => {
+    if (event.button !== 0) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    pointerDown = true;
+    dragStartPos = getMousePos(event);
+    dragging = false;
 });
+
+canvas.addEventListener("mousemove", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (!pointerDown || !dragStartPos) return;
+
+    const pos = getMousePos(event);
+
+    if (!dragging) {
+        const dx = pos.x - dragStartPos.x;
+        const dy = pos.y - dragStartPos.y;
+        if (length(dx, dy) < DRAG_START_DISTANCE) return;
+
+        dragging = true;
+    }
+
+    setKnobFromPoint(pos.x, pos.y);
+});
+
+canvas.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+});
+
+canvas.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+});
+
+canvas.addEventListener("mouseleave", cancelPointerInteraction);
+window.addEventListener("blur", cancelPointerInteraction);
+window.addEventListener("mouseup", finishPointerInteraction);
+
+if (containerEl) {
+    ["mousemove", "mouseover", "mousedown", "mouseup", "click", "dblclick", "contextmenu"].forEach((eventName) => {
+        containerEl.addEventListener(eventName, (event) => {
+            event.stopPropagation();
+        });
+    });
+}
 
 resetButton.addEventListener("click", () => {
     const values = { thin: 0, muscular: 0, fat: 0 };
