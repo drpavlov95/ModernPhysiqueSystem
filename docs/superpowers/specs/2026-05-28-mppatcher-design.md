@@ -221,7 +221,13 @@ For each patched SliderSet:
 4. Save the final `.osp`/`.osd`
 
 ### OSD Format
-BodySlide's `.osd` binary format stores named morph entries with per-vertex float3 deltas. The script reads and writes this format directly without OutfitStudio. Format reference: BodySlide source (`NifFile.cpp`, `SliderManager.cpp`).
+**Do not assume anything about this format before auditing the BS source.**
+
+Before writing any OSD parser, locate and read the following in the BodySlide source:
+- `LoadSliderData` / `SaveSliderData`
+- `ImportSliderData` / `ExportSliderData`
+
+Determine: where the parser lives, how deltas are stored, whether there is versioning, compression, or checksums. Only after that audit should the Python parser be written — or ruled out entirely (see Open Question 5).
 
 ### Source Files
 Input packages located at: `E:\Sculpting\00000 PC Ver 2\Packages\`
@@ -270,3 +276,5 @@ Step 3: migrate_legacy.py --post
 3. **Reference body file paths:** Confirm the exact `.osp` project names and DataFolder paths for `Rley COR - CBBE Body` and `Rley HIMBO BODY 2` in the MO2 VFS.
 
 4. **Hand/foot references:** Determine if MPP provides patched hand/foot body meshes that can serve as reference shapes for hand/foot outfit patching.
+
+5. **Is migrate_legacy.py necessary at all?** If the BS source already exposes primitives for copying, renaming, or deleting individual slider entries (e.g. `CopySlider`, `RenameSlider`), then `mppatcher-cli.exe` can handle the full legacy migration pipeline internally — scan, coalesce, copy `Chubby Refit → RM_Heavy`, remove legacy sliders, conform all — with no Python layer. Audit the BS source before committing to two separate systems. The Python artifact may be unnecessary.
