@@ -14,7 +14,6 @@ const anchorRadius = 6;
 
 let pointerDown = false;
 let dragging = false;
-let dragStartPos = null;
 let knob = { x: center.x, y: center.y };
 
 let morphPreviewTimeout = null;
@@ -24,7 +23,6 @@ let lastPreviewSendTime = 0;
 const MORPH_PREVIEW_INTERVAL = 48;
 const MORPH_COMMIT_DELAY = 120;
 const MORPH_DELTA_THRESHOLD = 0.01;
-const DRAG_START_DISTANCE = 5;
 
 let pendingMorphValues = { thin: 0, muscular: 0, fat: 0 };
 let lastPreviewSentValues = null;
@@ -899,20 +897,12 @@ function finishPointerInteraction(event) {
         event.stopPropagation();
     }
 
-    const wasDragging = dragging;
-    const pos = event ? getMousePos(event) : null;
-
     pointerDown = false;
     dragging = false;
-    dragStartPos = null;
 
     if (stopSlidingTimeout !== null) {
         clearTimeout(stopSlidingTimeout);
         stopSlidingTimeout = null;
-    }
-
-    if (!wasDragging && pos) {
-        setKnobFromPoint(pos.x, pos.y);
     }
 
     flushPreviewNow();
@@ -928,7 +918,6 @@ function cancelPointerInteraction() {
 
     pointerDown = false;
     dragging = false;
-    dragStartPos = null;
 
     if (stopSlidingTimeout !== null) {
         clearTimeout(stopSlidingTimeout);
@@ -950,26 +939,19 @@ canvas.addEventListener("mousedown", (event) => {
     event.stopPropagation();
 
     pointerDown = true;
-    dragStartPos = getMousePos(event);
-    dragging = false;
+    dragging = true;
+
+    const pos = getMousePos(event);
+    setKnobFromPoint(pos.x, pos.y);
 });
 
 canvas.addEventListener("mousemove", (event) => {
     event.preventDefault();
     event.stopPropagation();
 
-    if (!pointerDown || !dragStartPos) return;
+    if (!pointerDown) return;
 
     const pos = getMousePos(event);
-
-    if (!dragging) {
-        const dx = pos.x - dragStartPos.x;
-        const dy = pos.y - dragStartPos.y;
-        if (length(dx, dy) < DRAG_START_DISTANCE) return;
-
-        dragging = true;
-    }
-
     setKnobFromPoint(pos.x, pos.y);
 });
 
