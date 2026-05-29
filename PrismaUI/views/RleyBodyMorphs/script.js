@@ -6,13 +6,11 @@ const muscularValueEl = document.getElementById("muscularValue");
 const fatValueEl = document.getElementById("fatValue");
 const resetButton = document.getElementById("reset");
 const snapToggleEl = document.getElementById("snapToggle");
-const containerEl = document.querySelector(".container");
 
 const center = { x: canvas.width / 2, y: canvas.height / 2 };
 const radius = 138;
 const anchorRadius = 6;
 
-let pointerDown = false;
 let dragging = false;
 let knob = { x: center.x, y: center.y };
 
@@ -889,15 +887,7 @@ function setKnobFromPoint(x, y) {
     scheduleMorphUpdate();
 }
 
-function finishPointerInteraction(event) {
-    if (!pointerDown) return;
-
-    if (event) {
-        event.preventDefault();
-        event.stopPropagation();
-    }
-
-    pointerDown = false;
+function finishDrag() {
     dragging = false;
 
     if (stopSlidingTimeout !== null) {
@@ -911,59 +901,32 @@ function finishPointerInteraction(event) {
     setSnapLineHighlight(null, "off");
 }
 
-function cancelPointerInteraction() {
-    if (!pointerDown) return;
+function handleDragMove(event) {
+    const rect = canvas.getBoundingClientRect();
+    setKnobFromPoint(event.clientX - rect.left, event.clientY - rect.top);
+}
 
-    const wasDragging = dragging;
-
-    pointerDown = false;
-    dragging = false;
-
-    if (stopSlidingTimeout !== null) {
-        clearTimeout(stopSlidingTimeout);
-        stopSlidingTimeout = null;
-    }
-
-    if (wasDragging) {
-        flushPreviewNow();
-        flushCommitNow();
-    }
-
-    setSnapLineHighlight(null, "off");
+function handleDragEnd() {
+    document.removeEventListener("mousemove", handleDragMove);
+    document.removeEventListener("mouseup", handleDragEnd);
+    finishDrag();
 }
 
 canvas.addEventListener("mousedown", (event) => {
     if (event.button !== 0) return;
 
-    event.preventDefault();
-    event.stopPropagation();
+    if (dragging) {
+        document.removeEventListener("mousemove", handleDragMove);
+        document.removeEventListener("mouseup", handleDragEnd);
+    }
 
-    pointerDown = true;
     dragging = true;
 
     const pos = getMousePos(event);
     setKnobFromPoint(pos.x, pos.y);
-});
 
-canvas.addEventListener("mousemove", (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-
-    if (!pointerDown) return;
-
-    if (typeof event.buttons === "number" && (event.buttons & 1) === 0) {
-        cancelPointerInteraction();
-        return;
-    }
-
-    const pos = getMousePos(event);
-    setKnobFromPoint(pos.x, pos.y);
-});
-
-canvas.addEventListener("click", (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    finishPointerInteraction(event);
+    document.addEventListener("mousemove", handleDragMove);
+    document.addEventListener("mouseup", handleDragEnd);
 });
 
 canvas.addEventListener("contextmenu", (event) => {
@@ -971,19 +934,11 @@ canvas.addEventListener("contextmenu", (event) => {
     event.stopPropagation();
 });
 
-canvas.addEventListener("mouseleave", cancelPointerInteraction);
-canvas.addEventListener("mouseup", finishPointerInteraction);
-document.addEventListener("mouseup", finishPointerInteraction);
-window.addEventListener("blur", cancelPointerInteraction);
-window.addEventListener("mouseup", finishPointerInteraction);
-
-if (containerEl) {
-    ["mousemove", "mouseover", "mousedown", "mouseup", "click", "dblclick", "contextmenu"].forEach((eventName) => {
-        containerEl.addEventListener(eventName, (event) => {
-            event.stopPropagation();
-        });
-    });
-}
+window.addEventListener("blur", () => {
+    document.removeEventListener("mousemove", handleDragMove);
+    document.removeEventListener("mouseup", handleDragEnd);
+    finishDrag();
+});
 
 resetButton.addEventListener("click", () => {
     const values = { thin: 0, muscular: 0, fat: 0 };

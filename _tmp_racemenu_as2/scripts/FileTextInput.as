@@ -1,0 +1,1 @@
+Object.registerClass("FileTextInput",FileInput);

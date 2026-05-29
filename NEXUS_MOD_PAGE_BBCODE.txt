@@ -1,0 +1,261 @@
+[center][size=6][b]Rley Body Morphs[/b][/size]
+
+[i]Bring a Starfield-style physique triangle to Skyrim.[/i][/center]
+
+Rley Body Morphs adds a RaceMenu-driven physique control that lets you blend between [b]Thin[/b], [b]Muscular[/b], and [b]Heavy[/b] in real time instead of juggling a pile of disconnected sliders. Under the hood, it uses a native SKSE plugin to apply morphs directly through RaceMenu/SKEE, preview changes live, and keep supporting body and hand normal-map swaps in sync with the shape you choose.
+
+This is not just another preset. It is a runtime physique system built to make body shaping feel faster, clearer, and more visual.
+
+[hr]
+[size=5][b]What This Mod Does[/b][/size]
+
+[list]
+[*]Adds a triangle-based physique control for blending between thin, muscular, and heavy body states
+[*]Applies body morphs natively through RaceMenu/SKEE for responsive real-time preview
+[*]Syncs the selected physique state with body weight-style intensity handling
+[*]Supports runtime body and hand normal-map selection to match the chosen physique
+[*]Includes optional face morph support for supported RaceMenu extended-morph setups
+[*]Focuses on a cleaner, more modern character-sculpting workflow inside RaceMenu
+[/list]
+
+[hr]
+[size=5][b]Key Features[/b][/size]
+
+[b]Starfield-Style Physique Triangle[/b]
+
+Instead of pushing separate sliders and guessing how they combine, you drag a single selector inside a three-point triangle:
+
+[list]
+[*][b]Thin[/b]
+[*][b]Muscular[/b]
+[*][b]Heavy[/b]
+[/list]
+
+Move toward any corner for a stronger result, or blend between edges for mixed physiques like:
+
+[list]
+[*]thin + muscular
+[*]muscular + heavy
+[*]heavy + thin
+[/list]
+
+The center returns you to a neutral state.
+
+[b]Native Real-Time Preview[/b]
+
+The mod does not fake the effect through delayed scripts. The SKSE plugin talks directly to RaceMenu's morph interfaces, so changes preview immediately while you move the control.
+
+[b]Weight Sync Support[/b]
+
+The physique direction and overall body intensity stay coordinated, which makes it easier to preserve the shape style you chose while adjusting how strong the result should be.
+
+[b]Matching Normal-Map Support[/b]
+
+Rley Body Morphs can also select matching body and hand normal-map variants at runtime so the final look stays visually consistent with the morph state, especially when pushing more muscular or heavier silhouettes.
+
+[b]Optional Face Morph Integration[/b]
+
+For supported setups, the same thin / muscular / heavy values can also drive RaceMenu face morph values. If your setup does not support that path, the mod falls back gracefully and body morphing still remains the core stable feature.
+
+[hr]
+[size=5][b]Who This Is For[/b][/size]
+
+This mod is for players who want:
+
+[list]
+[*]a more intuitive body-shaping workflow
+[*]a visual physique picker instead of raw slider micromanagement
+[*]live preview while sculpting
+[*]a modern overlay-style UI inside RaceMenu
+[*]optional support for matching face and normal-map presentation
+[/list]
+
+If you like building characters that sit somewhere between archetypes instead of landing on a single preset, this mod was made for that.
+
+[hr]
+[size=5][b]Current Scope[/b][/size]
+
+The current release is centered on the [b]player character[/b] and the [b]Thin / Muscular / Heavy[/b] morph set.
+
+The most stable path is:
+
+[list]
+[*]body morph application
+[*]live preview and commit
+[*]RaceMenu/SKEE native morph handling
+[*]runtime normal-map selection when matching assets are present
+[/list]
+
+Face morph support is included as an enhancement layer, but it depends on RaceMenu extended morphs and compatible race mappings.
+
+[hr]
+[size=5][b]Requirements[/b][/size]
+
+[b]Hard Requirements[/b]
+
+[list]
+[*]Skyrim Special Edition 1.5.97
+[*]SKSE64 for Skyrim SE 1.5.97
+[*]RaceMenu / SKEE
+[*]Prisma UI
+[*]powerofthree's Papyrus Extender
+[/list]
+
+[b]Setup Requirements[/b]
+
+[list]
+[*]A compatible body setup with morph targets for [b]RM_Thin[/b], [b]RM_Muscular[/b], and [b]RM_Heavy[/b]
+[*]If you want face morph support, RaceMenu extended morphs must be enabled
+[*]If you want face morph support, your race must be mapped for the included face morph configuration
+[*]The included face mappings currently target supported COtR female race setups
+[/list]
+
+[b]Important Note[/b]
+
+This mod is a [b]runtime controller[/b] for compatible morphs. It does not magically generate body morph targets on its own. Your body setup still needs to provide the morphs this system is meant to drive.
+
+[hr]
+[size=5][b]Installation[/b][/size]
+
+[list=1]
+[*]Install all requirements first.
+[*]Install this mod with your mod manager.
+[*]Make sure the SKSE plugin, scripts, and interface files from this mod are enabled.
+[*]Make sure your body setup includes the supported morph names.
+[*]Launch the game through SKSE.
+[*]Open RaceMenu and access the Physique control included with the mod's setup.
+[/list]
+
+If you are using the face morph portion and it does not respond:
+
+[list]
+[*]confirm RaceMenu extended morphs are enabled in skee64.ini or skee64_custom.ini
+[*]confirm your race is covered by the included face morph mapping
+[/list]
+
+[hr]
+[size=5][b]How To Use[/b][/size]
+
+[list=1]
+[*]Open RaceMenu.
+[*]Open the mod's Physique control.
+[*]Drag the selector toward [b]Thin[/b], [b]Muscular[/b], or [b]Heavy[/b].
+[*]Stop between points to create blended physiques.
+[*]Use [b]Reset[/b] to return to neutral.
+[*]Fine-tune your overall character setup as usual.
+[/list]
+
+The mod previews changes while you move the selector, then commits the final values through the native morph pipeline.
+
+[hr]
+[size=5][b]Compatibility[/b][/size]
+
+[b]General Compatibility[/b]
+
+Rley Body Morphs is designed to work with RaceMenu by using its exposed morph interfaces instead of replacing the entire character system.
+
+[b]Body Compatibility[/b]
+
+It should work best with body setups that already support the target morph names. If your installed body, morph project, or preset does not include the expected morphs, the control will not have valid data to drive.
+
+[b]Texture / Normal Compatibility[/b]
+
+The normal-map side is runtime-driven. If you install matching normal assets, the mod can use them to reinforce the selected physique. If those assets are missing, the morph side can still work, but you should not expect the same texture response.
+
+The texture bridge also includes COtR-aware handling for body and hand application, with a more generic fallback path for standard setups.
+
+[b]Face Morph Compatibility[/b]
+
+Face morph support is more selective than body support.
+
+[list]
+[*]It depends on RaceMenu extended morphs
+[*]It depends on valid race mappings
+[*]It is currently aimed at supported COtR female race setups
+[/list]
+
+If the face path is unavailable, the mod continues using the stable body-first behavior.
+
+[b]Mods That May Need Attention[/b]
+
+Expect possible conflicts or last-write-wins behavior with mods that:
+
+[list]
+[*]aggressively replace body or hand texture sets at runtime
+[*]overwrite NiOverride-based skin or node overrides
+[*]replace the same morph targets with different naming conventions
+[*]depend on unsupported game versions
+[/list]
+
+[hr]
+[size=5][b]Known Limitations[/b][/size]
+
+[list]
+[*]Built for [b]Skyrim SE 1.5.97[/b]
+[*]Focused on the [b]player character[/b]
+[*]Core workflow is centered on [b]Thin / Muscular / Heavy[/b]
+[*]Face morph support is setup-dependent and not guaranteed for every race
+[*]Matching normal-map behavior depends on compatible installed assets
+[*]This mod does not replace your body mod, preset framework, or morph project
+[/list]
+
+[hr]
+[size=5][b]FAQ[/b][/size]
+
+[b]Is this a body preset?[/b]  
+No. This is a runtime physique control system. It drives compatible morph targets through RaceMenu/SKEE.
+
+[b]Does this replace CBBE, 3BA, BHUNP, or my body mod?[/b]  
+No. It sits on top of your existing body setup. You still need a compatible body and morph data.
+
+[b]Does it support NPCs?[/b]  
+The current focus is the player character.
+
+[b]Do I need the face morph part for the mod to work?[/b]  
+No. The stable core feature is body morphing. Face morph support is an extra layer for compatible setups.
+
+[b]What if the face does not change?[/b]  
+Check that RaceMenu extended morphs are enabled and that your race is supported by the included mapping.
+
+[b]What if the body changes but the textures do not?[/b]  
+That usually means the matching normal-map assets are missing, being overwritten, or being replaced by another runtime texture system.
+
+[b]Is this for Anniversary Edition?[/b]  
+This build is intended for [b]Skyrim SE 1.5.97[/b].
+
+[hr]
+[size=5][b]Recommended Mod Page Notes[/b][/size]
+
+If you are uploading this to Nexus, I strongly recommend adding:
+
+[list]
+[*]1 screenshot of the triangle UI in RaceMenu
+[*]1 before / after comparison for each corner state
+[*]1 blended example showing a non-corner physique
+[*]1 short GIF or video of live dragging and preview
+[/list]
+
+This mod will sell much better visually than through text alone.
+
+[hr]
+[size=5][b]Credits[/b][/size]
+
+[list]
+[*]Expired / RaceMenu for the morph interfaces and NiOverride ecosystem
+[*]SKSE and CommonLibSSE contributors
+[*]Prisma UI for the in-game webview layer
+[*]powerofthree for Papyrus Extender
+[/list]
+
+[hr]
+[size=5][b]Permissions[/b][/size]
+
+[quote]
+Please do not reupload this mod or its assets without permission.
+Patches are welcome. If you want to build compatibility support for other bodies, races, or texture packs, feel free to reach out.
+[/quote]
+
+[hr]
+[size=5][b]Short Description Version[/b][/size]
+
+Adds a Starfield-style physique triangle to RaceMenu for real-time Thin / Muscular / Heavy blending, powered by a native SKSE backend with optional face morph and matching normal-map support.

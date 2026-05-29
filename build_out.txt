@@ -1,0 +1,77 @@
+**********************************************************************
+** Visual Studio 2022 Developer Command Prompt v17.8.4
+** Copyright (c) 2022 Microsoft Corporation
+**********************************************************************
+Preset CMake variables:
+
+  CMAKE_BUILD_TYPE:STRING="Debug"
+  CMAKE_CXX_COMPILER="cl.exe"
+  CMAKE_CXX_FLAGS="/permissive- /Zc:preprocessor /EHsc  /MP -DWIN32_LEAN_AND_MEAN -DNOMINMAX -DUNICODE -D_UNICODE"
+  CMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
+  CMAKE_TOOLCHAIN_FILE="E:/SkyrimDev/vcpkg/scripts/buildsystems/vcpkg.cmake"
+  MPS_DEPLOY_OUTPUT:PATH="E:/Wabbajack/InstallPacks/mods/ModernPhysiquePicker"
+  VCPKG_HOST_TRIPLET="x64-windows-skse"
+  VCPKG_OVERLAY_TRIPLETS="E:/SkyrimDev/RleyBodyMorphs/cmake"
+  VCPKG_TARGET_TRIPLET="x64-windows-skse"
+
+Preset environment variables:
+
+  COMMONLIBSSE_COMPILER="/permissive- /Zc:preprocessor /EHsc  /MP"
+  COMMONLIBSSE_PLATFORM="-DWIN32_LEAN_AND_MEAN -DNOMINMAX"
+  COMMONLIBSSE_TEXT="-DUNICODE -D_UNICODE"
+
+-- Running vcpkg install
+Detecting compiler hash for triplet x64-windows-skse...
+Compiler found: C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.38.33130/bin/Hostx64/x64/cl.exe
+The following packages are already installed:
+    commonlibsse-ng-fork:x64-windows-skse@2025-16-03
+  * directxmath:x64-windows-skse@2026-03-12
+  * directxtk:x64-windows-skse@2025-10-27
+  * fmt:x64-windows-skse@12.1.0
+    nlohmann-json:x64-windows-skse@3.12.0#2
+  * rapidcsv:x64-windows-skse@8.90
+    simpleini:x64-windows-skse@4.25
+  * spdlog[core,tz-offset,fmt]:x64-windows-skse@1.17.0
+  * vcpkg-cmake:x64-windows-skse@2024-04-23
+  * vcpkg-cmake-config:x64-windows-skse@2024-05-23
+  * xbyak:x64-windows-skse@7.28
+commonlibsse-ng-fork provides CMake targets:
+
+  # this is heuristically generated, and may not be correct
+  find_package(CommonLibSSE CONFIG REQUIRED)
+  target_link_libraries(main PRIVATE CommonLibSSE::CommonLibSSE)
+
+The package nlohmann-json provides CMake targets:
+
+    find_package(nlohmann_json CONFIG REQUIRED)
+    target_link_libraries(main PRIVATE nlohmann_json::nlohmann_json)
+
+The package nlohmann-json can be configured to not provide implicit conversions via a custom triplet file:
+
+    set(nlohmann-json_IMPLICIT_CONVERSIONS OFF)
+
+For more information, see the docs here:
+    
+    https://json.nlohmann.me/api/macros/json_use_implicit_conversions/
+
+simpleini is header-only and can be used from CMake via:
+
+  find_path(SIMPLEINI_INCLUDE_DIRS "ConvertUTF.c")
+  target_include_directories(main PRIVATE ${SIMPLEINI_INCLUDE_DIRS})
+
+All requested installations completed successfully in: 766 us
+-- Running vcpkg install - done
+Parsing commonlibsse_plugin_version 0.0.1
+Setting patch version to 1
+Parsing ADD_COMMONLIBSSE_PLUGIN_MINIMUM_SKSE_VERSION 0
+-- SKSE plugin output folder: E:/Wabbajack/InstallPacks/mods/ModernPhysiquePicker/SKSE/Plugins
+-- Configuring done (10.6s)
+-- Generating done (0.1s)
+-- Build files have been written to: E:/SkyrimDev/RleyBodyMorphs/build/debug-msvc
+[1/6] Building CXX object CMakeFiles\ModernPhysiqueSystem.dir\cmake_pch.cxx.obj
+[2/6] Building CXX object CMakeFiles\ModernPhysiqueSystem.dir\src\hook.cpp.obj
+[3/6] Building CXX object CMakeFiles\ModernPhysiqueSystem.dir\__ModernPhysiqueSystemPlugin.cpp.obj
+[4/6] Building CXX object CMakeFiles\ModernPhysiqueSystem.dir\src\FaceMorphDiagnostics.cpp.obj
+[5/6] Building CXX object CMakeFiles\ModernPhysiqueSystem.dir\src\plugin.cpp.obj
+[6/6] Linking CXX shared library ModernPhysiqueSystem.dll
+EXIT_CODE=0

@@ -1,0 +1,1 @@
+Object.registerClass("colorSelector",HSVSelector);

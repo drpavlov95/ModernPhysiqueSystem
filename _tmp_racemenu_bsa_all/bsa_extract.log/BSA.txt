@@ -1,0 +1,3 @@
+2026-04-19 20:59:35 - INFO - ExtractBSA Started. Source: E:\Wabbajack\InstallPacks\mods\RaceMenu\RaceMenu.bsa, Dest: E:\SkyrimDev\RleyBodyMorphs\_tmp_racemenu_bsa_all
+2026-04-19 20:59:35 - INFO - Processing E:\Wabbajack\InstallPacks\mods\RaceMenu\RaceMenu.bsa (629 files)
+2026-04-19 20:59:35 - INFO - BSA Metadata Indexing Complete.
