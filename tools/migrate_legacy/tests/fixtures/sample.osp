@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<SliderSetInfo version="1">
+    <SliderSet name="Test Outfit CBBE">
+        <Group>CBBE Vanilla Outfits</Group>
+        <DataFolder>CBBE 3BA Vanilla (Im Physics)\Body</DataFolder>
+        <SourceFile>Ancient Nord.nif</SourceFile>
+        <OutputPath>meshes/armor/draugr</OutputPath>
+        <Shape target="3BBB" DataFolder="CBBE 3BA Vanilla (Im Physics)\Body">3BBB</Shape>
+        <Shape target="Draugr" DataFolder="CBBE 3BA Vanilla (Im Physics)\Body">Draugr</Shape>
+        <Slider name="Chubby Refit" invert="false" small="0" big="0">
+            <Data name="3BBBChubby Refit" target="3BBB" local="true">Ancient Nord.osd\3BBBChubby Refit</Data>
+            <Data name="DraugrChubby Refit" target="Draugr" local="true">Ancient Nord.osd\DraugrChubby Refit</Data>
+        </Slider>
+        <Slider name="RM_Heavy" invert="false" small="0" big="0">
+            <Data name="3BBBRM_Heavy" target="3BBB" local="true">Ancient Nord.osd\3BBBRM_Heavy</Data>
+        </Slider>
+        <Slider name="Breast Size" invert="false" small="0" big="0">
+            <Data name="3BBBBreast Size" target="3BBB" local="true">Ancient Nord.osd\3BBBBreast Size</Data>
+        </Slider>
+    </SliderSet>
+    <SliderSet name="Test Outfit HIMBO">
+        <Group>HIMBO Vanilla Outfits</Group>
+        <DataFolder>HIMBO\Body</DataFolder>
+        <SourceFile>Guard.nif</SourceFile>
+        <OutputPath>meshes/armor/guard</OutputPath>
+        <Shape target="HIMBO" DataFolder="HIMBO\Body">HIMBO</Shape>
+        <Slider name="Fat Morph" invert="false" small="0" big="0">
+            <Data name="HIMBOFat Morph" target="HIMBO" local="true">Guard.osd\HIMBOFat Morph</Data>
+        </Slider>
+    </SliderSet>
+</SliderSetInfo>
