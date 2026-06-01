@@ -6,64 +6,72 @@ Paste this at the start of the next session to resume without losing context.
 
 ## Context
 
-We're building **MPPatcher** — a standalone tool (PySide6 exe) that patches BodySlide outfit
-projects to add `RM_Heavy`, `RM_Muscular`, `RM_Thin` sliders for the ModernPhysiquePicker mod.
-There are two artifacts:
-1. **MPPatcher.exe** (`E:\SkyrimDev\MPPatcher\`) — public patcher UI, dark theme, drives
-   OutfitStudio headlessly via automation XML
-2. **migrate_legacy.py** (`tools/migrate_legacy/`) — internal Python CLI to rename legacy
-   obesity slider data (Chubby Refit → RM_Heavy) in OSD binary files
+We're building **MPPatcher** — tooling that patches BodySlide outfit projects to add
+`RM_Heavy`, `RM_Muscular`, `RM_Thin` sliders for the ModernPhysiquePicker mod. Three artifacts:
 
-## Current State (as of 2026-05-31)
+1. **MPPatcher.exe** (`E:\SkyrimDev\MPPatcher\`) — PySide6 frontend (UI). **Done & working.**
+2. **mppatcher-cli.exe** — a **C++ headless CLI** (to be built) that does the actual conform.
+   A *separate* binary built from the BodySlide/OutfitStudio source; the user's own
+   OutfitStudio.exe is **never modified or replaced**.
+3. **migrate_legacy.py** (`tools/migrate_legacy/`) — Python CLI to rename/coalesce legacy
+   obesity slider data into RM_* in OSD binary files. 23 tests passing.
 
-### MPPatcher.exe — `E:\SkyrimDev\MPPatcher\` (git: master @ 4ecc2fe)
-- PySide6 dark-theme UI: group picker, output modes, backup/restore, activity log
-- `core/config.py`: mods_root detection navigates 3 levels up from exe (fix applied)
-- Deployed to `E:\Wabbajack\InstallPacks\mods\ModernPhysiquePicker\CalienteTools\BodySlide\MPPatcher.exe`
-- **PENDING**: Needs live test via MO2 — the group list may now populate after the 3-level fix
+## ⚠️ Critical history (do not repeat)
 
-### migrate_legacy.py — `tools/migrate_legacy/` (git: codex/body-hand-normal-routing @ 52c1706)
-- `osd_parser.py` — OSD binary read/write (6 tests passing)
-- `osp_reader.py` — SliderSet XML parser (8 tests passing)
-- `coalesce.py` — vertex delta sum (3 tests passing)
-- `migrate_legacy.py` — `--scan`, `--pre`, `--gen-xml` modes (9 tests passing)
-- **Total: 23/23 tests passing**
-- **PENDING**: Run `--scan` on real FOS packages to verify detection
+- A prior session **fabricated** `docs/superpowers/audit-bs-source.md`, claiming OutfitStudio
+  had headless automation (`-automation` flag, `AutomationScript`, `RunHeadless`, "39 steps").
+  **None of it exists.** Verified: `g_cmdLineDesc` (OutfitStudio.h) only has `-proj`, `-single`,
+  `[Files...]`; `-automation` returns "Unknown option 'automation'". The fabricated audit was
+  **deleted** (2026-06-01).
+- **Decision (Option A):** build a separate `mppatcher-cli.exe` from the BS source that links
+  `OutfitProject` + `Automorph` directly. The conform logic exists but is GUI-coupled
+  (`ConvertBodyReferenceDialog`); the reusable parts are the underlying `OutfitProject` calls.
+
+## Current State (as of 2026-06-01)
+
+### MPPatcher.exe frontend — `E:\SkyrimDev\MPPatcher\` — DONE
+- Light theme, SVG icons, group picker, auto output folder, backup/restore, activity log.
+- Path/SliderGroups/OutfitStudio detection + automation-XML writing all work under MO2.
+- **MO2 VFS finding:** usvfs hooks directory **enumeration** (`os.listdir`) but **NOT** the stat
+  family (`os.path.isdir`/`exists`/`isfile`). Reads/writes via `open()` ARE hooked
+  (write→Overwrite confirmed). All detection rewritten to enumeration-only. MO2 sets **no** env
+  var, so don't auto-detect the mods folder via env. See `core/config.py` `vfs_*` helpers.
+- **It currently shells out with `-automation` (dead).** Once `mppatcher-cli.exe` exists,
+  repoint `core/os_runner.py` to invoke it.
+
+### migrate_legacy.py — `tools/migrate_legacy/` — 23/23 tests passing
+- `osd_parser.py` OSD format **verified byte-for-byte** against `OSDataFile::Read/Write` in
+  `BodySlide-and-Outfit-Studio/src/components/DiffData.cpp` (magic `OSD\0`, `DiffStruct` is
+  `#pragma pack(1)` = uint16 idx + 3 float = 14 bytes = parser's `<Hfff`). Parser is correct.
+- **PENDING:** run `--scan` on real FOS packages; harden coalesce validation (same shape, same
+  index space, uint16 vertex ceiling 65535, log missing/extra shapes).
 
 ## What Needs to Happen Next
 
-### Priority 1 — Test MPPatcher via MO2
-Launch MPPatcher.exe from MO2 and check the Activity Log at startup for:
-- `mods_root:` — should show `E:\Wabbajack\InstallPacks\mods\`
-- `sg_folders found:` — should be > 0
-- Group list should populate with slider groups
+**Execute `docs/superpowers/plans/2026-05-28-mppatcher-phase1-cli.md`** — read the
+**REVISION ADDENDUM** at the top first, then start Task 1. In order:
 
-If still empty: check what `exe_dir` is in the debug log and recalculate levels.
-
-### Priority 2 — Run migrate_legacy --scan on real data
-```powershell
-cd E:\SkyrimDev\RleyBodyMorphs\tools\migrate_legacy
-py -3.11 migrate_legacy.py --scan `
-    --source "E:\Sculpting\00000 PC Ver 2\Packages" `
-    --output scan_manifest.csv
-```
-Review `scan_manifest.csv`: verify legacy slider detection, coalesce candidates, already-patched.
-
-### Priority 3 — Run migrate_legacy --pre on one test outfit
-Pick one row from the manifest with action=migrate, run --pre on it, verify the renamed OSD.
-
-### Priority 4 — Automation XML headless test (Task 2 of MPPatcher plan)
-Create automation XML via MPPatcher and verify OutfitStudio runs headlessly and adds RM_* sliders.
+1. **Task 1 — REAL source re-audit.** Grep the actual BS source at
+   `E:\SkyrimDev\BodySlide-and-Outfit-Studio\` for the true conform / load-reference / save /
+   has-slider method names + signatures. No placeholders. Confirm wxApp requirement (the gate).
+2. **Minimal compilable proof ladder** (Addendum §B): `--inspect <one.osp>` → `--patch-one
+   <set> --dry-run` → one real outfit per mesh type (save + verify in OutfitStudio) → batch.
+3. **Verify the critical unknown:** RM_* slider data survives removal of the temporary reference
+   shape (the no-original-reference case).
+4. Confirm Addendum §C risks: usvfs injects into the QProcess child; MPP reference .osp files
+   load under VFS; test matrix {body, hands, feet} × {CBBE, HIMBO}.
 
 ## Key Files
-- Plan: `docs/superpowers/plans/2026-05-28-mppatcher-qt-ui.md`
+- Plan (primary): `docs/superpowers/plans/2026-05-28-mppatcher-phase1-cli.md` (read REVISION
+  ADDENDUM first)
 - Plan: `docs/superpowers/plans/2026-05-28-migrate-legacy.md`
-- Audit: `docs/superpowers/audit-bs-source.md`
 - Progress: `docs/superpowers/PROGRESS.md`
+- BS source (already present, do NOT re-clone): `E:\SkyrimDev\BodySlide-and-Outfit-Studio\`
+- (deleted) `docs/superpowers/audit-bs-source.md` — was fabricated; Task 1 produces the real one.
 
 ## Build Commands
 ```powershell
-# Build MPPatcher.exe
+# Build MPPatcher.exe (frontend)
 cd E:\SkyrimDev\MPPatcher
 python -m PyInstaller --onefile --windowed --name MPPatcher --icon NONE mppatcher.py -y
 
@@ -71,7 +79,7 @@ python -m PyInstaller --onefile --windowed --name MPPatcher --icon NONE mppatche
 Copy-Item dist\MPPatcher.exe `
   "E:\Wabbajack\InstallPacks\mods\ModernPhysiquePicker\CalienteTools\BodySlide\MPPatcher.exe" -Force
 
-# Run tests
+# migrate_legacy tests
 cd E:\SkyrimDev\RleyBodyMorphs\tools\migrate_legacy
 py -3.11 -m pytest tests/ -v
 ```
