@@ -62,6 +62,22 @@ try {
         Copy-Item "Source\Scripts\RleyRuntimeMorphController.psc" (Join-Path $modRoot "Source\Scripts\RleyRuntimeMorphController.psc") -Force
     }
 
+    # Deploy mppatcher-cli.exe + MPPatcher.exe
+    $bsModDir = Join-Path $modRoot "CalienteTools\BodySlide"
+    New-Item -ItemType Directory -Force $bsModDir | Out-Null
+
+    $mppatcherCliSrc = "E:\SkyrimDev\BodySlide-and-Outfit-Studio\mppatcher\build\Release\mppatcher-cli.exe"
+    if (Test-Path $mppatcherCliSrc) {
+        Copy-Item $mppatcherCliSrc "$bsModDir\mppatcher-cli.exe" -Force
+        Write-Host "Deployed mppatcher-cli.exe"
+    }
+
+    $mppatcherExeSrc = "E:\SkyrimDev\MPPatcher\dist\MPPatcher.exe"
+    if (Test-Path $mppatcherExeSrc) {
+        Copy-Item $mppatcherExeSrc "$bsModDir\MPPatcher.exe" -Force
+        Write-Host "Deployed MPPatcher.exe"
+    }
+
     Write-Host "Build + deploy completed."
 }
 finally {
