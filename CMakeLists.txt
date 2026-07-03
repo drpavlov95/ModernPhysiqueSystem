@@ -129,11 +129,13 @@ if(MPS_BUILD_TESTS)
     find_package(doctest CONFIG REQUIRED)
     set(MPS_CORE_SOURCES
         src/core/Text.cpp
+        src/core/MorphMath.cpp
     )
     set(MPS_TEST_SOURCES
         tests/cpp/test_main.cpp
         tests/cpp/test_sanity.cpp
         tests/cpp/test_text.cpp
+        tests/cpp/test_morphmath.cpp
     )
     add_executable(mps_tests ${MPS_CORE_SOURCES} ${MPS_TEST_SOURCES})
     target_compile_features(mps_tests PRIVATE cxx_std_23)

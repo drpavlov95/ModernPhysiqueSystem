@@ -4,6 +4,7 @@
 #include "RaceMenuInterop.h"
 #include "util.h"
 #include "core/Text.h"
+#include "core/MorphMath.h"
 
 #include <RE/F/FxDelegate.h>
 
@@ -34,6 +35,10 @@ using mps::text::ToLowerCopy;
 using mps::text::NormalizeSliderLabel;
 using mps::text::TryParsePercentToken;
 using mps::text::TryParseHexFormIDToken;
+using mps::ParsedMorphPayload;
+using mps::ParseMorphPayload;
+using mps::QuantizeMorphValue;
+using mps::MorphValueToPercent;
 
 #ifndef MPS_GIT_COMMIT
 #define MPS_GIT_COMMIT "unknown"
@@ -295,14 +300,6 @@ struct FaceDelayedReadRequest
     float predictedRelativeBefore = 0.0f;
     bool baselineResetApplied = false;
     FaceMorphTriplet immediateValues{};
-};
-
-struct ParsedMorphPayload
-{
-    float thin = 0.0f;
-    float muscular = 0.0f;
-    float fat = 0.0f;
-    std::string traceId;
 };
 
 class ScopedMorphTrace
@@ -3082,11 +3079,6 @@ void CancelPreviewNormalApply()
     }
 }
 
-int MorphValueToPercent(float value)
-{
-    return static_cast<int>(std::lround(std::clamp(value, 0.0f, 1.0f) * 100.0f));
-}
-
 struct NormalMapFolderSelection
 {
     std::string profile;
@@ -3785,46 +3777,9 @@ public:
 
 RaceMenuWatcher g_raceMenuWatcher;
 
-bool NearlyEqual(float a, float b, float epsilon = kMorphApplyDeltaThreshold)
+inline bool NearlyEqual(float a, float b, float epsilon = kMorphApplyDeltaThreshold)
 {
-    return std::fabs(a - b) <= epsilon;
-}
-
-float QuantizeMorphValue(float value, float step)
-{
-    const float clamped = std::clamp(value, 0.0f, 1.0f);
-    if (step <= 0.0f) {
-        return clamped;
-    }
-
-    const float quantized = std::round(clamped / step) * step;
-    return std::clamp(quantized, 0.0f, 1.0f);
-}
-
-bool ParseMorphPayload(const char* argument, ParsedMorphPayload& payload)
-{
-    if (!argument) {
-        return false;
-    }
-
-    float thin = 0.0f;
-    float muscular = 0.0f;
-    float fat = 0.0f;
-    if (sscanf_s(argument, "%f,%f,%f", std::addressof(thin), std::addressof(muscular), std::addressof(fat)) != 3) {
-        return false;
-    }
-
-    payload.thin = thin;
-    payload.muscular = muscular;
-    payload.fat = fat;
-    payload.traceId.clear();
-
-    const auto parts = SplitStringView(argument, ',');
-    if (parts.size() >= 4) {
-        payload.traceId = TrimAscii(parts[3]);
-    }
-
-    return true;
+    return mps::NearlyEqual(a, b, epsilon);
 }
 
 void ResetRaceMenuSexTracking()

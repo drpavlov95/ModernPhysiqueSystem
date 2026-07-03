@@ -3,4 +3,5 @@ set(sources ${sources}
     src/hook.cpp
     src/FaceMorphDiagnostics.cpp
     src/core/Text.cpp
+    src/core/MorphMath.cpp
 )
