@@ -5790,6 +5790,41 @@ public:
 
 RleyModCallbackHandler g_modCallbackHandler;
 
+// F7 toggle. Runs on the game thread (input is processed there), so the menu
+// toggle is queued onto the SKSE task interface for consistency with the rest
+// of the PrismaUI touches. Replaces the old GetAsyncKeyState poll that ran on
+// the worker thread and fired even when the game did not have focus.
+class HotkeyWatcher : public RE::BSTEventSink<RE::InputEvent*>
+{
+public:
+    RE::BSEventNotifyControl ProcessEvent(
+        RE::InputEvent* const* a_events,
+        RE::BSTEventSource<RE::InputEvent*>*)
+        override
+    {
+        if (!a_events) {
+            return RE::BSEventNotifyControl::kContinue;
+        }
+
+        for (auto* event = *a_events; event; event = event->next) {
+            const auto* button = event->AsButtonEvent();
+            if (!button || !button->IsDown() || button->GetDevice() != RE::INPUT_DEVICE::kKeyboard) {
+                continue;
+            }
+
+            if (button->GetIDCode() == 65) {  // DIK_F7 (scan code 0x41)
+                if (auto* taskInterface = SKSE::GetTaskInterface()) {
+                    taskInterface->AddTask([]() { ToggleMenu(); });
+                }
+            }
+        }
+
+        return RE::BSEventNotifyControl::kContinue;
+    }
+};
+
+HotkeyWatcher g_hotkeyWatcher;
+
 bool TryAcquireRaceMenuBodyMorphInterface()
 {
     if (g_bodyMorphInterface) {
@@ -6536,6 +6571,11 @@ void MessageHandler(SKSE::MessagingInterface::Message* a_msg)
         break;
     case SKSE::MessagingInterface::kDataLoaded:
         OnDataLoaded();
+        if (auto* inputManager = RE::BSInputDeviceManager::GetSingleton()) {
+            inputManager->AddEventSink(&g_hotkeyWatcher);
+        } else {
+            spdlog::error("Failed to get input device manager for F7 hotkey sink");
+        }
         break;
     case SKSE::MessagingInterface::kPreLoadGame:
         break;
@@ -6598,66 +6638,79 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
     return true;
 }
 
-void UpdateLoop()
+// One tick of the plugin's periodic work. Runs on the game thread (dispatched
+// from UpdateLoop via the SKSE task interface) so PrismaUI show/hide/focus and
+// all RaceMenu/SKEE touches happen where the engine expects them.
+void RunMainThreadTick()
 {
-    while (true) {
-        const bool shouldBeVisible = GetPhysiqueDesiredVisible();
+    const bool shouldBeVisible = GetPhysiqueDesiredVisible();
 
-        if (shouldBeVisible && !g_menuOpen.load()) {
-            OpenMenu();
+    if (shouldBeVisible && !g_menuOpen.load()) {
+        OpenMenu();
+    }
+    else if (!shouldBeVisible && g_menuOpen.load()) {
+        CloseMenu();
+    }
+
+    // Transition expiry must be polled even when no morph payloads are arriving.
+    // Otherwise repeated ChangeSex/Reinitialized events can leave the transition
+    // gate effectively latched until the next slider callback happens.
+    PollFaceSwitchTransitionExpiry();
+
+    UpdateFaceDiagnosticDelayedReads();
+    UpdatePostRaceMenuSliderReloadReplayAfterSettle();
+    UpdatePendingRaceMenuFaceReapply();
+
+    int remainingPreviewNormalApplyTicks = g_previewNormalApplyTicks.load();
+    if (remainingPreviewNormalApplyTicks > 0) {
+        if (g_previewNormalApplyTicks.compare_exchange_strong(
+                remainingPreviewNormalApplyTicks,
+                remainingPreviewNormalApplyTicks - 1)) {
+            if (remainingPreviewNormalApplyTicks == 1) {
+                ApplySelectedNormalMapTextureSet(false, "preview_slider_debounced");
+            }
         }
-        else if (!shouldBeVisible && g_menuOpen.load()) {
-            CloseMenu();
-        }
+    }
 
-        if (GetAsyncKeyState(VK_F7) & 1) {
-            ToggleMenu();
-        }
+    int remainingTextureApplyTicks = g_deferredTextureApplyTicks.load();
+    if (remainingTextureApplyTicks > 0) {
+        if (g_deferredTextureApplyTicks.compare_exchange_strong(
+                remainingTextureApplyTicks,
+                remainingTextureApplyTicks - 1)) {
+            if (remainingTextureApplyTicks == 1) {
+                QueueDeferredBodyTextureApplyTask();
 
-        // Transition expiry must be polled even when no morph payloads are arriving.
-        // Otherwise repeated ChangeSex/Reinitialized events can leave the transition
-        // gate effectively latched until the next slider callback happens.
-        PollFaceSwitchTransitionExpiry();
-
-        UpdateFaceDiagnosticDelayedReads();
-        UpdatePostRaceMenuSliderReloadReplayAfterSettle();
-        UpdatePendingRaceMenuFaceReapply();
-
-        int remainingPreviewNormalApplyTicks = g_previewNormalApplyTicks.load();
-        if (remainingPreviewNormalApplyTicks > 0) {
-            if (g_previewNormalApplyTicks.compare_exchange_strong(
-                    remainingPreviewNormalApplyTicks,
-                    remainingPreviewNormalApplyTicks - 1)) {
-                if (remainingPreviewNormalApplyTicks == 1) {
-                    auto* taskInterface = SKSE::GetTaskInterface();
-                    if (taskInterface) {
-                        taskInterface->AddTask([]() {
-                            ApplySelectedNormalMapTextureSet(false, "preview_slider_debounced");
-                        });
-                    }
+                int repeats = g_deferredTextureApplyRepeats.load();
+                if (repeats > 1) {
+                    g_deferredTextureApplyRepeats.store(repeats - 1);
+                    g_deferredTextureApplyTicks.store(24);
+                    spdlog::info(
+                        "Queued deferred body texture-set reapply, remaining repeats={}",
+                        repeats - 1);
+                } else {
+                    g_deferredTextureApplyRepeats.store(0);
                 }
             }
         }
+    }
+}
 
-        int remainingTextureApplyTicks = g_deferredTextureApplyTicks.load();
-        if (remainingTextureApplyTicks > 0) {
-            if (g_deferredTextureApplyTicks.compare_exchange_strong(
-                    remainingTextureApplyTicks,
-                    remainingTextureApplyTicks - 1)) {
-                if (remainingTextureApplyTicks == 1) {
-                    QueueDeferredBodyTextureApplyTask();
+std::atomic<bool> g_mainThreadTickInFlight = false;
 
-                    int repeats = g_deferredTextureApplyRepeats.load();
-                    if (repeats > 1) {
-                        g_deferredTextureApplyRepeats.store(repeats - 1);
-                        g_deferredTextureApplyTicks.store(24);
-                        spdlog::info(
-                            "Queued deferred body texture-set reapply, remaining repeats={}",
-                            repeats - 1);
-                    } else {
-                        g_deferredTextureApplyRepeats.store(0);
-                    }
-                }
+void UpdateLoop()
+{
+    while (true) {
+        // Drive one game-thread tick at a time. The in-flight guard keeps the
+        // SKSE task queue from accumulating if it is not draining (e.g. at the
+        // main menu), and keeps all engine touches off this worker thread.
+        if (!g_mainThreadTickInFlight.exchange(true)) {
+            if (auto* taskInterface = SKSE::GetTaskInterface()) {
+                taskInterface->AddTask([]() {
+                    RunMainThreadTick();
+                    g_mainThreadTickInFlight.store(false);
+                });
+            } else {
+                g_mainThreadTickInFlight.store(false);
             }
         }
 
