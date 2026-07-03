@@ -1,5 +1,6 @@
 set(sources ${sources}
     src/plugin.cpp
+    src/Globals.cpp
     src/hook.cpp
     src/FaceMorphDiagnostics.cpp
     src/core/Text.cpp
