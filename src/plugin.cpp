@@ -2,7 +2,6 @@
 #include "FaceMorphDiagnostics.h"
 #include "PrismaUI_API.h"
 #include "RaceMenuInterop.h"
-#include "util.h"
 #include "core/Text.h"
 #include "core/MorphMath.h"
 #include "core/NormalMapCatalog.h"
