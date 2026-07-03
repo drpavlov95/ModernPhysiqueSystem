@@ -6,6 +6,7 @@
 #include "core/Text.h"
 #include "core/MorphMath.h"
 #include "core/NormalMapCatalog.h"
+#include "core/BindingScore.h"
 
 #include <RE/F/FxDelegate.h>
 
@@ -42,6 +43,8 @@ using mps::QuantizeMorphValue;
 using mps::MorphValueToPercent;
 using mps::AxisNormalMapEntry;
 using mps::ComboNormalMapEntry;
+using mps::GetFaceSliderLabelMatchScore;
+using mps::CallbackMentionsTarget;
 
 #ifndef MPS_GIT_COMMIT
 #define MPS_GIT_COMMIT "unknown"
@@ -438,8 +441,6 @@ bool TryInvokeRaceMenuInternalCallback(
     RE::GFxValue& boundEntry,
     std::string_view targetSlider,
     std::string_view callbackName);
-int GetFaceSliderLabelMatchScore(std::string_view normalizedLabel, std::string_view target);
-bool CallbackMentionsTarget(std::string_view normalizedCallback, std::string_view target);
 void ResetFaceSliderBindingCache();
 void ResetRaceMenuSexTracking();
 void PrimeRaceMenuSexTracking();
@@ -3926,81 +3927,6 @@ bool ApplyFaceMorphsDirectStable(float thin, float muscular, float fat, bool isC
     return false;
 }
 
-int GetFaceSliderLabelMatchScore(std::string_view normalizedLabel, std::string_view target)
-{
-    if (target == "thin") {
-        if (normalizedLabel == "a0mpsrlythin" ||
-            normalizedLabel == "mpsrlythin" ||
-            normalizedLabel == "facerlythin" ||
-            normalizedLabel == "facermthin" ||
-            normalizedLabel == "facethin" ||
-            normalizedLabel == "thinface") {
-            return 100;
-        }
-
-        if (normalizedLabel == "rlythin" || normalizedLabel == "rmthin") {
-            return 40;
-        }
-
-        return 0;
-    }
-
-    if (target == "muscular") {
-        if (normalizedLabel == "a0mpsrlymuscular" ||
-            normalizedLabel == "mpsrlymuscular" ||
-            normalizedLabel == "facerlymuscular" ||
-            normalizedLabel == "facermmuscular" ||
-            normalizedLabel == "facemuscular" ||
-            normalizedLabel == "muscularface") {
-            return 100;
-        }
-
-        if (normalizedLabel == "rlymuscular" || normalizedLabel == "rmmuscular") {
-            return 40;
-        }
-
-        return 0;
-    }
-
-    if (target == "heavy") {
-        if (normalizedLabel == "a0mpsrlyheavy" ||
-            normalizedLabel == "mpsrlyheavy" ||
-            normalizedLabel == "facerlyheavy" ||
-            normalizedLabel == "facermheavy" ||
-            normalizedLabel == "faceheavy" ||
-            normalizedLabel == "heavyface") {
-            return 100;
-        }
-
-        if (normalizedLabel == "rlyheavy" || normalizedLabel == "rmheavy") {
-            return 40;
-        }
-
-        return 0;
-    }
-
-    return 0;
-}
-
-bool CallbackMentionsTarget(std::string_view normalizedCallback, std::string_view target)
-{
-    if (target == "thin") {
-        return normalizedCallback.find("thin") != std::string_view::npos;
-    }
-
-    if (target == "muscular") {
-        return normalizedCallback.find("muscular") != std::string_view::npos ||
-               normalizedCallback.find("musc") != std::string_view::npos;
-    }
-
-    if (target == "heavy") {
-        return normalizedCallback.find("heavy") != std::string_view::npos ||
-               normalizedCallback.find("fat") != std::string_view::npos;
-    }
-
-    return false;
-}
-
 std::string GetGFxStringMemberForLog(RE::GFxValue& entry, const char* memberName)
 {
     RE::GFxValue member;
@@ -4232,33 +4158,16 @@ bool TryResolveFaceSliderBindingFromEntry(
     const bool callbackHasFaceToken = normalizedCallback.find("face") != std::string::npos;
     const bool callbackMentionsTarget = CallbackMentionsTarget(normalizedCallback, target);
 
-    int bindingScore = bestMemberMatchScore;
-    if (callbackHasFaceToken) {
-        bindingScore += 60;
-    }
-
-    if (callbackMentionsTarget) {
-        bindingScore += 20;
-    }
-
-    if (normalizedCallback.find("body") != std::string::npos) {
-        bindingScore -= 40;
-    }
-
-    if (bestMemberMatchScore < 100 && !callbackHasFaceToken && !callbackMentionsTarget) {
-        // Keep generic rm/rly labels eligible, but prefer stronger face-scoped candidates.
-        bindingScore -= 20;
-    }
-
-    if (hasEnabledFlag) {
-        bindingScore += isEnabled ? 10 : -5;
-    }
-
-    if (hasFilterFlag) {
-        // Keep this as a soft preference only; some RaceMenu builds/use-cases
-        // can surface valid face entries with non-body filter flags.
-        bindingScore += hasBodyCategoryFlag ? 15 : -5;
-    }
+    mps::BindingCandidate candidate;
+    candidate.labelScore = bestMemberMatchScore;
+    candidate.callbackHasFaceToken = callbackHasFaceToken;
+    candidate.callbackMentionsTarget = callbackMentionsTarget;
+    candidate.callbackHasBodyToken = normalizedCallback.find("body") != std::string::npos;
+    candidate.hasEnabledFlag = hasEnabledFlag;
+    candidate.isEnabled = isEnabled;
+    candidate.hasFilterFlag = hasFilterFlag;
+    candidate.hasBodyCategoryFlag = hasBodyCategoryFlag;
+    const int bindingScore = mps::ComputeBindingScore(candidate);
 
     RE::GFxValue sliderIdValue;
     bool hasSliderId = false;
