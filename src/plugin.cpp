@@ -36,7 +36,6 @@ using mps::text::TrimAscii;
 using mps::text::ToLowerCopy;
 using mps::text::NormalizeSliderLabel;
 using mps::text::TryParsePercentToken;
-using mps::text::TryParseHexFormIDToken;
 using mps::ParsedMorphPayload;
 using mps::ParseMorphPayload;
 using mps::QuantizeMorphValue;
@@ -95,7 +94,6 @@ FaceMorphTriplet ReadFaceMorphValues(
     std::string_view reason = "ReadFaceMorphValues",
     std::source_location location = std::source_location::current());
 bool AreFaceMorphValuesClose(const FaceMorphTriplet& a, const FaceMorphTriplet& b);
-bool ApplyFaceMorphsDirectStable(float thin, float muscular, float fat, bool isCommit);
 bool FlushRaceMenuActorUpdates(RE::PlayerCharacter* player, bool force = false, std::string_view reason = {});
 bool ApplyFaceMorphsViaRaceMenuSliders(float thin, float muscular, float fat, bool requestUiUpdate);
 bool ApplyFaceMorphsViaRaceMenuSliders(
@@ -169,10 +167,6 @@ void ScheduleDeferredBodyTextureApply(int ticks, int repeats = 1);
 void QueueDeferredBodyTextureApplyTask();
 void SchedulePreviewNormalApply(int ticks = kPreviewNormalDebounceTicks);
 void CancelPreviewNormalApply();
-void SchedulePlayerTextureSnapshotSeries(std::string_view applySource, bool persist);
-void UpdateScheduledTextureSnapshots();
-void QueuePlayerTextureSnapshotTask(std::string reason);
-void LogPlayerTextureSnapshot(std::string_view reason);
 void LogFaceDiag(
     std::string_view eventName,
     std::string_view fields = {},
@@ -206,7 +200,6 @@ void QueueRaceMenuFaceReapply(
 void PauseRaceMenuFaceReapplySchedule(std::string_view reason);
 void ClearRaceMenuFaceReapply(std::string_view reason);
 void UpdatePendingRaceMenuFaceReapply();
-void QueueNativeFaceRestore(std::string_view reason, float thin, float muscular, float fat);
 bool ShouldVerifyFaceReadback(bool isCommit);
 bool VerifyFaceReadback(float thin, float muscular, float fat, bool isCommit);
 bool TryFlushRaceMenuActorUpdatesSEH(IActorUpdateManager* updateManager, RE::PlayerCharacter* player, std::uint32_t& outExceptionCode);
@@ -1187,39 +1180,6 @@ void ClearRaceMenuFaceReapply(std::string_view reason)
     }
 }
 
-void QueueNativeFaceRestore(std::string_view reason, float thin, float muscular, float fat)
-{
-    if (!g_raceMenuOpen.load()) {
-        LogFaceDiag(
-            "FACE_REPLAY_STATE_CHANGE",
-            std::format(
-                "action=native_restore_skipped reason={} skipReason=racemenu_closed values=({:.3f},{:.3f},{:.3f})",
-                reason.empty() ? "<none>" : std::string(reason),
-                thin,
-                muscular,
-                fat));
-        return;
-    }
-
-    const std::uint64_t generation = g_faceReplayGeneration.load();
-    LogFaceDiag(
-        "FACE_REPLAY_STATE_CHANGE",
-        std::format(
-            "action=native_restore_skipped reason={} skipReason=disabled_single_face_controller_owner generation={} values=({:.3f},{:.3f},{:.3f}) note=no_MPS_face_SetMorphValue_from_native_restore",
-            reason.empty() ? "<none>" : std::string(reason),
-            generation,
-            std::clamp(thin, 0.0f, 1.0f),
-            std::clamp(muscular, 0.0f, 1.0f),
-            std::clamp(fat, 0.0f, 1.0f)));
-    spdlog::warn(
-        "NativeFaceRestore disabled reason={} generation={} cause=single_face_controller_owner values=({:.3f},{:.3f},{:.3f})",
-        reason.empty() ? "<none>" : std::string(reason),
-        generation,
-        std::clamp(thin, 0.0f, 1.0f),
-        std::clamp(muscular, 0.0f, 1.0f),
-        std::clamp(fat, 0.0f, 1.0f));
-}
-
 void UpdatePendingRaceMenuFaceReapply()
 {
     if (!g_pendingRaceMenuFaceReapply.load()) {
@@ -2090,296 +2050,9 @@ void LogPluginBuildIdentity()
         hash);
 }
 
-std::string DescribeFormForLog(RE::TESForm* form)
-{
-    if (!form) {
-        return "<none>";
-    }
-
-    const auto* file = form->GetFile();
-    const std::string_view fileName = file ? file->GetFilename() : std::string_view("<runtime>");
-    const char* editorID = form->GetFormEditorID();
-    const char* displayName = form->GetName();
-
-    return std::format(
-        "{:08X}[{}|type={}|edid={}|name={}]",
-        form->GetFormID(),
-        fileName,
-        static_cast<std::uint32_t>(form->GetFormType()),
-        editorID && editorID[0] ? editorID : "<none>",
-        displayName && displayName[0] ? displayName : "<none>");
-}
-
-std::string DescribeGeometryProvenance(std::string_view geometryName)
-{
-    std::vector<RE::FormID> parsedFormIDs;
-    std::size_t cursor = 0;
-
-    while ((cursor = geometryName.find('(', cursor)) != std::string_view::npos) {
-        const auto close = geometryName.find(')', cursor + 1);
-        if (close == std::string_view::npos) {
-            break;
-        }
-
-        RE::FormID parsedFormID = 0;
-        if (TryParseHexFormIDToken(geometryName.substr(cursor + 1, close - cursor - 1), parsedFormID)) {
-            parsedFormIDs.push_back(parsedFormID);
-        }
-
-        cursor = close + 1;
-    }
-
-    if (parsedFormIDs.empty()) {
-        return "<no-formids-in-geometry-name>";
-    }
-
-    std::string provenance;
-    for (std::size_t index = 0; index < parsedFormIDs.size(); ++index) {
-        if (!provenance.empty()) {
-            provenance += " ";
-        }
-
-        auto* form = RE::TESForm::LookupByID(parsedFormIDs[index]);
-        provenance += std::format("form{}={}", index, DescribeFormForLog(form));
-    }
-
-    return provenance;
-}
-
-std::string DetermineTextureDriverHint(std::string_view reason)
-{
-    if (reason.find("driver=ModernPhysiqueSystem.dll") != std::string_view::npos ||
-        reason.find("applyId=") != std::string_view::npos) {
-        return "ModernPhysiqueSystem.dll -> RleyTextureBridge.ApplySelectedNormalPaths";
-    }
-
-    if (reason.find("racemenu_open_event") != std::string_view::npos ||
-        reason.find("racemenu_close_event") != std::string_view::npos) {
-        return "engine_or_RaceMenu_refresh (exact DLL/ESP cannot be known from this event alone)";
-    }
-
-    if (reason.find("post_load_game") != std::string_view::npos ||
-        reason.find("new_game") != std::string_view::npos) {
-        return "load_game_refresh_or_external_runtime (exact DLL/ESP cannot be known from this event alone)";
-    }
-
-    return "unknown_or_external_runtime (exact DLL/ESP cannot be known from this event alone)";
-}
-
 std::string BuildTextureSetEditorID(std::string_view variantKey)
 {
     return std::string("RBM_TX_") + std::string(variantKey);
-}
-
-bool IsTrackedPlayerTexturePath(std::string_view texturePath)
-{
-    if (texturePath.empty()) {
-        return false;
-    }
-
-    const std::string lower = ToLowerCopy(std::string(texturePath));
-    return lower.find("textures\\rleybodymorphs\\") != std::string::npos ||
-           lower.find("textures\\!cor\\hands\\") != std::string::npos ||
-           lower.find("textures\\!cor\\body\\") != std::string::npos ||
-           lower.find("femalehands") != std::string::npos ||
-           lower.find("femalebody") != std::string::npos;
-}
-
-void LogTrackedTextureSnapshotForRoot(RE::NiAVObject* root, std::string_view rootLabel, std::string_view reason)
-{
-    if (!root) {
-        spdlog::info("Texture snapshot {} root={} unavailable", reason, rootLabel);
-        return;
-    }
-
-    int loggedGeometryCount = 0;
-
-    for (auto* geometry : NifUtil::Node::GetAllGeometries(root)) {
-        if (!geometry) {
-            continue;
-        }
-
-        auto effectPtr = geometry->GetGeometryRuntimeData().properties[RE::BSGeometry::States::kEffect];
-        auto* effect = effectPtr.get();
-        if (!effect) {
-            continue;
-        }
-
-        auto* lightingShader = netimmerse_cast<RE::BSLightingShaderProperty*>(effect);
-        if (!lightingShader || !lightingShader->material) {
-            continue;
-        }
-
-        auto* material = static_cast<RE::BSLightingShaderMaterialBase*>(
-            static_cast<RE::BSShaderMaterial*>(lightingShader->material));
-        if (!material) {
-            continue;
-        }
-
-        auto textureSetPtr = material->GetTextureSet();
-        auto* textureSet = textureSetPtr.get();
-        if (!textureSet) {
-            continue;
-        }
-
-        const char* diffuse = textureSet->GetTexturePath(static_cast<RE::BSTextureSet::Texture>(0));
-        const char* normal = textureSet->GetTexturePath(static_cast<RE::BSTextureSet::Texture>(1));
-        const char* glow = textureSet->GetTexturePath(static_cast<RE::BSTextureSet::Texture>(3));
-        const char* specular = textureSet->GetTexturePath(static_cast<RE::BSTextureSet::Texture>(7));
-
-        const std::string_view diffuseView = diffuse ? diffuse : "";
-        const std::string_view normalView = normal ? normal : "";
-        const std::string_view glowView = glow ? glow : "";
-        const std::string_view specularView = specular ? specular : "";
-
-        if (!IsTrackedPlayerTexturePath(diffuseView) &&
-            !IsTrackedPlayerTexturePath(normalView) &&
-            !IsTrackedPlayerTexturePath(glowView) &&
-            !IsTrackedPlayerTexturePath(specularView)) {
-            continue;
-        }
-
-        const char* geometryName = geometry->name.empty() ? "<unnamed>" : geometry->name.c_str();
-        const std::string provenance = DescribeGeometryProvenance(geometryName);
-        const std::string stateKey = std::string(rootLabel) + "|" + geometryName;
-        const TrackedGeometryTextureState currentState{
-            std::string(diffuseView),
-            std::string(normalView),
-            std::string(glowView),
-            std::string(specularView)
-        };
-
-        TrackedGeometryTextureState previousState;
-        bool hadPreviousState = false;
-        {
-            std::lock_guard lock(g_trackedTextureStateLock);
-            const auto it = g_lastTrackedGeometryTextures.find(stateKey);
-            if (it != g_lastTrackedGeometryTextures.end()) {
-                previousState = it->second;
-                hadPreviousState = true;
-            }
-            g_lastTrackedGeometryTextures[stateKey] = currentState;
-        }
-
-        spdlog::info(
-            "Texture snapshot {} root={} geom={} diffuse={} normal={} glow={} specular={} provenance={}",
-            reason,
-            rootLabel,
-            geometryName,
-            diffuseView.empty() ? "<empty>" : diffuseView,
-            normalView.empty() ? "<empty>" : normalView,
-            glowView.empty() ? "<empty>" : glowView,
-            specularView.empty() ? "<empty>" : specularView,
-            provenance);
-
-        if (!hadPreviousState ||
-            previousState.diffuse != currentState.diffuse ||
-            previousState.normal != currentState.normal ||
-            previousState.glow != currentState.glow ||
-            previousState.specular != currentState.specular) {
-            spdlog::info(
-                "Texture change detected reason={} root={} geom={} driverHint={} provenance={} diffuse={} -> {} normal={} -> {} glow={} -> {} specular={} -> {}",
-                reason,
-                rootLabel,
-                geometryName,
-                DetermineTextureDriverHint(reason),
-                provenance,
-                hadPreviousState ? previousState.diffuse : "<unset>",
-                diffuseView.empty() ? "<empty>" : diffuseView,
-                hadPreviousState ? previousState.normal : "<unset>",
-                normalView.empty() ? "<empty>" : normalView,
-                hadPreviousState ? previousState.glow : "<unset>",
-                glowView.empty() ? "<empty>" : glowView,
-                hadPreviousState ? previousState.specular : "<unset>",
-                specularView.empty() ? "<empty>" : specularView);
-        }
-        ++loggedGeometryCount;
-    }
-
-    if (loggedGeometryCount == 0) {
-        spdlog::info("Texture snapshot {} root={} found no tracked body/hand geometries", reason, rootLabel);
-    }
-}
-
-void LogPlayerTextureSnapshot(std::string_view reason)
-{
-    if (!kEnableTextureSnapshotDiagnostics) {
-        return;
-    }
-
-    auto* player = RE::PlayerCharacter::GetSingleton();
-    if (!player) {
-        spdlog::warn("Texture snapshot {} skipped because player was unavailable", reason);
-        return;
-    }
-
-    LogTrackedTextureSnapshotForRoot(player->Get3D(false), "3p", reason);
-    LogTrackedTextureSnapshotForRoot(player->Get3D(true), "1p", reason);
-}
-
-void QueuePlayerTextureSnapshotTask(std::string reason)
-{
-    if (!kEnableTextureSnapshotDiagnostics) {
-        return;
-    }
-
-    auto* taskInterface = SKSE::GetTaskInterface();
-    if (!taskInterface) {
-        spdlog::error("Failed to get SKSE task interface for player texture snapshot {}", reason);
-        return;
-    }
-
-    taskInterface->AddTask([reason = std::move(reason)]() {
-        LogPlayerTextureSnapshot(reason);
-    });
-}
-
-void SchedulePlayerTextureSnapshotSeries(std::string_view applySource, bool persist)
-{
-    if (!kEnableTextureSnapshotDiagnostics) {
-        return;
-    }
-
-    const std::string baseReason =
-        std::string(applySource) + (persist ? "|persist=1" : "|persist=0");
-
-    std::lock_guard lock(g_textureSnapshotLock);
-    g_textureSnapshotRequests.push_back({ 0, "snapshot_t+0|" + baseReason });
-    g_textureSnapshotRequests.push_back({ 1, "snapshot_t+1|" + baseReason });
-    g_textureSnapshotRequests.push_back({ 5, "snapshot_t+5|" + baseReason });
-    g_textureSnapshotRequests.push_back({ 10, "snapshot_t+10|" + baseReason });
-    g_textureSnapshotRequests.push_back({ 30, "snapshot_t+30|" + baseReason });
-    g_textureSnapshotRequests.push_back({ 60, "snapshot_t+60|" + baseReason });
-    g_textureSnapshotRequests.push_back({ 120, "snapshot_t+120|" + baseReason });
-
-    spdlog::info("Scheduled player texture snapshots for {}", baseReason);
-}
-
-void UpdateScheduledTextureSnapshots()
-{
-    if (!kEnableTextureSnapshotDiagnostics) {
-        return;
-    }
-
-    std::vector<std::string> dueReasons;
-
-    {
-        std::lock_guard lock(g_textureSnapshotLock);
-        auto it = g_textureSnapshotRequests.begin();
-        while (it != g_textureSnapshotRequests.end()) {
-            it->ticksRemaining -= 1;
-            if (it->ticksRemaining <= 0) {
-                dueReasons.push_back(it->reason);
-                it = g_textureSnapshotRequests.erase(it);
-            } else {
-                ++it;
-            }
-        }
-    }
-
-    for (auto& reason : dueReasons) {
-        QueuePlayerTextureSnapshotTask(std::move(reason));
-    }
 }
 
 std::string BuildSelectedNormalMapDispatchKey(bool persist)
@@ -2524,7 +2197,6 @@ bool ApplySelectedNormalMapTextureSet(bool persist, std::string_view applySource
             persist,
             tracedApplySource)) {
         g_appliedNormalMapDispatchKey = dispatchKey;
-        SchedulePlayerTextureSnapshotSeries(tracedApplySource, persist);
         return true;
     }
 
@@ -2574,7 +2246,6 @@ void QueueDeferredBodyTextureApplyTask()
     }
 
     taskInterface->AddTask([]() {
-        QueuePlayerTextureSnapshotTask("before_deferred_apply|deferred_racemenu_close");
         g_appliedNormalMapDispatchKey.clear();
         ApplySelectedNormalMapTextureSet(true, "deferred_racemenu_close");
     });
@@ -3056,14 +2727,12 @@ public:
             LogPlayerHeadPartSnapshot("racemenu_open");
             DumpRaceMenuSliderEntries("racemenu_open");
             CancelPreviewNormalApply();
-            SchedulePlayerTextureSnapshotSeries("racemenu_open_event", false);
             SetPhysiqueDesiredVisible(false);
         } else {
             spdlog::info("RaceMenu close detected; scheduling deferred texture reapply");
             LogFaceNodeSnapshot("racemenu_close_before_reset");
             LogPlayerHeadPartSnapshot("racemenu_close_before_reset");
             CancelPreviewNormalApply();
-            SchedulePlayerTextureSnapshotSeries("racemenu_close_event", false);
             ResetRaceMenuBridgeState();
             SetPhysiqueDesiredVisible(false);
             CloseMenu();
@@ -3625,20 +3294,11 @@ bool VerifyFaceReadback(float thin, float muscular, float fat, bool isCommit)
     return false;
 }
 
-bool ApplyFaceMorphsDirectStable(float thin, float muscular, float fat, bool isCommit)
-{
-    // Disabled deliberately. Direct FaceMorphInterface::SetMorphValue and native FaceGen
-    // geometry paths have both proven unsafe in this setup (distortion/CTD).
-    // Face preview/replay must stay on the normal RaceMenu GFx ChangeDoubleMorph path.
-    spdlog::debug(
-        "Direct face morph fallback disabled trace={} mode={} values=({:.3f},{:.3f},{:.3f})",
-        CurrentMorphTraceId(),
-        isCommit ? "commit" : "preview",
-        thin,
-        muscular,
-        fat);
-    return false;
-}
+// Direct FaceMorph fallback (ApplyFaceMorphsDirectStable) intentionally removed:
+// direct IFaceMorphInterface::SetMorphValue and native FaceGen regeneration both
+// proved unsafe here (distortion / CTD at skee64.dll+0x60afb) and poison SKEE's
+// relative-delta gate. Face apply must stay on the GFx ChangeDoubleMorph path.
+// See docs/ANALYSIS_2026-07-02_FABLE_DEEP_PASS.md.
 
 std::string GetGFxStringMemberForLog(RE::GFxValue& entry, const char* memberName)
 {
@@ -5943,30 +5603,6 @@ void TryAcquireOptionalRaceMenuInterfaces()
     }
 }
 
-bool ApplyPreSwitchGFxFaceClear(std::string_view reason, float snapshotThin, float snapshotMuscular, float snapshotFat)
-{
-    LogFaceDiag(
-        "FACE_REPLAY_STATE_CHANGE",
-        std::format(
-            "action=pre_switch_gfx_clear_skipped reason={} skipReason=disabled_single_face_controller_owner raceMenuOpen={} generation={} snapshot=({:.3f},{:.3f},{:.3f}) note=no_ChangeDoubleMorph_during_sex_switch",
-            reason.empty() ? "<none>" : std::string(reason),
-            g_raceMenuOpen.load() ? 1 : 0,
-            g_faceReplayGeneration.load(),
-            snapshotThin,
-            snapshotMuscular,
-            snapshotFat));
-    spdlog::info(
-        "PreSwitchGFxClear disabled reason={} generation={} snapshot=({:.3f},{:.3f},{:.3f}) trace={} note=face_writes_frozen_until_recovery_transaction",
-        reason.empty() ? "<none>" : std::string(reason),
-        g_faceReplayGeneration.load(),
-        snapshotThin,
-        snapshotMuscular,
-        snapshotFat,
-        CurrentMorphTraceId());
-
-    return false;
-}
-
 class RleyModCallbackHandler : public RE::BSTEventSink<SKSE::ModCallbackEvent>
 {
 public:
@@ -6143,10 +5779,9 @@ public:
             } else {
                 QueueRaceMenuFaceReapply("RSM_Initialized", kPendingFaceReapplyInitialDelayMs, replayThin, replayMuscular, replayFat);
             }
-            // QueueNativeFaceRestore disabled for diagnostic: testing GFx-only path.
-            // Direct SetMorphValue writes could pre-populate SKEE's ValueMap and cause
-            // the GFx slider replay to compute zero delta and do nothing visually.
-            // QueueNativeFaceRestore("rsm_initialized_early_write", replayThin, replayMuscular, replayFat);
+            // No native SetMorphValue restore here: a direct write would pre-populate
+            // SKEE's ValueMap and make the GFx slider replay compute a zero delta (and
+            // thus do nothing visually). Replay stays purely on the GFx path.
         }
 
         return RE::BSEventNotifyControl::kContinue;
@@ -6984,7 +6619,6 @@ void UpdateLoop()
         // gate effectively latched until the next slider callback happens.
         PollFaceSwitchTransitionExpiry();
 
-        UpdateScheduledTextureSnapshots();
         UpdateFaceDiagnosticDelayedReads();
         UpdatePostRaceMenuSliderReloadReplayAfterSettle();
         UpdatePendingRaceMenuFaceReapply();

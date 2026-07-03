@@ -117,7 +117,6 @@ constexpr int kPendingFaceReapplyMaxAttempts = 8;
 constexpr std::uint64_t kFaceSwitchTransitionSettleMs = 1200;
 constexpr std::uint64_t kFaceSwitchTransitionHardCapMs = 3500;
 constexpr int kFaceReadbackDisableThreshold = 3;
-constexpr bool kEnableTextureSnapshotDiagnostics = false;
 constexpr bool kEnableRaceMenuSliderReloadAfterSexSwitch = true;
 constexpr int kPostRaceMenuSliderReloadSettleTicks = 30;
 constexpr int kPostRaceMenuSliderReloadReinitTimeoutTicks = 180;
@@ -125,20 +124,6 @@ constexpr int kPostRaceMenuSliderReloadReinitTimeoutTicks = 180;
 // ---------------------------------------------------------------------------
 // Shared POD structs
 // ---------------------------------------------------------------------------
-struct TextureSnapshotRequest
-{
-    int ticksRemaining = 0;
-    std::string reason;
-};
-
-struct TrackedGeometryTextureState
-{
-    std::string diffuse;
-    std::string normal;
-    std::string glow;
-    std::string specular;
-};
-
 struct FaceSliderBinding
 {
     bool resolved = false;
@@ -308,10 +293,6 @@ private:
     std::string _previous;
 };
 
-extern std::mutex g_textureSnapshotLock;
-extern std::vector<TextureSnapshotRequest> g_textureSnapshotRequests;
-extern std::mutex g_trackedTextureStateLock;
-extern std::unordered_map<std::string, TrackedGeometryTextureState> g_lastTrackedGeometryTextures;
 extern std::mutex g_faceDelayedReadLock;
 extern std::vector<FaceDelayedReadRequest> g_faceDelayedReadRequests;
 extern RE::GFxMovieView* g_cachedFaceSliderMovie;

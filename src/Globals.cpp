@@ -82,10 +82,6 @@ std::atomic<float> g_postRaceMenuSliderReloadReplayMuscular = 0.0f;
 std::atomic<float> g_postRaceMenuSliderReloadReplayFat = 0.0f;
 thread_local std::string g_activeMorphTraceId;
 
-std::mutex g_textureSnapshotLock;
-std::vector<TextureSnapshotRequest> g_textureSnapshotRequests;
-std::mutex g_trackedTextureStateLock;
-std::unordered_map<std::string, TrackedGeometryTextureState> g_lastTrackedGeometryTextures;
 std::mutex g_faceDelayedReadLock;
 std::vector<FaceDelayedReadRequest> g_faceDelayedReadRequests;
 RE::GFxMovieView* g_cachedFaceSliderMovie = nullptr;
