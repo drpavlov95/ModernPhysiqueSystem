@@ -56,6 +56,17 @@ using mps::CallbackMentionsTarget;
 
 #include "Globals.h"
 
+// Lazy face-diagnostic logging. The std::format argument is only evaluated when
+// causal tracing is enabled, avoiding per-frame formatting cost on the shipping
+// (FaceCausalTrace=0) config. Preserves LogFaceDiag's seq/context wrapping and
+// call-site source_location. Used on the per-frame face-dispatch hot path.
+#define MPS_FACE_DIAG(eventName, ...)                             \
+    do {                                                          \
+        if (FaceMorphDiagnostics::IsCausalTraceEnabled()) {       \
+            LogFaceDiag((eventName), std::format(__VA_ARGS__));   \
+        }                                                         \
+    } while (0)
+
 void OnMorphsPreview(const char* argument);
 void OnMorphsCommit(const char* argument);
 void UpdateLoop();
@@ -1616,6 +1627,13 @@ void LogFaceFlagChange(
     std::string_view reason,
     std::source_location location)
 {
+    // Skip the internal std::format entirely when causal tracing is disabled
+    // (the shipping default). LogFaceDiag re-checks the same flag, so behavior
+    // is unchanged; this only avoids the eager format on the hot disabled path.
+    if (!FaceMorphDiagnostics::IsCausalTraceEnabled()) {
+        return;
+    }
+
     LogFaceDiag(
         "FACE_FLAG_CHANGE",
         std::format(
@@ -5441,9 +5459,8 @@ FaceSliderApplyResult ApplyBoundFaceSliderViaRaceMenu(
         QueueDelayedFaceRead(std::move(request));
     }
 
-    LogFaceDiag(
+    MPS_FACE_DIAG(
         "FACE_DISPATCH_CAUSAL",
-        std::format(
             "phase=dispatch_result sourcePath={} targetAxis={} internalName={} expectedGeometryName={} sliderId={} entryIndex={} callbackName={} target={:.3f} savedCurrentBefore={:.3f} predictedRelativeBefore={:.3f} didBaselineReset={} savedCurrentAfterReset={:.3f} predictedRelativeAfterReset={:.3f} delegateInvoked={} internalInvoked={} postDispatchSavedValue={:.3f} nativeWriteObserved={} visualDeltaPredicted={} relativeZeroBlocked={} replayClearDecision={} faceGeometryDirtyAfterRebuild={}",
             sourcePath,
             targetSlider,
@@ -5465,7 +5482,7 @@ FaceSliderApplyResult ApplyBoundFaceSliderViaRaceMenu(
             result.visualDeltaPredicted ? 1 : 0,
             result.relativeZeroBlocked ? 1 : 0,
             outcome,
-            g_faceGeometryDirtyAfterRebuild.load() ? 1 : 0));
+            g_faceGeometryDirtyAfterRebuild.load() ? 1 : 0);
 
     spdlog::debug(
         "Face DoubleMorph dispatch result slider={} internalName={} target={:.3f} savedCurrentBefore={:.3f} savedCurrentAfter={:.3f} predictedRelative={:.3f} sliderId={} callbackName={} entryIndex={} mode={} callbackInvoked={} internalInvoked={} visualDeltaPredicted={} nativeWriteObserved={} baselineResetApplied={} outcome={} trace={} sex={} generation={}",
@@ -5760,9 +5777,8 @@ bool ApplyFaceMorphsViaRaceMenuSliders(
                 fatValue);
         }
 
-        LogFaceDiag(
+        MPS_FACE_DIAG(
             "FACE_DISPATCH_CAUSAL",
-            std::format(
                 "phase=aggregate_result sourcePath={} allSuccess={} clearClassification={} thinSuccess={} thinCallback={} thinVisualDelta={} thinNativeWriteObserved={} thinRelativeZero={} thinBaselineReset={} muscularSuccess={} muscularCallback={} muscularVisualDelta={} muscularNativeWriteObserved={} muscularRelativeZero={} muscularBaselineReset={} heavySuccess={} heavyCallback={} heavyVisualDelta={} heavyNativeWriteObserved={} heavyRelativeZero={} heavyBaselineReset={} values=({:.3f},{:.3f},{:.3f}) requestUiUpdate={} faceGeometryDirtyAfterRebuild={}",
                 IsFaceRecoveryContext(context) ? "switch_recovery_transaction" :
                     CurrentMorphTraceId().rfind("rsm-pending-reapply", 0) == 0 ? "pending_replay" :
@@ -5793,7 +5809,7 @@ bool ApplyFaceMorphsViaRaceMenuSliders(
                 muscularValue,
                 fatValue,
                 requestUiUpdate ? 1 : 0,
-                g_faceGeometryDirtyAfterRebuild.load() ? 1 : 0));
+                g_faceGeometryDirtyAfterRebuild.load() ? 1 : 0);
 
         if (!allSuccess && anyRelativeZeroBlocked) {
             spdlog::warn(
