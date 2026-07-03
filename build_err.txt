@@ -1,5 +1,0 @@
-'vswhere.exe' n∆o Ç reconhecido como um comando interno
-ou externo, um programa oper†vel ou um arquivo em lotes.
-Parsing commonlibsse_plugin_version 0.0.1
-Setting patch version to 1
-Parsing ADD_COMMONLIBSSE_PLUGIN_MINIMUM_SKSE_VERSION 0

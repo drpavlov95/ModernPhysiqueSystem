@@ -5,3 +5,8 @@
 build
 cmake-build*
 .fake
+_tmp_*
+build_capture_*.txt
+build_err.txt
+build_out.txt
+backups/
