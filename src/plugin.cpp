@@ -5,6 +5,7 @@
 #include "util.h"
 #include "core/Text.h"
 #include "core/MorphMath.h"
+#include "core/NormalMapCatalog.h"
 
 #include <RE/F/FxDelegate.h>
 
@@ -39,6 +40,8 @@ using mps::ParsedMorphPayload;
 using mps::ParseMorphPayload;
 using mps::QuantizeMorphValue;
 using mps::MorphValueToPercent;
+using mps::AxisNormalMapEntry;
+using mps::ComboNormalMapEntry;
 
 #ifndef MPS_GIT_COMMIT
 #define MPS_GIT_COMMIT "unknown"
@@ -342,36 +345,14 @@ std::atomic<bool> g_bodyCategoryActive = false;
 std::atomic<FaceReplayClearClassification> g_lastFaceReplayClearClassification =
     FaceReplayClearClassification::kDiagnosticUnknown;
 
-struct AxisNormalMapEntry
-{
-    int percent = 0;
-    std::string variantKey;
-    std::string relativePath;
-    std::string textureSetEditorID;
-};
-
-struct ComboNormalMapEntry
-{
-    int heavyPercent = 0;
-    int muscularPercent = 0;
-    std::string variantKey;
-    std::string relativePath;
-    std::string textureSetEditorID;
-};
-
-std::vector<AxisNormalMapEntry> g_thinNormalMaps;
-std::vector<AxisNormalMapEntry> g_heavyNormalMaps;
-std::vector<AxisNormalMapEntry> g_muscularNormalMaps;
-std::vector<ComboNormalMapEntry> g_comboNormalMaps;
-std::vector<AxisNormalMapEntry> g_handMuscularNormalMaps;
+mps::NormalMapCatalog g_bodyNormalMapCatalog;
+mps::HandNormalMapCatalog g_handNormalMapCatalog;
 bool g_normalMapCatalogLoaded = false;
 bool g_handNormalMapCatalogLoaded = false;
 std::string g_loadedBodyNormalMapDataFolder;
 std::string g_loadedBodyNormalMapRelativeFolder;
 std::string g_loadedHandNormalMapDataFolder;
 std::string g_loadedHandNormalMapRelativeFolder;
-AxisNormalMapEntry g_handBaseNormalMap;
-bool g_hasHandBaseNormalMap = false;
 std::string g_selectedNormalMapPath;
 std::string g_selectedNormalMapTextureSetEditorID;
 std::string g_selectedHandNormalMapPath;
@@ -2395,182 +2376,6 @@ void LogPluginBuildIdentity()
         hash);
 }
 
-bool TryParseCompactAxisToken(
-    std::string_view value,
-    std::size_t& position,
-    char prefix,
-    bool& found,
-    int& outPercent)
-{
-    found = false;
-    if (position >= value.size() || value[position] != prefix) {
-        return true;
-    }
-
-    found = true;
-    ++position;
-    const std::size_t start = position;
-    while (position < value.size() &&
-           std::isdigit(static_cast<unsigned char>(value[position]))) {
-        ++position;
-    }
-
-    if (start == position) {
-        return false;
-    }
-
-    return TryParsePercentToken(value.substr(start, position - start), outPercent);
-}
-
-bool TryParseCompactNormalMapStem(
-    std::string_view stem,
-    bool& hasHeavy,
-    int& heavyPercent,
-    bool& hasMuscular,
-    int& muscularPercent,
-    bool& hasThin,
-    int& thinPercent)
-{
-    hasHeavy = false;
-    hasMuscular = false;
-    hasThin = false;
-    heavyPercent = 0;
-    muscularPercent = 0;
-    thinPercent = 0;
-
-    // Strict parse: requires H then M then T in order, all optional.
-    std::size_t position = 0;
-    if (TryParseCompactAxisToken(stem, position, 'H', hasHeavy, heavyPercent) &&
-        TryParseCompactAxisToken(stem, position, 'M', hasMuscular, muscularPercent) &&
-        TryParseCompactAxisToken(stem, position, 'T', hasThin, thinPercent) &&
-        position == stem.size() &&
-        (hasHeavy || hasMuscular || hasThin)) {
-        return true;
-    }
-
-    // Loose parse: any order of H/M/T, each followed immediately by digits.
-    hasHeavy = false;
-    hasMuscular = false;
-    hasThin = false;
-    heavyPercent = 0;
-    muscularPercent = 0;
-    thinPercent = 0;
-    position = 0;
-
-    while (position < stem.size()) {
-        const char axis = static_cast<char>(std::toupper(static_cast<unsigned char>(stem[position])));
-        ++position;
-
-        const std::size_t start = position;
-        while (position < stem.size() &&
-               std::isdigit(static_cast<unsigned char>(stem[position]))) {
-            ++position;
-        }
-
-        if (start == position) {
-            return false;
-        }
-
-        int percent = 0;
-        if (!TryParsePercentToken(stem.substr(start, position - start), percent)) {
-            return false;
-        }
-
-        switch (axis) {
-        case 'H':
-            if (hasHeavy) { return false; }
-            hasHeavy = true;
-            heavyPercent = percent;
-            break;
-        case 'M':
-            if (hasMuscular) { return false; }
-            hasMuscular = true;
-            muscularPercent = percent;
-            break;
-        case 'T':
-            if (hasThin) { return false; }
-            hasThin = true;
-            thinPercent = percent;
-            break;
-        default:
-            return false;
-        }
-    }
-
-    return hasHeavy || hasMuscular || hasThin;
-}
-
-bool TryParseHandNormalMapStem(
-    std::string_view stem,
-    bool& isBaseEntry,
-    int& muscularPercent)
-{
-    isBaseEntry = false;
-    muscularPercent = 0;
-
-    if (stem == "HANDS_M0_H0_T0") {
-        isBaseEntry = true;
-        return true;
-    }
-
-    constexpr std::string_view prefix = "HANDS_M";
-    if (!stem.starts_with(prefix)) {
-        return false;
-    }
-
-    return TryParsePercentToken(stem.substr(prefix.size()), muscularPercent);
-}
-
-void RegisterAxisNormalMap(
-    std::vector<AxisNormalMapEntry>& target,
-    int percent,
-    const std::string& variantKey,
-    const std::string& relativePath,
-    const std::string& textureSetEditorID)
-{
-    target.push_back({ percent, variantKey, relativePath, textureSetEditorID });
-}
-
-const AxisNormalMapEntry* FindBestAxisNormalMap(
-    const std::vector<AxisNormalMapEntry>& entries,
-    int targetPercent)
-{
-    const AxisNormalMapEntry* bestEntry = nullptr;
-    int bestDistance = std::numeric_limits<int>::max();
-
-    for (const auto& entry : entries) {
-        const int distance = std::abs(entry.percent - targetPercent);
-        if (distance < bestDistance) {
-            bestDistance = distance;
-            bestEntry = std::addressof(entry);
-        }
-    }
-
-    return bestEntry;
-}
-
-const ComboNormalMapEntry* FindBestComboNormalMap(
-    const std::vector<ComboNormalMapEntry>& entries,
-    int heavyPercent,
-    int muscularPercent)
-{
-    const ComboNormalMapEntry* bestEntry = nullptr;
-    int bestDistance = std::numeric_limits<int>::max();
-
-    for (const auto& entry : entries) {
-        const int heavyDistance = entry.heavyPercent - heavyPercent;
-        const int muscularDistance = entry.muscularPercent - muscularPercent;
-        const int distance = heavyDistance * heavyDistance + muscularDistance * muscularDistance;
-
-        if (distance < bestDistance) {
-            bestDistance = distance;
-            bestEntry = std::addressof(entry);
-        }
-    }
-
-    return bestEntry;
-}
-
 std::string DescribeFormForLog(RE::TESForm* form)
 {
     if (!form) {
@@ -3180,10 +2985,7 @@ void LoadNormalMapCatalog(std::string_view dataFolder, std::string_view relative
     g_normalMapCatalogLoaded = true;
     g_loadedBodyNormalMapDataFolder = requestedDataFolder;
     g_loadedBodyNormalMapRelativeFolder = requestedRelativeFolder;
-    g_thinNormalMaps.clear();
-    g_heavyNormalMaps.clear();
-    g_muscularNormalMaps.clear();
-    g_comboNormalMaps.clear();
+    g_bodyNormalMapCatalog = {};
 
     try {
         const std::filesystem::path basePath(requestedDataFolder);
@@ -3203,113 +3005,25 @@ void LoadNormalMapCatalog(std::string_view dataFolder, std::string_view relative
             }
 
             const std::string stem = entry.path().stem().string();
-            bool hasHeavy = false;
-            bool hasMuscular = false;
-            bool hasThin = false;
-            int heavyPercent = 0;
-            int muscularPercent = 0;
-            int thinPercent = 0;
-
-            bool parsed = TryParseCompactNormalMapStem(
-                stem,
-                hasHeavy,
-                heavyPercent,
-                hasMuscular,
-                muscularPercent,
-                hasThin,
-                thinPercent);
-
-            if (!parsed) {
-                const auto parts = SplitStringView(stem, '_');
-                if (parts.size() == 3 &&
-                    !parts[0].empty() &&
-                    !parts[1].empty() &&
-                    parts[0].front() == 'H' &&
-                    parts[1].front() == 'M' &&
-                    TryParsePercentToken(parts[0].substr(1), heavyPercent) &&
-                    TryParsePercentToken(parts[1].substr(1), muscularPercent)) {
-                    hasHeavy = true;
-                    hasMuscular = true;
-
-                    if (parts[2] == "TX") {
-                        hasThin = false;
-                    } else if (parts[2].size() >= 2 &&
-                               parts[2].front() == 'T' &&
-                               TryParsePercentToken(parts[2].substr(1), thinPercent)) {
-                        hasThin = true;
-                    } else {
-                        continue;
-                    }
-                } else {
-                    continue;
-                }
-            }
-
             const std::string relativePath =
                 requestedRelativeFolder + "\\" + entry.path().filename().string();
             const std::string textureSetEditorID = BuildTextureSetEditorID(stem);
 
-            if (hasHeavy && hasMuscular && hasThin &&
-                heavyPercent == 0 && muscularPercent == 0 && thinPercent == 0) {
-                RegisterAxisNormalMap(g_thinNormalMaps, 0, stem, relativePath, textureSetEditorID);
-                RegisterAxisNormalMap(g_heavyNormalMaps, 0, stem, relativePath, textureSetEditorID);
-                RegisterAxisNormalMap(g_muscularNormalMaps, 0, stem, relativePath, textureSetEditorID);
-                continue;
+            if (!mps::RegisterBodyStem(g_bodyNormalMapCatalog, stem, relativePath, textureSetEditorID)) {
+                spdlog::info("Skipping unsupported normal map variant {}", stem);
             }
-
-            if (hasThin && !hasHeavy && !hasMuscular) {
-                RegisterAxisNormalMap(g_thinNormalMaps, thinPercent, stem, relativePath, textureSetEditorID);
-                continue;
-            }
-
-            if (hasHeavy && !hasMuscular && !hasThin) {
-                RegisterAxisNormalMap(g_heavyNormalMaps, heavyPercent, stem, relativePath, textureSetEditorID);
-                continue;
-            }
-
-            if (hasMuscular && !hasHeavy && !hasThin) {
-                RegisterAxisNormalMap(g_muscularNormalMaps, muscularPercent, stem, relativePath, textureSetEditorID);
-                continue;
-            }
-
-            if (hasHeavy && hasMuscular && !hasThin) {
-                g_comboNormalMaps.push_back({ heavyPercent, muscularPercent, stem, relativePath, textureSetEditorID });
-                continue;
-            }
-
-            spdlog::info("Skipping unsupported normal map variant {}", stem);
         }
 
-        std::sort(g_thinNormalMaps.begin(), g_thinNormalMaps.end(), [](const auto& left, const auto& right) {
-            return left.percent < right.percent;
-        });
-
-        std::sort(g_heavyNormalMaps.begin(), g_heavyNormalMaps.end(), [](const auto& left, const auto& right) {
-            return left.percent < right.percent;
-        });
-
-        std::sort(g_muscularNormalMaps.begin(), g_muscularNormalMaps.end(), [](const auto& left, const auto& right) {
-            return left.percent < right.percent;
-        });
-
-        std::sort(g_comboNormalMaps.begin(), g_comboNormalMaps.end(), [](const auto& left, const auto& right) {
-            if (left.heavyPercent != right.heavyPercent) {
-                return left.heavyPercent < right.heavyPercent;
-            }
-            if (left.muscularPercent != right.muscularPercent) {
-                return left.muscularPercent < right.muscularPercent;
-            }
-            return left.relativePath < right.relativePath;
-        });
+        mps::SortCatalog(g_bodyNormalMapCatalog);
 
         spdlog::info(
             "Loaded normal map catalog from {} (relativeRoot={}): {} thin, {} heavy, {} muscular, {} heavy/muscular combinations",
             requestedDataFolder,
             requestedRelativeFolder,
-            g_thinNormalMaps.size(),
-            g_heavyNormalMaps.size(),
-            g_muscularNormalMaps.size(),
-            g_comboNormalMaps.size());
+            g_bodyNormalMapCatalog.thin.size(),
+            g_bodyNormalMapCatalog.heavy.size(),
+            g_bodyNormalMapCatalog.muscular.size(),
+            g_bodyNormalMapCatalog.combos.size());
         LogNormalMapTextureSetPlan();
     } catch (const std::exception& e) {
         spdlog::error("Failed to load normal map catalog: {}", e.what());
@@ -3330,9 +3044,7 @@ void LoadHandNormalMapCatalog(std::string_view dataFolder, std::string_view rela
     g_handNormalMapCatalogLoaded = true;
     g_loadedHandNormalMapDataFolder = requestedDataFolder;
     g_loadedHandNormalMapRelativeFolder = requestedRelativeFolder;
-    g_handMuscularNormalMaps.clear();
-    g_handBaseNormalMap = {};
-    g_hasHandBaseNormalMap = false;
+    g_handNormalMapCatalog = {};
 
     try {
         const std::filesystem::path basePath(requestedDataFolder);
@@ -3354,7 +3066,7 @@ void LoadHandNormalMapCatalog(std::string_view dataFolder, std::string_view rela
             const std::string stem = entry.path().stem().string();
             bool isBaseEntry = false;
             int muscularPercent = 0;
-            if (!TryParseHandNormalMapStem(stem, isBaseEntry, muscularPercent)) {
+            if (!mps::TryParseHandNormalMapStem(stem, isBaseEntry, muscularPercent)) {
                 spdlog::info("Skipping unsupported hand normal map variant {}", stem);
                 continue;
             }
@@ -3364,20 +3076,15 @@ void LoadHandNormalMapCatalog(std::string_view dataFolder, std::string_view rela
             const std::string textureSetEditorID = BuildTextureSetEditorID(stem);
 
             if (isBaseEntry) {
-                g_handBaseNormalMap = { 0, stem, relativePath, textureSetEditorID };
-                g_hasHandBaseNormalMap = true;
+                g_handNormalMapCatalog.base = { 0, stem, relativePath, textureSetEditorID };
+                g_handNormalMapCatalog.hasBase = true;
                 continue;
             }
 
-            RegisterAxisNormalMap(
-                g_handMuscularNormalMaps,
-                muscularPercent,
-                stem,
-                relativePath,
-                textureSetEditorID);
+            g_handNormalMapCatalog.muscular.push_back({ muscularPercent, stem, relativePath, textureSetEditorID });
         }
 
-        std::sort(g_handMuscularNormalMaps.begin(), g_handMuscularNormalMaps.end(), [](const auto& left, const auto& right) {
+        std::sort(g_handNormalMapCatalog.muscular.begin(), g_handNormalMapCatalog.muscular.end(), [](const auto& left, const auto& right) {
             return left.percent < right.percent;
         });
 
@@ -3385,17 +3092,17 @@ void LoadHandNormalMapCatalog(std::string_view dataFolder, std::string_view rela
             "Loaded hand normal map catalog from {} (relativeRoot={}): base={} muscularVariants={}",
             requestedDataFolder,
             requestedRelativeFolder,
-            g_hasHandBaseNormalMap ? g_handBaseNormalMap.relativePath : "<missing>",
-            g_handMuscularNormalMaps.size());
+            g_handNormalMapCatalog.hasBase ? g_handNormalMapCatalog.base.relativePath : "<missing>",
+            g_handNormalMapCatalog.muscular.size());
 
-        if (g_hasHandBaseNormalMap) {
+        if (g_handNormalMapCatalog.hasBase) {
             spdlog::info(
                 "Hand normal map plan: {} -> {}",
-                g_handBaseNormalMap.textureSetEditorID,
-                g_handBaseNormalMap.relativePath);
+                g_handNormalMapCatalog.base.textureSetEditorID,
+                g_handNormalMapCatalog.base.relativePath);
         }
 
-        for (const auto& entry : g_handMuscularNormalMaps) {
+        for (const auto& entry : g_handNormalMapCatalog.muscular) {
             spdlog::info(
                 "Hand normal map plan: {} -> {}",
                 entry.textureSetEditorID,
@@ -3408,28 +3115,28 @@ void LoadHandNormalMapCatalog(std::string_view dataFolder, std::string_view rela
 
 void LogNormalMapTextureSetPlan()
 {
-    for (const auto& entry : g_thinNormalMaps) {
+    for (const auto& entry : g_bodyNormalMapCatalog.thin) {
         spdlog::info(
             "Thin normal map plan: {} -> {}",
             entry.textureSetEditorID,
             entry.relativePath);
     }
 
-    for (const auto& entry : g_heavyNormalMaps) {
+    for (const auto& entry : g_bodyNormalMapCatalog.heavy) {
         spdlog::info(
             "Heavy normal map plan: {} -> {}",
             entry.textureSetEditorID,
             entry.relativePath);
     }
 
-    for (const auto& entry : g_muscularNormalMaps) {
+    for (const auto& entry : g_bodyNormalMapCatalog.muscular) {
         spdlog::info(
             "Muscular normal map plan: {} -> {}",
             entry.textureSetEditorID,
             entry.relativePath);
     }
 
-    for (const auto& entry : g_comboNormalMaps) {
+    for (const auto& entry : g_bodyNormalMapCatalog.combos) {
         spdlog::info(
             "Normal map TXST plan: {} -> {}",
             entry.textureSetEditorID,
@@ -3442,117 +3149,10 @@ std::string SelectNormalMapRelativePath(float thin, float muscular, float fat)
     const NormalMapFolderSelection folders = ResolveNormalMapFolderSelection();
     LoadNormalMapCatalog(folders.bodyDataFolder, folders.bodyRelativeFolder);
 
-    if (g_thinNormalMaps.empty() &&
-        g_heavyNormalMaps.empty() &&
-        g_muscularNormalMaps.empty() &&
-        g_comboNormalMaps.empty()) {
-        g_selectedNormalMapTextureSetEditorID.clear();
-        return {};
-    }
-
-    const int thinPercent = MorphValueToPercent(thin);
-    const int heavyPercent = MorphValueToPercent(fat);
-    const int muscularPercent = MorphValueToPercent(muscular);
-
-    const bool isThinOnly = heavyPercent == 0 && muscularPercent == 0;
-    const bool isHeavyOnly = heavyPercent > 0 && muscularPercent == 0;
-    const bool isMuscularOnly = muscularPercent > 0 && heavyPercent == 0;
-    const bool isHeavyMuscularCombo = heavyPercent > 0 && muscularPercent > 0;
-    const bool preferThinSoftHeavy =
-        thinPercent > 0 &&
-        isHeavyOnly &&
-        heavyPercent < kThinSoftThresholdPercent;
-    const bool preferThinSoftMuscular =
-        thinPercent > 0 &&
-        isMuscularOnly &&
-        muscularPercent < kThinSoftThresholdPercent;
-    const bool useThinLine =
-        isThinOnly ||
-        preferThinSoftHeavy ||
-        preferThinSoftMuscular;
-
-    const AxisNormalMapEntry* thinEntry = FindBestAxisNormalMap(g_thinNormalMaps, thinPercent);
-    const AxisNormalMapEntry* heavyEntry = FindBestAxisNormalMap(g_heavyNormalMaps, heavyPercent);
-    const AxisNormalMapEntry* muscularEntry = FindBestAxisNormalMap(g_muscularNormalMaps, muscularPercent);
-    const ComboNormalMapEntry* comboEntry = FindBestComboNormalMap(
-        g_comboNormalMaps,
-        heavyPercent,
-        muscularPercent);
-
-    auto useAxisEntry = [&](const AxisNormalMapEntry* entry) -> std::string {
-        if (!entry) {
-            return {};
-        }
-
-        g_selectedNormalMapTextureSetEditorID = entry->textureSetEditorID;
-        return entry->relativePath;
-    };
-
-    auto useComboEntry = [&](const ComboNormalMapEntry* entry) -> std::string {
-        if (!entry) {
-            return {};
-        }
-
-        g_selectedNormalMapTextureSetEditorID = entry->textureSetEditorID;
-        return entry->relativePath;
-    };
-
-    if (useThinLine) {
-        if (const std::string selectedPath = useAxisEntry(thinEntry); !selectedPath.empty()) {
-            return selectedPath;
-        }
-    }
-
-    if (isHeavyMuscularCombo) {
-        if (const std::string selectedPath = useComboEntry(comboEntry); !selectedPath.empty()) {
-            return selectedPath;
-        }
-
-        if (heavyPercent >= muscularPercent) {
-            if (const std::string selectedPath = useAxisEntry(heavyEntry); !selectedPath.empty()) {
-                return selectedPath;
-            }
-
-            if (const std::string selectedPath = useAxisEntry(muscularEntry); !selectedPath.empty()) {
-                return selectedPath;
-            }
-        } else {
-            if (const std::string selectedPath = useAxisEntry(muscularEntry); !selectedPath.empty()) {
-                return selectedPath;
-            }
-
-            if (const std::string selectedPath = useAxisEntry(heavyEntry); !selectedPath.empty()) {
-                return selectedPath;
-            }
-        }
-    } else if (isHeavyOnly) {
-        if (const std::string selectedPath = useAxisEntry(heavyEntry); !selectedPath.empty()) {
-            return selectedPath;
-        }
-    } else if (isMuscularOnly) {
-        if (const std::string selectedPath = useAxisEntry(muscularEntry); !selectedPath.empty()) {
-            return selectedPath;
-        }
-    }
-
-    if (const std::string selectedPath = useAxisEntry(thinEntry); !selectedPath.empty()) {
-        return selectedPath;
-    }
-
-    if (const std::string selectedPath = useAxisEntry(heavyEntry); !selectedPath.empty()) {
-        return selectedPath;
-    }
-
-    if (const std::string selectedPath = useAxisEntry(muscularEntry); !selectedPath.empty()) {
-        return selectedPath;
-    }
-
-    if (const std::string selectedPath = useComboEntry(comboEntry); !selectedPath.empty()) {
-        return selectedPath;
-    }
-
-    g_selectedNormalMapTextureSetEditorID.clear();
-    return {};
+    const mps::NormalMapSelection selection = mps::SelectBodyNormalMap(
+        g_bodyNormalMapCatalog, thin, muscular, fat, kThinSoftThresholdPercent);
+    g_selectedNormalMapTextureSetEditorID = selection.textureSetEditorID;
+    return selection.relativePath;
 }
 
 std::string SelectHandNormalMapRelativePath(float, float muscular, float)
@@ -3560,22 +3160,7 @@ std::string SelectHandNormalMapRelativePath(float, float muscular, float)
     const NormalMapFolderSelection folders = ResolveNormalMapFolderSelection();
     LoadHandNormalMapCatalog(folders.handDataFolder, folders.handRelativeFolder);
 
-    const int muscularPercent = MorphValueToPercent(muscular);
-    if (muscularPercent > 0) {
-        if (const AxisNormalMapEntry* entry = FindBestAxisNormalMap(g_handMuscularNormalMaps, muscularPercent)) {
-            return entry->relativePath;
-        }
-    }
-
-    if (g_hasHandBaseNormalMap) {
-        return g_handBaseNormalMap.relativePath;
-    }
-
-    if (const AxisNormalMapEntry* entry = FindBestAxisNormalMap(g_handMuscularNormalMaps, 0)) {
-        return entry->relativePath;
-    }
-
-    return {};
+    return mps::SelectHandNormalMap(g_handNormalMapCatalog, muscular);
 }
 
 void UpdateSelectedNormalMapCandidate(float thin, float muscular, float fat)

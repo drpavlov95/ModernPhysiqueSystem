@@ -4,4 +4,5 @@ set(sources ${sources}
     src/FaceMorphDiagnostics.cpp
     src/core/Text.cpp
     src/core/MorphMath.cpp
+    src/core/NormalMapCatalog.cpp
 )
