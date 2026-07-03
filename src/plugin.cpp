@@ -3,6 +3,7 @@
 #include "PrismaUI_API.h"
 #include "RaceMenuInterop.h"
 #include "util.h"
+#include "core/Text.h"
 
 #include <RE/F/FxDelegate.h>
 
@@ -26,6 +27,13 @@
 #include <source_location>
 #include <unordered_set>
 #include <exception>
+
+using mps::text::SplitStringView;
+using mps::text::TrimAscii;
+using mps::text::ToLowerCopy;
+using mps::text::NormalizeSliderLabel;
+using mps::text::TryParsePercentToken;
+using mps::text::TryParseHexFormIDToken;
 
 #ifndef MPS_GIT_COMMIT
 #define MPS_GIT_COMMIT "unknown"
@@ -1853,40 +1861,6 @@ void UpdatePendingRaceMenuFaceReapply()
     });
 }
 
-std::vector<std::string_view> SplitStringView(std::string_view value, char delimiter)
-{
-    std::vector<std::string_view> parts;
-    std::size_t start = 0;
-
-    while (start <= value.size()) {
-        const std::size_t end = value.find(delimiter, start);
-        if (end == std::string_view::npos) {
-            parts.push_back(value.substr(start));
-            break;
-        }
-
-        parts.push_back(value.substr(start, end - start));
-        start = end + 1;
-    }
-
-    return parts;
-}
-
-std::string TrimAscii(std::string_view value)
-{
-    std::size_t begin = 0;
-    while (begin < value.size() && std::isspace(static_cast<unsigned char>(value[begin]))) {
-        ++begin;
-    }
-
-    std::size_t end = value.size();
-    while (end > begin && std::isspace(static_cast<unsigned char>(value[end - 1]))) {
-        --end;
-    }
-
-    return std::string(value.substr(begin, end - begin));
-}
-
 std::string BuildGeneratedMorphTraceId(std::string_view source)
 {
     const std::uint64_t seq = ++g_morphTraceSequence;
@@ -2424,22 +2398,6 @@ void LogPluginBuildIdentity()
         hash);
 }
 
-bool TryParsePercentToken(std::string_view token, int& outPercent)
-{
-    if (token.empty()) {
-        return false;
-    }
-
-    for (const char ch : token) {
-        if (!std::isdigit(static_cast<unsigned char>(ch))) {
-            return false;
-        }
-    }
-
-    outPercent = std::stoi(std::string(token));
-    return outPercent >= 0 && outPercent <= 100;
-}
-
 bool TryParseCompactAxisToken(
     std::string_view value,
     std::size_t& position,
@@ -2616,14 +2574,6 @@ const ComboNormalMapEntry* FindBestComboNormalMap(
     return bestEntry;
 }
 
-std::string ToLowerCopy(std::string value)
-{
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
-    });
-    return value;
-}
-
 std::string DescribeFormForLog(RE::TESForm* form)
 {
     if (!form) {
@@ -2642,30 +2592,6 @@ std::string DescribeFormForLog(RE::TESForm* form)
         static_cast<std::uint32_t>(form->GetFormType()),
         editorID && editorID[0] ? editorID : "<none>",
         displayName && displayName[0] ? displayName : "<none>");
-}
-
-bool TryParseHexFormIDToken(std::string_view token, RE::FormID& outFormID)
-{
-    if (token.empty() || token.size() > 8) {
-        return false;
-    }
-
-    RE::FormID result = 0;
-    for (const char ch : token) {
-        result <<= 4;
-        if (ch >= '0' && ch <= '9') {
-            result |= static_cast<RE::FormID>(ch - '0');
-        } else if (ch >= 'A' && ch <= 'F') {
-            result |= static_cast<RE::FormID>(10 + (ch - 'A'));
-        } else if (ch >= 'a' && ch <= 'f') {
-            result |= static_cast<RE::FormID>(10 + (ch - 'a'));
-        } else {
-            return false;
-        }
-    }
-
-    outFormID = result;
-    return true;
 }
 
 std::string DescribeGeometryProvenance(std::string_view geometryName)
@@ -4458,23 +4384,6 @@ bool ApplyFaceMorphsDirectStable(float thin, float muscular, float fat, bool isC
         muscular,
         fat);
     return false;
-}
-
-std::string NormalizeSliderLabel(std::string_view label)
-{
-    std::string normalized;
-    normalized.reserve(label.size());
-
-    for (const char ch : label) {
-        const unsigned char uch = static_cast<unsigned char>(ch);
-        if (ch == '$' || ch == ' ' || ch == '_' || ch == '-' || ch == '\t') {
-            continue;
-        }
-
-        normalized.push_back(static_cast<char>(std::tolower(uch)));
-    }
-
-    return normalized;
 }
 
 int GetFaceSliderLabelMatchScore(std::string_view normalizedLabel, std::string_view target)

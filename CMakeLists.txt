@@ -80,6 +80,7 @@ target_include_directories(
 	"${PROJECT_NAME}"
 	PRIVATE
 		${SIMPLEINI_INCLUDE_DIRS}
+		"${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
 # When your SKSE .dll is compiled, this will automatically copy the .dll into your mods folder.
 # Only works if you configure DEPLOY_ROOT above (or set the SKYRIM_MODS_FOLDER environment variable)
@@ -127,11 +128,12 @@ option(MPS_BUILD_TESTS "Build host-side unit tests" ON)
 if(MPS_BUILD_TESTS)
     find_package(doctest CONFIG REQUIRED)
     set(MPS_CORE_SOURCES
-        # src/core/*.cpp files are appended here by later tasks
+        src/core/Text.cpp
     )
     set(MPS_TEST_SOURCES
         tests/cpp/test_main.cpp
         tests/cpp/test_sanity.cpp
+        tests/cpp/test_text.cpp
     )
     add_executable(mps_tests ${MPS_CORE_SOURCES} ${MPS_TEST_SOURCES})
     target_compile_features(mps_tests PRIVATE cxx_std_23)
