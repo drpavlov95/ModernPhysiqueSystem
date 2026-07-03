@@ -119,3 +119,24 @@ if(DEFINED OUTPUT_FOLDER)
         )
     endif()
 endif()
+
+# ---------------------------------------------------------------------------
+# Host-side unit tests (no CommonLibSSE, no game deps)
+# ---------------------------------------------------------------------------
+option(MPS_BUILD_TESTS "Build host-side unit tests" ON)
+if(MPS_BUILD_TESTS)
+    find_package(doctest CONFIG REQUIRED)
+    set(MPS_CORE_SOURCES
+        # src/core/*.cpp files are appended here by later tasks
+    )
+    set(MPS_TEST_SOURCES
+        tests/cpp/test_main.cpp
+        tests/cpp/test_sanity.cpp
+    )
+    add_executable(mps_tests ${MPS_CORE_SOURCES} ${MPS_TEST_SOURCES})
+    target_compile_features(mps_tests PRIVATE cxx_std_23)
+    target_include_directories(mps_tests PRIVATE src)
+    target_link_libraries(mps_tests PRIVATE doctest::doctest)
+    enable_testing()
+    add_test(NAME mps_tests COMMAND mps_tests)
+endif()
