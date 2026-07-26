@@ -347,11 +347,13 @@ bool QueueRaceMenuSliderReloadAfterSwitch(float thin, float muscular, float fat)
     g_pendingRaceMenuFaceReapplyFat.store(targetFat);
     g_pendingRaceMenuFaceReapplyHasValues.store(true);
 
-    if (!kEnableRaceMenuSliderReloadAfterSexSwitch) {
+    if (!kEnableRaceMenuSliderReloadAfterSexSwitch ||
+        !FaceMorphDiagnostics::UseRaceMenuFaceRecoveryBursts()) {
         LogFaceDiag(
             "FACE_RACEMENU_HARD_RELOAD",
             std::format(
-                "action=skipped reason=compile_time_disabled values=({:.3f},{:.3f},{:.3f}) generation={}",
+                "action=skipped reason={} values=({:.3f},{:.3f},{:.3f}) generation={}",
+                kEnableRaceMenuSliderReloadAfterSexSwitch ? "config_disabled" : "compile_time_disabled",
                 targetThin,
                 targetMuscular,
                 targetFat,
@@ -924,9 +926,32 @@ void EndFaceSwitchTransition(std::string_view reason)
         return;
     }
 
-    // Do not write SKEE ValueMap here. Closing and reopening RaceMenu fixes the
-    // observed broken male slider route, so first try RaceMenu/SKEE's public
-    // slider reload path while preserving the current MPS target.
+    // Do not write SKEE ValueMap here. The default path avoids rebuilding the
+    // RaceMenu slider list while it is open; repeated rebuilds can retrigger the
+    // native sex slider and produce UI ticks/flicker.
+    if (!FaceMorphDiagnostics::UseRaceMenuFaceRecoveryBursts()) {
+        ApplyBodyMorphTargetsOnly(replayThin, replayMuscular, replayFat, "switch_transition_settled_recovery_bursts_disabled");
+        RestorePrismaMorphWheelTarget(replayThin, replayMuscular, replayFat, "switch_transition_settled_recovery_bursts_disabled");
+
+        const bool applied = ApplyFaceMorphsViaRaceMenuSliders(
+            replayThin,
+            replayMuscular,
+            replayFat,
+            false,
+            FaceApplyContext::kRecoveryTransaction);
+        if (applied) {
+            CacheMorphState(replayThin, replayMuscular, replayFat, "switch_transition_settled_single_face_dispatch");
+            ClearRaceMenuFaceReapply("burst_applied");
+        } else {
+            StoreDesiredFaceTarget(replayThin, replayMuscular, replayFat, "switch_transition_settled_single_face_dispatch_failed");
+            g_lastFaceReplayClearClassification.store(FaceReplayClearClassification::kDispatchFailed);
+            ClearRaceMenuFaceReapply("no_effect_dispatch");
+        }
+
+        ClearFaceGeometryDirtyAfterRebuild("switch_transition_settled_recovery_bursts_disabled");
+        return;
+    }
+
     if (QueueRaceMenuSliderReloadAfterSwitch(replayThin, replayMuscular, replayFat)) {
         return;
     }
@@ -2701,7 +2726,8 @@ void SetPhysiqueVisibilityForCategory(std::string_view categoryKey, std::uint32_
         MarkRaceMenuFaceStateDirty("body_category_activated", /*pauseBurst=*/false);
         // Dirty-state invalidation must not cancel the recovery burst; queue/update
         // the latest target after bindings are invalidated.
-        if (hasPendingValues || hadSavedState) {
+        if (FaceMorphDiagnostics::UseRaceMenuFaceRecoveryBursts() &&
+            (hasPendingValues || hadSavedState)) {
             QueueRaceMenuFaceReapply(
                 "body_category_reactivated",
                 kPendingFaceReapplyRetryDelayMs,
@@ -5288,12 +5314,14 @@ bool ApplyFaceMorphsViaRaceMenuSliders(
 
     if (g_faceGeometryDirtyAfterRebuild.load() && !IsFaceRecoveryContext(context)) {
         StoreDesiredFaceTarget(thin, muscular, fat, "dirty_after_rebuild_direct_apply_allowed");
-        QueueRaceMenuFaceReapply(
-            "dirty_after_rebuild_direct_apply_allowed",
-            kPendingFaceReapplyRetryDelayMs,
-            thin,
-            muscular,
-            fat);
+        if (FaceMorphDiagnostics::UseRaceMenuFaceRecoveryBursts()) {
+            QueueRaceMenuFaceReapply(
+                "dirty_after_rebuild_direct_apply_allowed",
+                kPendingFaceReapplyRetryDelayMs,
+                thin,
+                muscular,
+                fat);
+        }
         LogFaceDiag(
             "FACE_REPLAY_STATE_CHANGE",
             std::format(
@@ -5855,7 +5883,7 @@ public:
                     replayThin,
                     replayMuscular,
                     replayFat);
-            } else {
+            } else if (FaceMorphDiagnostics::UseRaceMenuFaceRecoveryBursts()) {
                 QueueRaceMenuFaceReapply("RSM_Initialized", kPendingFaceReapplyInitialDelayMs, replayThin, replayMuscular, replayFat);
             }
             // No native SetMorphValue restore here: a direct write would pre-populate
@@ -6128,7 +6156,9 @@ bool ApplyMorphsNative(float thin, float muscular, float fat, bool isCommit, boo
             isCommit ? "commit" : "preview",
             g_raceMenuOpen.load() ? 1 : 0);
 
-        if (g_raceMenuOpen.load() && isCommit) {
+        if (g_raceMenuOpen.load() &&
+            isCommit &&
+            FaceMorphDiagnostics::UseRaceMenuFaceRecoveryBursts()) {
             QueueRaceMenuFaceReapply(
                 "commit_face_apply_failed",
                 kPendingFaceReapplyRetryDelayMs,
