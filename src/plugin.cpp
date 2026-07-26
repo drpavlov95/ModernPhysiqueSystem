@@ -204,6 +204,7 @@ bool VerifyFaceReadback(float thin, float muscular, float fat, bool isCommit);
 bool TryFlushRaceMenuActorUpdatesSEH(IActorUpdateManager* updateManager, RE::PlayerCharacter* player, std::uint32_t& outExceptionCode);
 void BeginFaceSwitchTransition(std::string_view reason, std::uint64_t settleMs = kFaceSwitchTransitionSettleMs);
 void EndFaceSwitchTransition(std::string_view reason);
+bool QueueSingleRaceMenuSliderReloadRepair(float thin, float muscular, float fat);
 bool QueueRaceMenuSliderReloadAfterSwitch(float thin, float muscular, float fat);
 void AwaitPostRaceMenuSliderReloadReinitialized(float thin, float muscular, float fat, std::string_view reason);
 void CompletePostRaceMenuSliderReloadReinitialized(std::string_view reason);
@@ -334,6 +335,85 @@ void MarkRaceMenuFaceStateDirty(std::string_view reason, bool pauseBurst = true)
             hasValuesBefore ? 1 : 0,
             (pendingBefore && pendingAfter) ? 1 : 0);
     }
+}
+
+// A sex change can leave RaceMenu's live slider route bound to the former
+// head/sex entry table even though the menu itself stays open.  Rebuilding the
+// CharGen list once is the public RaceMenu equivalent of close/reopen and is
+// sufficient to repair that route.  This intentionally does *not* install the
+// old post-rebuild replay burst: the reinit events below own the normal single
+// settled face replay, preventing the repeated ReloadSliders/ticking loop.
+bool QueueSingleRaceMenuSliderReloadRepair(float thin, float muscular, float fat)
+{
+    const float targetThin = std::clamp(thin, 0.0f, 1.0f);
+    const float targetMuscular = std::clamp(muscular, 0.0f, 1.0f);
+    const float targetFat = std::clamp(fat, 0.0f, 1.0f);
+    StoreDesiredFaceTarget(targetThin, targetMuscular, targetFat, "post_switch_single_reload_target");
+    g_pendingRaceMenuFaceReapplyThin.store(targetThin);
+    g_pendingRaceMenuFaceReapplyMuscular.store(targetMuscular);
+    g_pendingRaceMenuFaceReapplyFat.store(targetFat);
+    g_pendingRaceMenuFaceReapplyHasValues.store(true);
+
+    if (!g_raceMenuOpen.load()) {
+        return false;
+    }
+
+    auto* taskInterface = SKSE::GetTaskInterface();
+    if (!taskInterface) {
+        spdlog::warn("Skipped one-shot RaceMenu slider repair: SKSE task interface unavailable");
+        return false;
+    }
+
+    if (g_raceMenuSliderReloadInFlight.exchange(true)) {
+        // A prior repair will read the latest desired target after its rebuild;
+        // coalescing keeps a duplicate ChangeSex event from creating a loop.
+        return true;
+    }
+
+    const std::uint64_t capturedGeneration = g_faceReplayGeneration.load();
+    taskInterface->AddTask([targetThin, targetMuscular, targetFat, capturedGeneration]() {
+        const auto finish = []() {
+            g_raceMenuSliderReloadInFlight.store(false);
+        };
+
+        if (!g_raceMenuOpen.load() ||
+            capturedGeneration != g_faceReplayGeneration.load() ||
+            IsFaceSwitchTransitionActive()) {
+            finish();
+            return;
+        }
+
+        FaceMorphTriplet latestTarget{ targetThin, targetMuscular, targetFat };
+        if (HasDesiredFaceTarget()) {
+            latestTarget = GetDesiredFaceTarget();
+        }
+        latestTarget.thin = std::clamp(latestTarget.thin, 0.0f, 1.0f);
+        latestTarget.muscular = std::clamp(latestTarget.muscular, 0.0f, 1.0f);
+        latestTarget.fat = std::clamp(latestTarget.fat, 0.0f, 1.0f);
+
+        ScopedMorphTrace traceScope(BuildGeneratedMorphTraceId("rsm-single-reload"));
+        ApplyBodyMorphTargetsOnly(
+            latestTarget.thin,
+            latestTarget.muscular,
+            latestTarget.fat,
+            "post_switch_single_reload_preserve_target");
+        RestorePrismaMorphWheelTarget(
+            latestTarget.thin,
+            latestTarget.muscular,
+            latestTarget.fat,
+            "post_switch_single_reload_preserve_target");
+
+        const bool invoked = TryInvokeRaceMenuReloadSliders("post_switch_single_route_repair");
+        spdlog::info(
+            "One-shot RaceMenu slider route repair invoked={} generation={} values=({:.3f},{:.3f},{:.3f})",
+            invoked ? 1 : 0,
+            capturedGeneration,
+            latestTarget.thin,
+            latestTarget.muscular,
+            latestTarget.fat);
+        finish();
+    });
+    return true;
 }
 
 bool QueueRaceMenuSliderReloadAfterSwitch(float thin, float muscular, float fat)
@@ -927,11 +1007,20 @@ void EndFaceSwitchTransition(std::string_view reason)
     }
 
     // Do not write SKEE ValueMap here. The default path avoids rebuilding the
-    // RaceMenu slider list while it is open; repeated rebuilds can retrigger the
-    // native sex slider and produce UI ticks/flicker.
+    // RaceMenu slider list repeatedly; that can retrigger the native sex slider
+    // and produce UI ticks/flicker.  One coalesced public ReloadSliders call is
+    // nevertheless required to repair the stale male/female route left by some
+    // RaceMenu sex rebuilds.  Its own RSM_Reinitialized/RSM_Initialized events
+    // schedule the normal single settled face replay below, without a burst.
     if (!FaceMorphDiagnostics::UseRaceMenuFaceRecoveryBursts()) {
         ApplyBodyMorphTargetsOnly(replayThin, replayMuscular, replayFat, "switch_transition_settled_recovery_bursts_disabled");
         RestorePrismaMorphWheelTarget(replayThin, replayMuscular, replayFat, "switch_transition_settled_recovery_bursts_disabled");
+
+        if (!g_singleRaceMenuSliderReloadRepairUsed.load() &&
+            QueueSingleRaceMenuSliderReloadRepair(replayThin, replayMuscular, replayFat)) {
+            g_singleRaceMenuSliderReloadRepairUsed.store(true);
+            return;
+        }
 
         const bool applied = ApplyFaceMorphsViaRaceMenuSliders(
             replayThin,
@@ -5750,6 +5839,9 @@ public:
         }
         else if (a_event->eventName == "RSM_SliderChange" && a_event->strArg == "ChangeSex") {
             const bool wasActive = g_faceSwitchTransitionActive.load();
+            if (!wasActive) {
+                g_singleRaceMenuSliderReloadRepairUsed.store(false);
+            }
             LogFaceNodeSnapshot("before_RSM_SliderChange_ChangeSex");
             LogPlayerHeadPartSnapshot("before_RSM_SliderChange_ChangeSex");
             DidRaceMenuSexChange();
@@ -6433,6 +6525,7 @@ void ResetRaceMenuBridgeState()
         oldDirty ? "1" : "0",
         "0",
         "bridge_reset");
+    g_singleRaceMenuSliderReloadRepairUsed.store(false);
     g_faceSliderBridgeCallsDisabled = false;
     g_faceSliderBridgeUnavailableLogged = false;
     g_faceSliderBridgeDisabledLogged = false;

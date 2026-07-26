@@ -258,6 +258,7 @@ extern std::atomic<bool> g_faceSwitchAwaitingReinitLogged;
 extern std::atomic<std::uint64_t> g_faceSwitchTransitionUntilMs;
 extern std::atomic<std::uint64_t> g_faceSwitchTransitionStartMs;
 extern std::atomic<bool> g_faceGeometryDirtyAfterRebuild;
+extern std::atomic<bool> g_singleRaceMenuSliderReloadRepairUsed;
 extern std::atomic<int> g_faceReadbackMismatchStreak;
 extern std::atomic<bool> g_raceMenuSliderReloadInFlight;
 extern std::atomic<bool> g_postRaceMenuSliderReloadAwaitingReinitialized;
