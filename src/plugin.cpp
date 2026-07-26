@@ -214,10 +214,12 @@ bool IsFaceValueMapResetSafe(const char* reason);
 void PollFaceSwitchTransitionExpiry();
 std::uint64_t AdvanceFaceReplayGeneration(std::string_view reason);
 void MarkFaceGeometryDirtyAfterRebuild(std::string_view reason);
+void ClearFaceGeometryDirtyAfterRebuild(std::string_view reason);
 const char* GetFaceSliderInternalName(std::string_view targetSlider);
 const char* GetFaceSliderGeometryName(std::string_view targetSlider);
 const char* FaceReplayClearClassificationName(FaceReplayClearClassification classification);
 FaceReplayClearClassification ClassifyClearReason(std::string_view reason);
+bool IsTerminalNoEffectFaceReplay(FaceReplayClearClassification classification, int attemptNumber);
 FaceReplayStateSnapshot CaptureFaceReplayState();
 std::string FormatFaceReplayState(const FaceReplayStateSnapshot& state, std::string_view prefix);
 void StoreDesiredFaceTarget(float thin, float muscular, float fat, std::string_view reason);
@@ -254,6 +256,22 @@ void MarkFaceGeometryDirtyAfterRebuild(std::string_view reason)
         reason.empty() ? "<none>" : std::string(reason),
         wasDirty ? 1 : 0,
         g_faceReplayGeneration.load());
+}
+
+void ClearFaceGeometryDirtyAfterRebuild(std::string_view reason)
+{
+    const bool wasDirty = g_faceGeometryDirtyAfterRebuild.exchange(false);
+    LogFaceFlagChange(
+        "faceGeometryDirtyAfterRebuild",
+        wasDirty ? "1" : "0",
+        "0",
+        reason.empty() ? "ClearFaceGeometryDirtyAfterRebuild" : reason);
+    if (wasDirty) {
+        spdlog::info(
+            "Face geometry dirty-after-rebuild cleared reason={} generation={}",
+            reason.empty() ? "<none>" : std::string(reason),
+            g_faceReplayGeneration.load());
+    }
 }
 
 void MarkRaceMenuFaceStateDirty(std::string_view reason, bool pauseBurst = true)
@@ -1455,6 +1473,36 @@ void UpdatePendingRaceMenuFaceReapply()
             return;
         }
 
+        const FaceReplayClearClassification failedClassification = g_lastFaceReplayClearClassification.load();
+        if (IsTerminalNoEffectFaceReplay(failedClassification, attemptNumber)) {
+            LogFaceDiag(
+                "FACE_REPLAY_STATE_CHANGE",
+                std::format(
+                    "action=task_exit reason=no_effect_dispatch clearClassification={} capturedGeneration={} currentGeneration={} attempt={} attemptsLeft={} values=({:.3f},{:.3f},{:.3f})",
+                    FaceReplayClearClassificationName(failedClassification),
+                    capturedGeneration,
+                    g_faceReplayGeneration.load(),
+                    attemptNumber,
+                    attemptsLeft,
+                    thin,
+                    muscular,
+                    fat));
+            spdlog::warn(
+                "Pending RaceMenu face reapply stopped after no-effect dispatch trace={} generation={} attempt={} attemptsLeft={} classification={} values=({:.3f},{:.3f},{:.3f})",
+                CurrentMorphTraceId(),
+                capturedGeneration,
+                attemptNumber,
+                attemptsLeft,
+                FaceReplayClearClassificationName(failedClassification),
+                thin,
+                muscular,
+                fat);
+            ClearFaceGeometryDirtyAfterRebuild("pending_replay_no_effect_dispatch");
+            ClearRaceMenuFaceReapply("no_effect_dispatch");
+            finalizeAttempt();
+            return;
+        }
+
         if (attemptsLeft <= 0) {
             LogFaceDiag(
                 "FACE_REPLAY_STATE_CHANGE",
@@ -1833,10 +1881,27 @@ FaceReplayClearClassification ClassifyClearReason(std::string_view reason)
     if (reason == "bridge_reset") {
         return FaceReplayClearClassification::kBridgeReset;
     }
-    if (reason == "burst_applied" || reason == "preview_applied" || reason == "commit_applied") {
+    if (reason == "burst_applied" ||
+        reason == "preview_applied" ||
+        reason == "commit_applied" ||
+        reason == "no_effect_dispatch") {
         return g_lastFaceReplayClearClassification.load();
     }
     return FaceReplayClearClassification::kDiagnosticUnknown;
+}
+
+bool IsTerminalNoEffectFaceReplay(FaceReplayClearClassification classification, int attemptNumber)
+{
+    switch (classification) {
+    case FaceReplayClearClassification::kRelativeZeroBlocked:
+    case FaceReplayClearClassification::kRelativeZeroBlockedDirectResetDisabled:
+        return true;
+    case FaceReplayClearClassification::kRouteOrGeometrySuspected:
+    case FaceReplayClearClassification::kNativeSavedWriteNotObserved:
+        return attemptNumber >= 2;
+    default:
+        return false;
+    }
 }
 
 void QueueDelayedFaceRead(FaceDelayedReadRequest request, std::source_location location)
@@ -6003,12 +6068,43 @@ bool ApplyMorphsNative(float thin, float muscular, float fat, bool isCommit, boo
         g_pendingRaceMenuFaceReapplyHasValues.store(true);
     }
 
-    bool faceApplySucceeded = ApplyFaceMorphsViaRaceMenuSliders(
-        thin,
-        muscular,
-        fat,
-        isCommit,
-        isCommit ? FaceApplyContext::kCommit : FaceApplyContext::kPreview);
+    const bool allowPreviewFaceCallbacks = FaceMorphDiagnostics::UseRaceMenuFacePreview();
+    bool shouldApplyFaceNow = isCommit || allowPreviewFaceCallbacks;
+    if (!isCommit && shouldApplyFaceNow && g_raceMenuOpen.load()) {
+        const std::uint64_t nowMs = GetTickCount64();
+        const std::uint64_t previousFacePreviewMs = g_lastFacePreviewApplyTimeMs.load();
+        if (nowMs > previousFacePreviewMs &&
+            (nowMs - previousFacePreviewMs) < kFacePreviewApplyMinIntervalMs) {
+            shouldApplyFaceNow = false;
+            spdlog::debug(
+                "RaceMenu face preview throttled trace={} generation={} elapsedMs={} minIntervalMs={}",
+                CurrentMorphTraceId(),
+                g_faceReplayGeneration.load(),
+                nowMs - previousFacePreviewMs,
+                kFacePreviewApplyMinIntervalMs);
+        } else {
+            g_lastFacePreviewApplyTimeMs.store(nowMs);
+        }
+    }
+
+    bool faceApplySucceeded = false;
+    if (shouldApplyFaceNow) {
+        faceApplySucceeded = ApplyFaceMorphsViaRaceMenuSliders(
+            thin,
+            muscular,
+            fat,
+            isCommit,
+            isCommit ? FaceApplyContext::kCommit : FaceApplyContext::kPreview);
+    } else if (!isCommit) {
+        spdlog::debug(
+            "RaceMenu face preview skipped trace={} generation={} values=({:.3f},{:.3f},{:.3f}) previewFaceCallbacks={}",
+            CurrentMorphTraceId(),
+            g_faceReplayGeneration.load(),
+            thin,
+            muscular,
+            fat,
+            allowPreviewFaceCallbacks ? 1 : 0);
+    }
     if (outFaceApplySucceeded) {
         *outFaceApplySucceeded = faceApplySucceeded;
     }
@@ -6025,7 +6121,7 @@ bool ApplyMorphsNative(float thin, float muscular, float fat, bool isCommit, boo
         }
     }
 
-    if (!faceApplySucceeded) {
+    if (!faceApplySucceeded && shouldApplyFaceNow) {
         spdlog::warn(
             "Face slider GFx apply failed; direct FaceMorph fallback is disabled for safety trace={} mode={} raceMenuOpen={}",
             CurrentMorphTraceId(),
