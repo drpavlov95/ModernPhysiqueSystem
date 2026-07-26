@@ -918,15 +918,18 @@ canvas.addEventListener("mousedown", (event) => {
     if (dragging) {
         document.removeEventListener("mousemove", handleDragMove);
         document.removeEventListener("mouseup", handleDragEnd);
+        dragging = false;
     }
 
-    dragging = true;
+    event.preventDefault();
+    event.stopPropagation();
 
     const pos = getMousePos(event);
     setKnobFromPoint(pos.x, pos.y);
 
-    document.addEventListener("mousemove", handleDragMove);
-    document.addEventListener("mouseup", handleDragEnd);
+    flushPreviewNow();
+    flushCommitNow();
+    setSnapLineHighlight(null, "off");
 });
 
 canvas.addEventListener("contextmenu", (event) => {
