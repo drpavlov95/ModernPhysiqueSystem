@@ -56,6 +56,41 @@ TEST_CASE("RegisterBodyStem classification")
     CHECK_FALSE(RegisterBodyStem(c, "garbage", "p", "t"));
 }
 
+TEST_CASE("stable samples accept every axis pair without changing legacy combo routing")
+{
+    NormalMapCatalog c;
+    CHECK(RegisterBodyStem(c, "H30T40", "th.dds", "RBM_TX_H30T40"));
+    CHECK(RegisterBodyStem(c, "M20T50", "tm.dds", "RBM_TX_M20T50"));
+
+    CHECK(c.combos.empty());
+    REQUIRE(c.samples.size() == 2);
+    CHECK(c.samples[0].thinPercent == 40);
+    CHECK(c.samples[0].muscularPercent == 0);
+    CHECK(c.samples[0].heavyPercent == 30);
+    CHECK(c.samples[1].thinPercent == 50);
+    CHECK(c.samples[1].muscularPercent == 20);
+    CHECK(c.samples[1].heavyPercent == 0);
+
+    SortCatalog(c);
+    CHECK(
+        SelectBodyNormalMapStable(c, 0.40f, 0.0f, 0.30f).textureSetEditorID ==
+        "RBM_TX_H30T40");
+    CHECK(
+        SelectBodyNormalMapStable(c, 0.50f, 0.20f, 0.0f).textureSetEditorID ==
+        "RBM_TX_M20T50");
+}
+
+TEST_CASE("stable samples deduplicate coordinates deterministically")
+{
+    NormalMapCatalog c;
+    CHECK(RegisterBodyStem(c, "M0T0H0", "second.dds", "RBM_TX_M0T0H0"));
+    CHECK(RegisterBodyStem(c, "H0M0T0", "first.dds", "RBM_TX_H0M0T0"));
+
+    REQUIRE(c.samples.size() == 1);
+    CHECK(c.samples[0].variantKey == "H0M0T0");
+    CHECK(c.samples[0].relativePath == "first.dds");
+}
+
 TEST_CASE("FindBestAxisNormalMap picks nearest percent; empty gives nullptr")
 {
     auto c = MakeCatalog({ "T0", "T50", "T100" });
@@ -80,6 +115,83 @@ TEST_CASE("SelectBodyNormalMap policy")
     CHECK(SelectBodyNormalMap(c, 0.9f, 0.0f, 0.1f, soft).textureSetEditorID == "RBM_TX_T100");
     // all-zero -> thin line nearest 0 (the base H0M0T0)
     CHECK(SelectBodyNormalMap(c, 0.0f, 0.0f, 0.0f, soft).textureSetEditorID == "RBM_TX_H0M0T0");
+}
+
+TEST_CASE("stable body selection searches base axes and combinations together")
+{
+    auto c = MakeCatalog({
+        "H0M0T0",
+        "H90",
+        "H90M10",
+        "H10M10"
+    });
+
+    // Near the heavy axis, H90 is closer than the first interior combo.
+    CHECK(
+        SelectBodyNormalMapStable(c, 0.0f, 0.01f, 0.90f).textureSetEditorID ==
+        "RBM_TX_H90");
+
+    // Near the center, the base is closer than H10M10.
+    CHECK(
+        SelectBodyNormalMapStable(c, 0.0f, 0.01f, 0.01f).textureSetEditorID ==
+        "RBM_TX_H0M0T0");
+}
+
+TEST_CASE("stable body selection uses geometric dominance in thin sectors")
+{
+    auto c = MakeCatalog({
+        "H0M0T0",
+        "T40",
+        "T80",
+        "H20",
+        "H60",
+        "M20",
+        "M60"
+    });
+
+    CHECK(
+        SelectBodyNormalMapStable(c, 0.80f, 0.0f, 0.20f).textureSetEditorID ==
+        "RBM_TX_T80");
+    CHECK(
+        SelectBodyNormalMapStable(c, 0.40f, 0.0f, 0.60f).textureSetEditorID ==
+        "RBM_TX_H60");
+    CHECK(
+        SelectBodyNormalMapStable(c, 0.80f, 0.20f, 0.0f).textureSetEditorID ==
+        "RBM_TX_T80");
+    CHECK(
+        SelectBodyNormalMapStable(c, 0.40f, 0.60f, 0.0f).textureSetEditorID ==
+        "RBM_TX_M60");
+}
+
+TEST_CASE("stable-only samples do not alter legacy body selection")
+{
+    auto c = MakeCatalog({
+        "H0M0T0",
+        "T80",
+        "H20",
+        "H20T80"
+    });
+
+    CHECK(c.combos.empty());
+    CHECK(
+        SelectBodyNormalMap(c, 0.80f, 0.0f, 0.20f, 20).textureSetEditorID ==
+        "RBM_TX_H20");
+    CHECK(
+        SelectBodyNormalMapStable(c, 0.80f, 0.0f, 0.20f).textureSetEditorID ==
+        "RBM_TX_H20T80");
+}
+
+TEST_CASE("stable body selection hysteresis holds then releases the previous sample")
+{
+    auto c = MakeCatalog({ "T50", "T60" });
+    const std::string previousPath = "Textures\\RleyBodyMorphs\\T50.dds";
+
+    CHECK(
+        SelectBodyNormalMapStable(c, 0.55f, 0.0f, 0.0f, previousPath, 3).textureSetEditorID ==
+        "RBM_TX_T50");
+    CHECK(
+        SelectBodyNormalMapStable(c, 0.58f, 0.0f, 0.0f, previousPath, 3).textureSetEditorID ==
+        "RBM_TX_T60");
 }
 
 TEST_CASE("SelectHandNormalMap")

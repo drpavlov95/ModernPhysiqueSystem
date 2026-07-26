@@ -20,6 +20,10 @@ namespace
 	std::atomic_bool g_faceNodeSnapshot{ FaceMorphDiagnostics::kEnableFaceNodeSnapshot };
 	std::atomic_bool g_raceMenuEntryDump{ FaceMorphDiagnostics::kEnableRaceMenuEntryDump };
 	std::atomic_bool g_verboseLogging{ false };
+	std::atomic_bool g_stableNormalMapSelection{ false };
+	std::atomic_int g_stableNormalMapHysteresisPercent{
+		FaceMorphDiagnostics::kDefaultStableNormalMapHysteresisPercent
+	};
 
 	std::string Basename(std::string_view path)
 	{
@@ -116,25 +120,45 @@ namespace FaceMorphDiagnostics
 		const bool raceMenuEntryDump = ReadBool(configPath, "Diagnostics", "RaceMenuEntryDump", kEnableRaceMenuEntryDump);
 		const bool verboseLogging = ReadBool(configPath, "Diagnostics", "VerboseLogging", false);
 		const std::string logLevelText = ReadString(configPath, "Logging", "Level", "warn");
+		std::string normalMapSelectionMode = ReadString(configPath, "NormalMaps", "SelectionMode", "legacy");
+		std::ranges::transform(normalMapSelectionMode, normalMapSelectionMode.begin(), [](unsigned char ch) {
+			return static_cast<char>(std::tolower(ch));
+		});
+		const bool stableNormalMapSelection = normalMapSelectionMode == "stable";
+		if (!stableNormalMapSelection && normalMapSelectionMode != "legacy") {
+			normalMapSelectionMode = "legacy";
+		}
+		const int stableNormalMapHysteresisPercent = std::clamp(
+			static_cast<int>(GetPrivateProfileIntA(
+				"NormalMaps",
+				"StableHysteresisPercent",
+				kDefaultStableNormalMapHysteresisPercent,
+				configPath.string().c_str())),
+			0,
+			20);
 		const auto logLevel = ParseLogLevel(logLevelText);
 
 		g_causalTrace.store(causalTrace);
 		g_faceNodeSnapshot.store(faceNodeSnapshot);
 		g_raceMenuEntryDump.store(raceMenuEntryDump);
 		g_verboseLogging.store(verboseLogging);
+		g_stableNormalMapSelection.store(stableNormalMapSelection);
+		g_stableNormalMapHysteresisPercent.store(stableNormalMapHysteresisPercent);
 
 		spdlog::set_level(logLevel);
 		spdlog::flush_on(logLevel <= spdlog::level::debug ? spdlog::level::debug : spdlog::level::warn);
 
 		spdlog::info(
-			"ModernPhysiqueSystem config path={} exists={} logLevel={} FaceCausalTrace={} FaceNodeSnapshot={} RaceMenuEntryDump={} VerboseLogging={}",
+			"ModernPhysiqueSystem config path={} exists={} logLevel={} FaceCausalTrace={} FaceNodeSnapshot={} RaceMenuEntryDump={} VerboseLogging={} NormalSelectionMode={} StableHysteresisPercent={}",
 			configPath.string(),
 			configExists ? 1 : 0,
 			logLevelText,
 			causalTrace ? 1 : 0,
 			faceNodeSnapshot ? 1 : 0,
 			raceMenuEntryDump ? 1 : 0,
-			verboseLogging ? 1 : 0);
+			verboseLogging ? 1 : 0,
+			normalMapSelectionMode,
+			stableNormalMapHysteresisPercent);
 	}
 
 	bool IsCausalTraceEnabled()
@@ -155,6 +179,16 @@ namespace FaceMorphDiagnostics
 	bool IsVerboseLoggingEnabled()
 	{
 		return g_verboseLogging.load() || g_causalTrace.load();
+	}
+
+	bool UseStableNormalMapSelection()
+	{
+		return g_stableNormalMapSelection.load();
+	}
+
+	int GetStableNormalMapHysteresisPercent()
+	{
+		return g_stableNormalMapHysteresisPercent.load();
 	}
 
 	void Log(std::string_view eventName, std::string_view fields, std::source_location location)

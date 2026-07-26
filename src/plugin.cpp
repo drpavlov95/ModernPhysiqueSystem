@@ -2401,13 +2401,14 @@ void LoadNormalMapCatalog(std::string_view dataFolder, std::string_view relative
         mps::SortCatalog(g_bodyNormalMapCatalog);
 
         spdlog::info(
-            "Loaded normal map catalog from {} (relativeRoot={}): {} thin, {} heavy, {} muscular, {} heavy/muscular combinations",
+            "Loaded normal map catalog from {} (relativeRoot={}): {} thin, {} heavy, {} muscular, {} heavy/muscular combinations, {} stable samples",
             requestedDataFolder,
             requestedRelativeFolder,
             g_bodyNormalMapCatalog.thin.size(),
             g_bodyNormalMapCatalog.heavy.size(),
             g_bodyNormalMapCatalog.muscular.size(),
-            g_bodyNormalMapCatalog.combos.size());
+            g_bodyNormalMapCatalog.combos.size(),
+            g_bodyNormalMapCatalog.samples.size());
         LogNormalMapTextureSetPlan();
     } catch (const std::exception& e) {
         spdlog::error("Failed to load normal map catalog: {}", e.what());
@@ -2533,8 +2534,21 @@ std::string SelectNormalMapRelativePath(float thin, float muscular, float fat)
     const NormalMapFolderSelection folders = ResolveNormalMapFolderSelection();
     LoadNormalMapCatalog(folders.bodyDataFolder, folders.bodyRelativeFolder);
 
-    const mps::NormalMapSelection selection = mps::SelectBodyNormalMap(
-        g_bodyNormalMapCatalog, thin, muscular, fat, kThinSoftThresholdPercent);
+    const mps::NormalMapSelection selection =
+        FaceMorphDiagnostics::UseStableNormalMapSelection() ?
+        mps::SelectBodyNormalMapStable(
+            g_bodyNormalMapCatalog,
+            thin,
+            muscular,
+            fat,
+            g_selectedNormalMapPath,
+            FaceMorphDiagnostics::GetStableNormalMapHysteresisPercent()) :
+        mps::SelectBodyNormalMap(
+            g_bodyNormalMapCatalog,
+            thin,
+            muscular,
+            fat,
+            kThinSoftThresholdPercent);
     g_selectedNormalMapTextureSetEditorID = selection.textureSetEditorID;
     return selection.relativePath;
 }
@@ -2564,10 +2578,11 @@ void UpdateSelectedNormalMapCandidate(float thin, float muscular, float fat)
     g_selectedNormalMapPath = nextPath;
     g_selectedHandNormalMapPath = nextHandPath;
     spdlog::debug(
-        "Selected normal map candidate body={} hand={} using {} for thin={:.3f} muscular={:.3f} heavy={:.3f}",
+        "Selected normal map candidate body={} hand={} using {} mode={} for thin={:.3f} muscular={:.3f} heavy={:.3f}",
         g_selectedNormalMapPath,
         g_selectedHandNormalMapPath.empty() ? "<no-hand-path>" : g_selectedHandNormalMapPath,
         g_selectedNormalMapTextureSetEditorID.empty() ? "<no-txst>" : g_selectedNormalMapTextureSetEditorID,
+        FaceMorphDiagnostics::UseStableNormalMapSelection() ? "stable" : "legacy",
         thin,
         muscular,
         fat);

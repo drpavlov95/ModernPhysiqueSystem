@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <limits>
 
@@ -46,6 +47,66 @@ namespace mps
             const std::string& textureSetEditorID)
         {
             target.push_back({ percent, variantKey, relativePath, textureSetEditorID });
+        }
+
+        void RegisterStableSample(
+            NormalMapCatalog& catalog,
+            int thinPercent,
+            int muscularPercent,
+            int heavyPercent,
+            const std::string& variantKey,
+            const std::string& relativePath,
+            const std::string& textureSetEditorID)
+        {
+            const auto sameCoordinates = [&](const BodyNormalMapSample& entry) {
+                return entry.thinPercent == thinPercent &&
+                       entry.muscularPercent == muscularPercent &&
+                       entry.heavyPercent == heavyPercent;
+            };
+
+            const auto existing = std::find_if(
+                catalog.samples.begin(),
+                catalog.samples.end(),
+                sameCoordinates);
+            if (existing == catalog.samples.end()) {
+                catalog.samples.push_back({
+                    thinPercent,
+                    muscularPercent,
+                    heavyPercent,
+                    variantKey,
+                    relativePath,
+                    textureSetEditorID
+                });
+                return;
+            }
+
+            // Directory iteration order is not guaranteed. Prefer the
+            // lexicographically smaller key so duplicate coordinates (such as
+            // H0M0T0 and M0T0H0) resolve identically on every run.
+            if (variantKey < existing->variantKey) {
+                *existing = {
+                    thinPercent,
+                    muscularPercent,
+                    heavyPercent,
+                    variantKey,
+                    relativePath,
+                    textureSetEditorID
+                };
+            }
+        }
+
+        int SampleDistanceSquared(
+            const BodyNormalMapSample& sample,
+            int thinPercent,
+            int muscularPercent,
+            int heavyPercent)
+        {
+            const int thinDistance = sample.thinPercent - thinPercent;
+            const int muscularDistance = sample.muscularPercent - muscularPercent;
+            const int heavyDistance = sample.heavyPercent - heavyPercent;
+            return thinDistance * thinDistance +
+                   muscularDistance * muscularDistance +
+                   heavyDistance * heavyDistance;
         }
     }
 
@@ -197,6 +258,15 @@ namespace mps
         const std::string relative(relativePath);
         const std::string textureSet(textureSetEditorID);
 
+        RegisterStableSample(
+            catalog,
+            hasThin ? thinPercent : 0,
+            hasMuscular ? muscularPercent : 0,
+            hasHeavy ? heavyPercent : 0,
+            variantKey,
+            relative,
+            textureSet);
+
         if (hasHeavy && hasMuscular && hasThin &&
             heavyPercent == 0 && muscularPercent == 0 && thinPercent == 0) {
             RegisterAxisNormalMap(catalog.thin, 0, variantKey, relative, textureSet);
@@ -225,7 +295,10 @@ namespace mps
             return true;
         }
 
-        return false;
+        // Thin/heavy, thin/muscular, and three-axis files are intentionally
+        // available only to the opt-in stable selector. The legacy vectors
+        // above remain unchanged, preserving the established selection policy.
+        return true;
     }
 
     void SortCatalog(NormalMapCatalog& catalog)
@@ -244,6 +317,22 @@ namespace mps
             }
             if (left.muscularPercent != right.muscularPercent) {
                 return left.muscularPercent < right.muscularPercent;
+            }
+            return left.relativePath < right.relativePath;
+        });
+
+        std::sort(catalog.samples.begin(), catalog.samples.end(), [](const BodyNormalMapSample& left, const BodyNormalMapSample& right) {
+            if (left.thinPercent != right.thinPercent) {
+                return left.thinPercent < right.thinPercent;
+            }
+            if (left.muscularPercent != right.muscularPercent) {
+                return left.muscularPercent < right.muscularPercent;
+            }
+            if (left.heavyPercent != right.heavyPercent) {
+                return left.heavyPercent < right.heavyPercent;
+            }
+            if (left.variantKey != right.variantKey) {
+                return left.variantKey < right.variantKey;
             }
             return left.relativePath < right.relativePath;
         });
@@ -418,6 +507,66 @@ namespace mps
 
         selection.textureSetEditorID.clear();
         return selection;
+    }
+
+    NormalMapSelection SelectBodyNormalMapStable(
+        const NormalMapCatalog& catalog,
+        float thin,
+        float muscular,
+        float fat,
+        std::string_view previousRelativePath,
+        int hysteresisPercent)
+    {
+        if (catalog.samples.empty()) {
+            return {};
+        }
+
+        const int thinPercent = MorphValueToPercent(thin);
+        const int muscularPercent = MorphValueToPercent(muscular);
+        const int heavyPercent = MorphValueToPercent(fat);
+
+        const BodyNormalMapSample* bestEntry = nullptr;
+        int bestDistanceSquared = std::numeric_limits<int>::max();
+        const BodyNormalMapSample* previousEntry = nullptr;
+
+        for (const auto& entry : catalog.samples) {
+            const int distanceSquared = SampleDistanceSquared(
+                entry,
+                thinPercent,
+                muscularPercent,
+                heavyPercent);
+            if (distanceSquared < bestDistanceSquared) {
+                bestDistanceSquared = distanceSquared;
+                bestEntry = std::addressof(entry);
+            }
+
+            if (!previousRelativePath.empty() && entry.relativePath == previousRelativePath) {
+                previousEntry = std::addressof(entry);
+            }
+        }
+
+        const BodyNormalMapSample* selectedEntry = bestEntry;
+        if (bestEntry && previousEntry && previousEntry != bestEntry && hysteresisPercent > 0) {
+            const int previousDistanceSquared = SampleDistanceSquared(
+                *previousEntry,
+                thinPercent,
+                muscularPercent,
+                heavyPercent);
+            const double bestDistance = std::sqrt(static_cast<double>(bestDistanceSquared));
+            const double previousDistance = std::sqrt(static_cast<double>(previousDistanceSquared));
+            if (previousDistance <= bestDistance + static_cast<double>(hysteresisPercent)) {
+                selectedEntry = previousEntry;
+            }
+        }
+
+        if (!selectedEntry) {
+            return {};
+        }
+
+        return {
+            selectedEntry->relativePath,
+            selectedEntry->textureSetEditorID
+        };
     }
 
     std::string SelectHandNormalMap(const HandNormalMapCatalog& catalog, float muscular)

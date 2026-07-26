@@ -11,12 +11,15 @@ namespace FaceMorphDiagnostics
 	inline constexpr bool kEnableFaceCausalTrace = false;
 	inline constexpr bool kEnableFaceNodeSnapshot = false;
 	inline constexpr bool kEnableRaceMenuEntryDump = false;
+	inline constexpr int kDefaultStableNormalMapHysteresisPercent = 3;
 
 	void LoadConfig();
 	[[nodiscard]] bool IsCausalTraceEnabled();
 	[[nodiscard]] bool IsFaceNodeSnapshotEnabled();
 	[[nodiscard]] bool IsRaceMenuEntryDumpEnabled();
 	[[nodiscard]] bool IsVerboseLoggingEnabled();
+	[[nodiscard]] bool UseStableNormalMapSelection();
+	[[nodiscard]] int GetStableNormalMapHysteresisPercent();
 
 	void Log(
 		std::string_view eventName,

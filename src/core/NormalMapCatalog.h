@@ -23,12 +23,27 @@ namespace mps
         std::string textureSetEditorID;
     };
 
+    // Canonical point used by the opt-in stable selector. Keeping this separate
+    // from the legacy axis/combo containers leaves the established legacy
+    // behavior unchanged while the stable policy can consider the base, axes,
+    // and every available combination in one search space.
+    struct BodyNormalMapSample
+    {
+        int thinPercent = 0;
+        int muscularPercent = 0;
+        int heavyPercent = 0;
+        std::string variantKey;
+        std::string relativePath;
+        std::string textureSetEditorID;
+    };
+
     struct NormalMapCatalog
     {
         std::vector<AxisNormalMapEntry> thin;
         std::vector<AxisNormalMapEntry> heavy;
         std::vector<AxisNormalMapEntry> muscular;
         std::vector<ComboNormalMapEntry> combos;
+        std::vector<BodyNormalMapSample> samples;
     };
 
     struct HandNormalMapCatalog
@@ -74,5 +89,12 @@ namespace mps
         float muscular,
         float fat,
         int thinSoftThresholdPercent);
+    NormalMapSelection SelectBodyNormalMapStable(
+        const NormalMapCatalog& catalog,
+        float thin,
+        float muscular,
+        float fat,
+        std::string_view previousRelativePath = {},
+        int hysteresisPercent = 0);
     std::string SelectHandNormalMap(const HandNormalMapCatalog& catalog, float muscular);
 }
