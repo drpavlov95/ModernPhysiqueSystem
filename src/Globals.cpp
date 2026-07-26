@@ -70,7 +70,6 @@ std::atomic<bool> g_faceSwitchAwaitingReinitLogged = false;
 std::atomic<std::uint64_t> g_faceSwitchTransitionUntilMs = 0;
 std::atomic<std::uint64_t> g_faceSwitchTransitionStartMs = 0;
 std::atomic<bool> g_faceGeometryDirtyAfterRebuild = false;
-std::atomic<bool> g_singleRaceMenuSliderReloadRepairUsed = false;
 std::atomic<int> g_faceReadbackMismatchStreak = 0;
 std::atomic<bool> g_raceMenuSliderReloadInFlight = false;
 std::atomic<bool> g_postRaceMenuSliderReloadAwaitingReinitialized = false;
