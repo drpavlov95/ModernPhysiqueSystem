@@ -101,7 +101,6 @@ bool ApplyFaceMorphsViaRaceMenuSliders(
     float fat,
     bool requestUiUpdate,
     FaceApplyContext context);
-bool ClearFaceMorphsBeforeSexSwitch(float thin, float muscular, float fat);
 bool TryReadFaceSliderValue(
     std::string_view targetSlider,
     float& outValue,
@@ -5610,47 +5609,6 @@ bool ApplyFaceMorphsViaRaceMenuSliders(
     return allApplied;
 }
 
-// ChangeDoubleMorph is a relative operation.  RaceMenu can retain the old
-// FACE_RLY* saved values when it rebuilds male/female head geometry, leaving a
-// newly-created mesh at its base shape while the saved value still equals the
-// desired wheel value.  A later replay then has a relative delta of zero and
-// cannot touch the new geometry.  Clear via the public GFx route *before* the
-// sex rebuild so the post-rebuild replay has a real delta.  Do not use the
-// native ValueMap API here: that is the path associated with the historic SKEE
-// crash window during sex changes.
-bool ClearFaceMorphsBeforeSexSwitch(float thin, float muscular, float fat)
-{
-    const bool hasFaceTarget =
-        thin > kMorphClearThreshold ||
-        muscular > kMorphClearThreshold ||
-        fat > kMorphClearThreshold;
-    if (!hasFaceTarget || !g_raceMenuOpen.load() || IsFaceSwitchTransitionActive()) {
-        return false;
-    }
-
-    ScopedMorphTrace traceScope(BuildGeneratedMorphTraceId("pre-switch-gfx-clear"));
-    const bool cleared = ApplyFaceMorphsViaRaceMenuSliders(
-        0.0f,
-        0.0f,
-        0.0f,
-        false,
-        FaceApplyContext::kDirect);
-
-    // ApplyFaceMorphsViaRaceMenuSliders deliberately records a direct write as
-    // a desired target while geometry is dirty.  The clear is only a baseline
-    // operation, never a user intent change, so restore the wheel target.
-    StoreDesiredFaceTarget(thin, muscular, fat, "pre_switch_gfx_clear_preserve_desired_target");
-    spdlog::info(
-        "Pre-switch RaceMenu face baseline clear result={} values=({:.3f},{:.3f},{:.3f}) generation={} trace={}",
-        cleared ? 1 : 0,
-        thin,
-        muscular,
-        fat,
-        g_faceReplayGeneration.load(),
-        CurrentMorphTraceId());
-    return cleared;
-}
-
 bool FlushRaceMenuActorUpdates(RE::PlayerCharacter* player, bool force, std::string_view reason)
 {
     if (g_actorUpdateManagerCallsDisabled) {
@@ -5794,18 +5752,6 @@ public:
             const bool wasActive = g_faceSwitchTransitionActive.load();
             LogFaceNodeSnapshot("before_RSM_SliderChange_ChangeSex");
             LogPlayerHeadPartSnapshot("before_RSM_SliderChange_ChangeSex");
-            const float snapshotThin = std::clamp(g_lastThin.load(), 0.0f, 1.0f);
-            const float snapshotMuscular = std::clamp(g_lastMuscular.load(), 0.0f, 1.0f);
-            const float snapshotFat = std::clamp(g_lastFat.load(), 0.0f, 1.0f);
-
-            StoreDesiredFaceTarget(snapshotThin, snapshotMuscular, snapshotFat, "sex_switch_preserve_desired_target");
-            // Clear the old sex's saved relative baseline before RaceMenu swaps
-            // head geometry.  This runs once per transition and does not reload
-            // the native slider list, so it cannot recreate the old tick loop.
-            if (!wasActive) {
-                ClearFaceMorphsBeforeSexSwitch(snapshotThin, snapshotMuscular, snapshotFat);
-            }
-
             DidRaceMenuSexChange();
             MarkFaceGeometryDirtyAfterRebuild("RSM_SliderChange:ChangeSex");
             const bool oldAwaiting = g_faceSwitchAwaitingReinitialized.exchange(true);
@@ -5821,6 +5767,11 @@ public:
                 "0",
                 "RSM_SliderChange:ChangeSex");
 
+            const float snapshotThin = std::clamp(g_lastThin.load(), 0.0f, 1.0f);
+            const float snapshotMuscular = std::clamp(g_lastMuscular.load(), 0.0f, 1.0f);
+            const float snapshotFat = std::clamp(g_lastFat.load(), 0.0f, 1.0f);
+
+            StoreDesiredFaceTarget(snapshotThin, snapshotMuscular, snapshotFat, "sex_switch_preserve_desired_target");
             InvalidateFaceAppliedCache("sex_switch_invalidates_visual_face_cache");
             LogFaceDiag(
                 "FACE_REPLAY_STATE_CHANGE",
