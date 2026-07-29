@@ -362,15 +362,19 @@ function updateKnobFromMorphs(thin, muscular, fat) {
         angle = ANGLES.heavy + (ANGLES.thin - ANGLES.heavy) * t;
         radial = clamp(sectorTotal, 0, 1);
     } else {
+        const axisScale = total > 1 ? 1 / total : 1;
+        const centerWeight = total < 1 ? 1 - total : 0;
         const nx =
-            anchors.thin.x * thin +
-            anchors.muscular.x * muscular +
-            anchors.fat.x * fat;
+            center.x * centerWeight +
+            anchors.thin.x * thin * axisScale +
+            anchors.muscular.x * muscular * axisScale +
+            anchors.fat.x * fat * axisScale;
 
         const ny =
-            anchors.thin.y * thin +
-            anchors.muscular.y * muscular +
-            anchors.fat.y * fat;
+            center.y * centerWeight +
+            anchors.thin.y * thin * axisScale +
+            anchors.muscular.y * muscular * axisScale +
+            anchors.fat.y * fat * axisScale;
 
         knob.x = nx;
         knob.y = ny;
@@ -476,6 +480,7 @@ function sendCommitMorphs(values) {
     const traceId = nextMorphTraceId("commit");
     window.onMorphsCommit(`${safe.thin},${safe.muscular},${safe.fat},${traceId}`);
     lastCommitSentValues = safe;
+    lastPreviewSentValues = cloneMorphValues(safe);
 }
 
 function updateReadout(values) {
@@ -531,25 +536,31 @@ function flushCommitNow() {
     sendCommitMorphs(pendingMorphValues);
 }
 
+function cancelPendingPreview() {
+    if (morphPreviewTimeout !== null) {
+        clearTimeout(morphPreviewTimeout);
+        morphPreviewTimeout = null;
+    }
+}
+
 function scheduleMorphUpdate(options = {}) {
     const commit = !!options.commit;
+    const preview = options.preview !== false;
 
     pendingMorphValues = computeMorphsFromKnob();
     updateReadout(pendingMorphValues);
 
-    const now = performance.now();
-    const elapsed = now - lastPreviewSendTime;
-
-    if (elapsed >= MORPH_PREVIEW_INTERVAL) {
-        sendPreviewMorphs(pendingMorphValues);
-        lastPreviewSendTime = now;
-
-        if (morphPreviewTimeout !== null) {
-            clearTimeout(morphPreviewTimeout);
-            morphPreviewTimeout = null;
-        }
+    if (!preview) {
+        cancelPendingPreview();
     } else {
-        if (morphPreviewTimeout === null) {
+        const now = performance.now();
+        const elapsed = now - lastPreviewSendTime;
+
+        if (elapsed >= MORPH_PREVIEW_INTERVAL) {
+            sendPreviewMorphs(pendingMorphValues);
+            lastPreviewSendTime = now;
+            cancelPendingPreview();
+        } else if (morphPreviewTimeout === null) {
             morphPreviewTimeout = setTimeout(() => {
                 sendPreviewMorphs(pendingMorphValues);
                 lastPreviewSendTime = performance.now();
@@ -753,7 +764,7 @@ function getMousePos(event) {
     };
 }
 
-function setKnobFromPoint(x, y) {
+function setKnobFromPoint(x, y, options = {}) {
     let dx = x - center.x;
     let dy = y - center.y;
     const dist = length(dx, dy);
@@ -773,7 +784,7 @@ function setKnobFromPoint(x, y) {
         knob.y = targetY;
         markSlidingActivity();
         requestDraw();
-        scheduleMorphUpdate();
+        scheduleMorphUpdate(options);
         return;
     }
 
@@ -817,7 +828,7 @@ function setKnobFromPoint(x, y) {
         markSlidingActivity();
 
         requestDraw();
-        scheduleMorphUpdate();
+        scheduleMorphUpdate(options);
         return;
     }
 
@@ -884,10 +895,11 @@ function setKnobFromPoint(x, y) {
     markSlidingActivity();
 
     requestDraw();
-    scheduleMorphUpdate();
+    scheduleMorphUpdate(options);
 }
 
 function finishDrag() {
+    if (!dragging) return;
     dragging = false;
 
     if (stopSlidingTimeout !== null) {
@@ -925,9 +937,7 @@ canvas.addEventListener("mousedown", (event) => {
     event.stopPropagation();
 
     const pos = getMousePos(event);
-    setKnobFromPoint(pos.x, pos.y);
-
-    flushPreviewNow();
+    setKnobFromPoint(pos.x, pos.y, { preview: false });
     flushCommitNow();
     setSnapLineHighlight(null, "off");
 });
@@ -949,7 +959,7 @@ resetButton.addEventListener("click", () => {
     updateKnobFromMorphs(values.thin, values.muscular, values.fat);
     updateReadout(values);
 
-    flushPreviewNow();
+    cancelPendingPreview();
     flushCommitNow();
 });
 

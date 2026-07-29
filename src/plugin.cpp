@@ -70,6 +70,7 @@ namespace
         }
     };
     bool g_faceRouterAwaitingRsmRebuild = false;
+    std::atomic<std::uint64_t> g_normalMapEpoch{ 0 };
 }
 
 // Lazy face-diagnostic logging. The std::format argument is only evaluated when
@@ -173,13 +174,10 @@ bool RegisterScaleform(RE::GFxMovieView* a_view, RE::GFxValue* a_root);
 void SetWeightSyncValue(float value);
 float GetWeightSyncValue();
 bool ApplyWeightToCurrentDirection(float weight);
-void LoadNormalMapCatalog(std::string_view dataFolder, std::string_view relativeFolder);
-void LoadHandNormalMapCatalog(std::string_view dataFolder, std::string_view relativeFolder);
-std::string SelectNormalMapRelativePath(float thin, float muscular, float fat);
-std::string SelectHandNormalMapRelativePath(float thin, float muscular, float fat);
+bool LoadNormalMapCatalog(std::string_view dataFolder, std::string_view relativeFolder);
+bool LoadHandNormalMapCatalog(std::string_view dataFolder, std::string_view relativeFolder);
 void UpdateSelectedNormalMapCandidate(float thin, float muscular, float fat);
 std::string BuildTextureSetEditorID(std::string_view variantKey);
-std::string BuildSelectedNormalMapDispatchKey(bool persist);
 void LogNormalMapTextureSetPlan();
 bool ApplySelectedNormalMapTextureSet(bool persist = true, std::string_view applySource = "unspecified");
 void ScheduleDeferredBodyTextureApply(int ticks, int repeats = 1);
@@ -2164,30 +2162,6 @@ std::string BuildTextureSetEditorID(std::string_view variantKey)
     return std::string("RBM_TX_") + std::string(variantKey);
 }
 
-std::string BuildSelectedNormalMapDispatchKey(bool persist)
-{
-    std::string key;
-
-    if (!g_selectedNormalMapTextureSetEditorID.empty()) {
-        key += std::string("TXST:") + g_selectedNormalMapTextureSetEditorID;
-    } else if (!g_selectedNormalMapPath.empty()) {
-        key += std::string("PATH:") + g_selectedNormalMapPath;
-    }
-
-    if (!g_selectedHandNormalMapPath.empty()) {
-        if (!key.empty()) {
-            key += "|";
-        }
-        key += std::string("HAND:") + g_selectedHandNormalMapPath;
-    }
-
-    if (!key.empty()) {
-        key += persist ? "|PERSIST:1" : "|PERSIST:0";
-    }
-
-    return key;
-}
-
 bool DispatchSelectedNormalPathsStatic(
     std::string_view bodyNormalPath,
     std::string_view handNormalPath,
@@ -2244,17 +2218,54 @@ bool DispatchSelectedNormalPathsStatic(
 
 bool ApplySelectedNormalMapTextureSet(bool persist, std::string_view applySource)
 {
-    const bool hasNormalPath = !g_selectedNormalMapPath.empty();
-    const bool hasHandNormalPath = !g_selectedHandNormalMapPath.empty();
-    const std::string dispatchKey = BuildSelectedNormalMapDispatchKey(persist);
+    // All fields come from one game-thread snapshot so a sex/profile change
+    // cannot mix a new body path with an old hand path or editor ID.
+    const SelectedNormalMapCandidate candidate =
+        g_selectedNormalMapCandidate;
+    const std::string_view sexToken =
+        candidate.sex == 0 ? "male" :
+        candidate.sex == 1 ? "female" :
+        std::string_view{};
+    const bool hasNormalPath = !candidate.bodyPath.empty();
+    const bool hasHandNormalPath = !candidate.handPath.empty();
+    const std::string dispatchKey =
+        mps::BuildNormalMapDispatchKey(
+            sexToken,
+            candidate.bodyPath,
+            candidate.handPath,
+            persist);
 
-    if (!hasNormalPath && !hasHandNormalPath) {
+    if (!candidate.IsValid() ||
+        dispatchKey.empty()) {
         spdlog::warn(
-            "ApplySelectedNormalMapTextureSet skipped because no normal map was selected (source={}, thin={:.3f}, muscular={:.3f}, heavy={:.3f})",
+            "ApplySelectedNormalMapTextureSet skipped because the normal-map selection was incomplete (source={}, sex={}, bodyPath={}, thin={:.3f}, muscular={:.3f}, heavy={:.3f})",
             applySource,
+            sexToken.empty() ?
+                "<unknown>" :
+                sexToken,
+            hasNormalPath ?
+                candidate.bodyPath :
+                "<empty>",
             g_lastThin.load(),
             g_lastMuscular.load(),
             g_lastFat.load());
+        return false;
+    }
+
+    auto* player = RE::PlayerCharacter::GetSingleton();
+    auto* actorBase =
+        player ? player->GetActorBase() : nullptr;
+    const std::uint8_t currentSex = actorBase ?
+        static_cast<std::uint8_t>(actorBase->GetSex()) :
+        SelectedNormalMapCandidate::kInvalidSex;
+    if (!player ||
+        currentSex > 1 ||
+        currentSex != candidate.sex) {
+        spdlog::warn(
+            "ApplySelectedNormalMapTextureSet rejected stale candidate source={} candidateSex={} currentSex={}",
+            applySource,
+            static_cast<unsigned>(candidate.sex),
+            static_cast<unsigned>(currentSex));
         return false;
     }
 
@@ -2263,20 +2274,12 @@ bool ApplySelectedNormalMapTextureSet(bool persist, std::string_view applySource
             "ApplySelectedNormalMapTextureSet skipped because the requested normals are already applied (source={}, persist={}, bodyPath={}, handPath={}, thin={:.3f}, muscular={:.3f}, heavy={:.3f})",
             applySource,
             persist,
-            hasNormalPath ? g_selectedNormalMapPath : "<no-path>",
-            hasHandNormalPath ? g_selectedHandNormalMapPath : "<no-hand-path>",
+            hasNormalPath ? candidate.bodyPath : "<no-path>",
+            hasHandNormalPath ? candidate.handPath : "<no-hand-path>",
             g_lastThin.load(),
             g_lastMuscular.load(),
             g_lastFat.load());
         return true;
-    }
-
-    auto* player = RE::PlayerCharacter::GetSingleton();
-    if (!player) {
-        spdlog::warn(
-            "ApplySelectedNormalMapTextureSet skipped because player was unavailable (source={})",
-            applySource);
-        return false;
     }
 
     const auto applyId = g_applySequence.fetch_add(1) + 1;
@@ -2288,8 +2291,8 @@ bool ApplySelectedNormalMapTextureSet(bool persist, std::string_view applySource
     spdlog::debug(
         "ApplySelectedNormalMapTextureSet attempting applyId={} bodyPath={} handPath={} persist={} source={} thin={:.3f} muscular={:.3f} heavy={:.3f}",
         applyId,
-        hasNormalPath ? g_selectedNormalMapPath : "<no-path>",
-        hasHandNormalPath ? g_selectedHandNormalMapPath : "<no-hand-path>",
+        hasNormalPath ? candidate.bodyPath : "<no-path>",
+        hasHandNormalPath ? candidate.handPath : "<no-hand-path>",
         persist,
         applySource,
         g_lastThin.load(),
@@ -2297,11 +2300,13 @@ bool ApplySelectedNormalMapTextureSet(bool persist, std::string_view applySource
         g_lastFat.load());
 
     const std::string_view handNormalPath =
-        hasHandNormalPath ? std::string_view(g_selectedHandNormalMapPath) : std::string_view{};
+        hasHandNormalPath ?
+        std::string_view(candidate.handPath) :
+        std::string_view{};
 
     if (hasNormalPath &&
         DispatchSelectedNormalPathsStatic(
-            g_selectedNormalMapPath,
+            candidate.bodyPath,
             handNormalPath,
             persist,
             tracedApplySource)) {
@@ -2312,8 +2317,8 @@ bool ApplySelectedNormalMapTextureSet(bool persist, std::string_view applySource
     spdlog::warn(
         "ApplySelectedNormalMapTextureSet failed to dispatch unified normal paths applyId={} body={} hand={} persist={} source={}",
         applyId,
-        hasNormalPath ? g_selectedNormalMapPath : "<no-path>",
-        hasHandNormalPath ? g_selectedHandNormalMapPath : "<no-hand-path>",
+        hasNormalPath ? candidate.bodyPath : "<no-path>",
+        hasHandNormalPath ? candidate.handPath : "<no-hand-path>",
         persist,
         applySource);
 
@@ -2341,9 +2346,10 @@ void ScheduleDeferredBodyTextureApply(int ticks, int repeats)
     }
 
     spdlog::info(
-        "Scheduled deferred body texture-set apply in {} ticks (repeats={})",
+        "Scheduled deferred body texture-set apply in {} ticks (repeats={}, epoch={})",
         ticks,
-        g_deferredTextureApplyRepeats.load());
+        g_deferredTextureApplyRepeats.load(),
+        g_normalMapEpoch.load());
 }
 
 void QueueDeferredBodyTextureApplyTask()
@@ -2354,7 +2360,18 @@ void QueueDeferredBodyTextureApplyTask()
         return;
     }
 
-    taskInterface->AddTask([]() {
+    const std::uint64_t capturedEpoch =
+        g_normalMapEpoch.load();
+    taskInterface->AddTask([capturedEpoch]() {
+        if (g_raceMenuOpen.load() ||
+            g_normalMapEpoch.load() != capturedEpoch) {
+            spdlog::debug(
+                "Discarded stale deferred normal-map apply capturedEpoch={} currentEpoch={} raceMenuOpen={}",
+                capturedEpoch,
+                g_normalMapEpoch.load(),
+                g_raceMenuOpen.load() ? 1 : 0);
+            return;
+        }
         g_appliedNormalMapDispatchKey.clear();
         ApplySelectedNormalMapTextureSet(true, "deferred_racemenu_close");
     });
@@ -2387,20 +2404,32 @@ struct NormalMapFolderSelection
     std::string handRelativeFolder;
 };
 
-std::string GetNormalMapSexFolderToken()
+struct NormalMapFolderCacheEntry
+{
+    bool attempted = false;
+    std::optional<NormalMapFolderSelection> selection;
+};
+
+std::array<NormalMapFolderCacheEntry, 2>
+    g_normalMapFolderCache;
+
+std::optional<std::uint8_t> GetCurrentNormalMapSex()
 {
     auto* player = RE::PlayerCharacter::GetSingleton();
     if (!player) {
-        return {};
+        return std::nullopt;
     }
 
     auto* actorBase = player->GetActorBase();
     if (!actorBase) {
-        return {};
+        return std::nullopt;
     }
 
     const std::uint8_t sex = static_cast<std::uint8_t>(actorBase->GetSex());
-    return sex == 0 ? "male" : "female";
+    if (sex > 1) {
+        return std::nullopt;
+    }
+    return sex;
 }
 
 std::string FindExistingSexFolderName(std::string_view sexToken)
@@ -2410,17 +2439,25 @@ std::string FindExistingSexFolderName(std::string_view sexToken)
     }
 
     const std::filesystem::path rootPath(kNormalMapDataFolder);
-    if (!std::filesystem::exists(rootPath)) {
+    std::error_code error;
+    if (!std::filesystem::exists(rootPath, error) || error) {
         return {};
     }
 
     const std::string expected = ToLowerCopy(std::string(sexToken));
-    for (const auto& entry : std::filesystem::directory_iterator(rootPath)) {
-        if (!entry.is_directory()) {
+    std::filesystem::directory_iterator iterator(
+        rootPath,
+        std::filesystem::directory_options::skip_permission_denied,
+        error);
+    const std::filesystem::directory_iterator end;
+    for (; !error && iterator != end; iterator.increment(error)) {
+        std::error_code entryError;
+        if (!iterator->is_directory(entryError) || entryError) {
             continue;
         }
 
-        const std::string folderName = entry.path().filename().string();
+        const std::string folderName =
+            iterator->path().filename().string();
         if (ToLowerCopy(folderName) == expected) {
             return folderName;
         }
@@ -2429,7 +2466,8 @@ std::string FindExistingSexFolderName(std::string_view sexToken)
     return {};
 }
 
-NormalMapFolderSelection ResolveNormalMapFolderSelection()
+NormalMapFolderSelection ResolveNormalMapFolderSelection(
+    std::uint8_t sex)
 {
     NormalMapFolderSelection selection{};
     selection.profile = "legacy";
@@ -2438,13 +2476,20 @@ NormalMapFolderSelection ResolveNormalMapFolderSelection()
     selection.handDataFolder = kHandNormalMapDataFolder;
     selection.handRelativeFolder = kHandNormalMapRelativeFolder;
 
-    const std::string sexFolder = FindExistingSexFolderName(GetNormalMapSexFolderToken());
+    const std::string_view sexToken =
+        sex == 0 ? "male" : "female";
+    const std::string sexFolder =
+        FindExistingSexFolderName(sexToken);
     if (sexFolder.empty()) {
         return selection;
     }
 
     const std::string sexBodyDataFolder = std::string(kNormalMapDataFolder) + "\\" + sexFolder;
-    if (!std::filesystem::exists(std::filesystem::path(sexBodyDataFolder))) {
+    std::error_code error;
+    if (!std::filesystem::exists(
+            std::filesystem::path(sexBodyDataFolder),
+            error) ||
+        error) {
         return selection;
     }
 
@@ -2453,10 +2498,23 @@ NormalMapFolderSelection ResolveNormalMapFolderSelection()
     selection.bodyRelativeFolder = std::string(kNormalMapRelativeFolder) + "\\" + sexFolder;
 
     const std::string sexHandDataFolder = sexBodyDataFolder + "\\Hands";
-    if (std::filesystem::exists(std::filesystem::path(sexHandDataFolder))) {
+    error.clear();
+    if (std::filesystem::exists(
+            std::filesystem::path(sexHandDataFolder),
+            error) &&
+        !error) {
         selection.handDataFolder = sexHandDataFolder;
         selection.handRelativeFolder = selection.bodyRelativeFolder + "\\Hands";
-    } else if (!std::filesystem::exists(std::filesystem::path(kHandNormalMapDataFolder))) {
+    } else {
+        error.clear();
+        const bool legacyHandsExist =
+            std::filesystem::exists(
+                std::filesystem::path(kHandNormalMapDataFolder),
+                error) &&
+            !error;
+        if (legacyHandsExist) {
+            return selection;
+        }
         // If the legacy Hands folder is absent, allow hand variants in the sex root folder.
         selection.handDataFolder = selection.bodyDataFolder;
         selection.handRelativeFolder = selection.bodyRelativeFolder;
@@ -2465,7 +2523,27 @@ NormalMapFolderSelection ResolveNormalMapFolderSelection()
     return selection;
 }
 
-void LoadNormalMapCatalog(std::string_view dataFolder, std::string_view relativeFolder)
+const NormalMapFolderSelection*
+    GetCachedNormalMapFolderSelection(std::uint8_t sex)
+{
+    if (sex > 1) {
+        return nullptr;
+    }
+
+    auto& cache = g_normalMapFolderCache[sex];
+    if (!cache.attempted) {
+        cache.selection =
+            ResolveNormalMapFolderSelection(sex);
+        cache.attempted = true;
+    }
+    return cache.selection ?
+        std::addressof(*cache.selection) :
+        nullptr;
+}
+
+bool LoadNormalMapCatalog(
+    std::string_view dataFolder,
+    std::string_view relativeFolder)
 {
     const std::string requestedDataFolder(dataFolder);
     const std::string requestedRelativeFolder(relativeFolder);
@@ -2473,43 +2551,77 @@ void LoadNormalMapCatalog(std::string_view dataFolder, std::string_view relative
     if (g_normalMapCatalogLoaded &&
         g_loadedBodyNormalMapDataFolder == requestedDataFolder &&
         g_loadedBodyNormalMapRelativeFolder == requestedRelativeFolder) {
-        return;
+        return !g_bodyNormalMapCatalog.samples.empty();
     }
 
-    g_normalMapCatalogLoaded = true;
-    g_loadedBodyNormalMapDataFolder = requestedDataFolder;
-    g_loadedBodyNormalMapRelativeFolder = requestedRelativeFolder;
-    g_bodyNormalMapCatalog = {};
+    const auto publishCatalog =
+        [&](mps::NormalMapCatalog catalog) {
+        g_bodyNormalMapCatalog = std::move(catalog);
+        g_normalMapCatalogLoaded = true;
+        g_loadedBodyNormalMapDataFolder =
+            requestedDataFolder;
+        g_loadedBodyNormalMapRelativeFolder =
+            requestedRelativeFolder;
+        return !g_bodyNormalMapCatalog.samples.empty();
+    };
 
     try {
         const std::filesystem::path basePath(requestedDataFolder);
-        if (!std::filesystem::exists(basePath)) {
+        std::error_code error;
+        if (!std::filesystem::exists(basePath, error) ||
+            error) {
             spdlog::warn("Normal map folder not found: {}", basePath.string());
-            return;
+            (void)publishCatalog({});
+            return false;
         }
 
-        for (const auto& entry : std::filesystem::directory_iterator(basePath)) {
-            if (!entry.is_regular_file()) {
+        mps::NormalMapCatalog nextCatalog;
+        std::filesystem::directory_iterator iterator(
+            basePath,
+            std::filesystem::directory_options::skip_permission_denied,
+            error);
+        const std::filesystem::directory_iterator end;
+        for (; !error && iterator != end; iterator.increment(error)) {
+            std::error_code entryError;
+            if (!iterator->is_regular_file(entryError) ||
+                entryError) {
                 continue;
             }
 
-            const std::string extension = ToLowerCopy(entry.path().extension().string());
+            const auto& path = iterator->path();
+            const std::string extension =
+                ToLowerCopy(path.extension().string());
             if (extension != ".dds") {
                 continue;
             }
 
-            const std::string stem = entry.path().stem().string();
+            const std::string stem = path.stem().string();
             const std::string relativePath =
-                requestedRelativeFolder + "\\" + entry.path().filename().string();
+                requestedRelativeFolder + "\\" +
+                path.filename().string();
             const std::string textureSetEditorID = BuildTextureSetEditorID(stem);
 
-            if (!mps::RegisterBodyStem(g_bodyNormalMapCatalog, stem, relativePath, textureSetEditorID)) {
+            if (!mps::RegisterBodyStem(
+                    nextCatalog,
+                    stem,
+                    relativePath,
+                    textureSetEditorID)) {
                 spdlog::info("Skipping unsupported normal map variant {}", stem);
             }
         }
 
-        mps::SortCatalog(g_bodyNormalMapCatalog);
+        if (error) {
+            spdlog::error(
+                "Failed while enumerating normal map folder {}: {}",
+                requestedDataFolder,
+                error.message());
+            (void)publishCatalog({});
+            return false;
+        }
 
+        mps::SortCatalog(nextCatalog);
+        const bool loaded =
+            publishCatalog(std::move(nextCatalog));
         spdlog::info(
             "Loaded normal map catalog from {} (relativeRoot={}): {} thin, {} heavy, {} muscular, {} heavy/muscular combinations, {} stable samples",
             requestedDataFolder,
@@ -2520,12 +2632,17 @@ void LoadNormalMapCatalog(std::string_view dataFolder, std::string_view relative
             g_bodyNormalMapCatalog.combos.size(),
             g_bodyNormalMapCatalog.samples.size());
         LogNormalMapTextureSetPlan();
+        return loaded;
     } catch (const std::exception& e) {
         spdlog::error("Failed to load normal map catalog: {}", e.what());
+        (void)publishCatalog({});
+        return false;
     }
 }
 
-void LoadHandNormalMapCatalog(std::string_view dataFolder, std::string_view relativeFolder)
+bool LoadHandNormalMapCatalog(
+    std::string_view dataFolder,
+    std::string_view relativeFolder)
 {
     const std::string requestedDataFolder(dataFolder);
     const std::string requestedRelativeFolder(relativeFolder);
@@ -2533,32 +2650,53 @@ void LoadHandNormalMapCatalog(std::string_view dataFolder, std::string_view rela
     if (g_handNormalMapCatalogLoaded &&
         g_loadedHandNormalMapDataFolder == requestedDataFolder &&
         g_loadedHandNormalMapRelativeFolder == requestedRelativeFolder) {
-        return;
+        return g_handNormalMapCatalog.hasBase ||
+               !g_handNormalMapCatalog.muscular.empty();
     }
 
-    g_handNormalMapCatalogLoaded = true;
-    g_loadedHandNormalMapDataFolder = requestedDataFolder;
-    g_loadedHandNormalMapRelativeFolder = requestedRelativeFolder;
-    g_handNormalMapCatalog = {};
+    const auto publishCatalog =
+        [&](mps::HandNormalMapCatalog catalog) {
+        g_handNormalMapCatalog = std::move(catalog);
+        g_handNormalMapCatalogLoaded = true;
+        g_loadedHandNormalMapDataFolder =
+            requestedDataFolder;
+        g_loadedHandNormalMapRelativeFolder =
+            requestedRelativeFolder;
+        return g_handNormalMapCatalog.hasBase ||
+               !g_handNormalMapCatalog.muscular.empty();
+    };
 
     try {
         const std::filesystem::path basePath(requestedDataFolder);
-        if (!std::filesystem::exists(basePath)) {
+        std::error_code error;
+        if (!std::filesystem::exists(basePath, error) ||
+            error) {
             spdlog::warn("Hand normal map folder not found: {}", basePath.string());
-            return;
+            (void)publishCatalog({});
+            return false;
         }
 
-        for (const auto& entry : std::filesystem::directory_iterator(basePath)) {
-            if (!entry.is_regular_file()) {
+        mps::HandNormalMapCatalog nextCatalog;
+        std::filesystem::directory_iterator iterator(
+            basePath,
+            std::filesystem::directory_options::skip_permission_denied,
+            error);
+        const std::filesystem::directory_iterator end;
+        for (; !error && iterator != end; iterator.increment(error)) {
+            std::error_code entryError;
+            if (!iterator->is_regular_file(entryError) ||
+                entryError) {
                 continue;
             }
 
-            const std::string extension = ToLowerCopy(entry.path().extension().string());
+            const auto& path = iterator->path();
+            const std::string extension =
+                ToLowerCopy(path.extension().string());
             if (extension != ".dds") {
                 continue;
             }
 
-            const std::string stem = entry.path().stem().string();
+            const std::string stem = path.stem().string();
             bool isBaseEntry = false;
             int muscularPercent = 0;
             if (!mps::TryParseHandNormalMapStem(stem, isBaseEntry, muscularPercent)) {
@@ -2567,22 +2705,36 @@ void LoadHandNormalMapCatalog(std::string_view dataFolder, std::string_view rela
             }
 
             const std::string relativePath =
-                requestedRelativeFolder + "\\" + entry.path().filename().string();
+                requestedRelativeFolder + "\\" +
+                path.filename().string();
             const std::string textureSetEditorID = BuildTextureSetEditorID(stem);
 
             if (isBaseEntry) {
-                g_handNormalMapCatalog.base = { 0, stem, relativePath, textureSetEditorID };
-                g_handNormalMapCatalog.hasBase = true;
+                nextCatalog.base =
+                    { 0, stem, relativePath, textureSetEditorID };
+                nextCatalog.hasBase = true;
                 continue;
             }
 
-            g_handNormalMapCatalog.muscular.push_back({ muscularPercent, stem, relativePath, textureSetEditorID });
+            nextCatalog.muscular.push_back(
+                { muscularPercent, stem, relativePath, textureSetEditorID });
         }
 
-        std::sort(g_handNormalMapCatalog.muscular.begin(), g_handNormalMapCatalog.muscular.end(), [](const auto& left, const auto& right) {
+        if (error) {
+            spdlog::error(
+                "Failed while enumerating hand normal map folder {}: {}",
+                requestedDataFolder,
+                error.message());
+            (void)publishCatalog({});
+            return false;
+        }
+
+        std::sort(nextCatalog.muscular.begin(), nextCatalog.muscular.end(), [](const auto& left, const auto& right) {
             return left.percent < right.percent;
         });
 
+        const bool loaded =
+            publishCatalog(std::move(nextCatalog));
         spdlog::info(
             "Loaded hand normal map catalog from {} (relativeRoot={}): base={} muscularVariants={}",
             requestedDataFolder,
@@ -2603,8 +2755,11 @@ void LoadHandNormalMapCatalog(std::string_view dataFolder, std::string_view rela
                 entry.textureSetEditorID,
                 entry.relativePath);
         }
+        return loaded;
     } catch (const std::exception& e) {
         spdlog::error("Failed to load hand normal map catalog: {}", e.what());
+        (void)publishCatalog({});
+        return false;
     }
 }
 
@@ -2639,59 +2794,110 @@ void LogNormalMapTextureSetPlan()
     }
 }
 
-std::string SelectNormalMapRelativePath(float thin, float muscular, float fat)
+void UpdateSelectedNormalMapCandidate(float thin, float muscular, float fat)
 {
-    const NormalMapFolderSelection folders = ResolveNormalMapFolderSelection();
-    LoadNormalMapCatalog(folders.bodyDataFolder, folders.bodyRelativeFolder);
+    const auto clearSelection =
+        [](std::string_view reason) {
+        if (!g_selectedNormalMapCandidate.IsValid() &&
+            g_selectedNormalMapCandidate.profileKey.empty() &&
+            g_selectedNormalMapCandidate.handPath.empty()) {
+            return;
+        }
 
-    const mps::NormalMapSelection selection =
+        g_selectedNormalMapCandidate = {};
+        spdlog::warn(
+            "Cleared incoherent normal-map selection reason={}",
+            reason);
+    };
+
+    const auto sex = GetCurrentNormalMapSex();
+    if (!sex) {
+        clearSelection("invalid_player_sex");
+        return;
+    }
+
+    const auto* folders =
+        GetCachedNormalMapFolderSelection(*sex);
+    if (!folders) {
+        clearSelection("folder_resolution_failed");
+        return;
+    }
+
+    const bool bodyCatalogLoaded =
+        LoadNormalMapCatalog(
+            folders->bodyDataFolder,
+            folders->bodyRelativeFolder);
+    const bool handCatalogLoaded =
+        LoadHandNormalMapCatalog(
+            folders->handDataFolder,
+            folders->handRelativeFolder);
+    if (!bodyCatalogLoaded) {
+        clearSelection("body_catalog_unavailable");
+        return;
+    }
+
+    const auto& previous = g_selectedNormalMapCandidate;
+    const std::string_view previousPath =
+        previous.sex == *sex &&
+                previous.profileKey == folders->profile ?
+            std::string_view(previous.bodyPath) :
+            std::string_view{};
+    mps::NormalMapSelection bodySelection =
         FaceMorphDiagnostics::UseStableNormalMapSelection() ?
         mps::SelectBodyNormalMapStable(
             g_bodyNormalMapCatalog,
             thin,
             muscular,
             fat,
-            g_selectedNormalMapPath,
-            FaceMorphDiagnostics::GetStableNormalMapHysteresisPercent()) :
+            previousPath,
+            FaceMorphDiagnostics::
+                GetStableNormalMapHysteresisPercent()) :
         mps::SelectBodyNormalMap(
             g_bodyNormalMapCatalog,
             thin,
             muscular,
             fat,
             kThinSoftThresholdPercent);
-    g_selectedNormalMapTextureSetEditorID = selection.textureSetEditorID;
-    return selection.relativePath;
-}
-
-std::string SelectHandNormalMapRelativePath(float, float muscular, float)
-{
-    const NormalMapFolderSelection folders = ResolveNormalMapFolderSelection();
-    LoadHandNormalMapCatalog(folders.handDataFolder, folders.handRelativeFolder);
-
-    return mps::SelectHandNormalMap(g_handNormalMapCatalog, muscular);
-}
-
-void UpdateSelectedNormalMapCandidate(float thin, float muscular, float fat)
-{
-    const std::string previousPath = g_selectedNormalMapPath;
-    const std::string previousTextureSetEditorID = g_selectedNormalMapTextureSetEditorID;
-    const std::string previousHandPath = g_selectedHandNormalMapPath;
-    const std::string nextPath = SelectNormalMapRelativePath(thin, muscular, fat);
-    const std::string nextHandPath = SelectHandNormalMapRelativePath(thin, muscular, fat);
-    if (nextPath.empty() ||
-        (nextPath == previousPath &&
-         g_selectedNormalMapTextureSetEditorID == previousTextureSetEditorID &&
-         nextHandPath == previousHandPath)) {
+    if (bodySelection.relativePath.empty()) {
+        clearSelection("body_selection_empty");
         return;
     }
 
-    g_selectedNormalMapPath = nextPath;
-    g_selectedHandNormalMapPath = nextHandPath;
+    SelectedNormalMapCandidate next{
+        .sex = *sex,
+        .profileKey = folders->profile,
+        .bodyPath = std::move(bodySelection.relativePath),
+        .bodyTextureSetEditorID =
+            std::move(bodySelection.textureSetEditorID),
+        .handPath = handCatalogLoaded ?
+            mps::SelectHandNormalMap(
+                g_handNormalMapCatalog,
+                muscular) :
+            std::string{}
+    };
+
+    if (next.sex == previous.sex &&
+        next.profileKey == previous.profileKey &&
+        next.bodyPath == previous.bodyPath &&
+        next.bodyTextureSetEditorID ==
+            previous.bodyTextureSetEditorID &&
+        next.handPath == previous.handPath) {
+        return;
+    }
+
+    g_selectedNormalMapCandidate = std::move(next);
+    const auto& selected = g_selectedNormalMapCandidate;
     spdlog::debug(
-        "Selected normal map candidate body={} hand={} using {} mode={} for thin={:.3f} muscular={:.3f} heavy={:.3f}",
-        g_selectedNormalMapPath,
-        g_selectedHandNormalMapPath.empty() ? "<no-hand-path>" : g_selectedHandNormalMapPath,
-        g_selectedNormalMapTextureSetEditorID.empty() ? "<no-txst>" : g_selectedNormalMapTextureSetEditorID,
+        "Selected normal map candidate sex={} profile={} body={} hand={} using {} mode={} for thin={:.3f} muscular={:.3f} heavy={:.3f}",
+        selected.sex == 0 ? "male" : "female",
+        selected.profileKey,
+        selected.bodyPath,
+        selected.handPath.empty() ?
+            "<no-hand-path>" :
+            selected.handPath,
+        selected.bodyTextureSetEditorID.empty() ?
+            "<no-txst>" :
+            selected.bodyTextureSetEditorID,
         FaceMorphDiagnostics::UseStableNormalMapSelection() ? "stable" : "legacy",
         thin,
         muscular,
@@ -2822,6 +3028,13 @@ public:
 
         g_raceMenuOpen.store(a_event->opening);
         if (a_event->opening) {
+            const auto normalMapEpoch =
+                g_normalMapEpoch.fetch_add(1) + 1;
+            g_deferredTextureApplyTicks.store(0);
+            g_deferredTextureApplyRepeats.store(0);
+            spdlog::debug(
+                "Canceled deferred normal-map work on RaceMenu open epoch={}",
+                normalMapEpoch);
             g_faceRouterAwaitingRsmRebuild = false;
             (void)TryAcquireRaceMenuBodyMorphInterface();
             (void)RefreshCachedMorphStateFromNative();
@@ -2859,7 +3072,12 @@ public:
             CancelPreviewNormalApply();
             SetPhysiqueDesiredVisible(false);
         } else {
+            const auto normalMapEpoch =
+                g_normalMapEpoch.fetch_add(1) + 1;
             spdlog::info("RaceMenu close detected; scheduling deferred texture reapply");
+            spdlog::debug(
+                "Advanced normal-map lifecycle on RaceMenu close epoch={}",
+                normalMapEpoch);
             if (FaceMorphDiagnostics::IsCausalTraceEnabled()) {
                 LogFaceNodeSnapshot("racemenu_close_before_reset");
                 LogPlayerHeadPartSnapshot("racemenu_close_before_reset");
@@ -6424,7 +6642,6 @@ void ExecuteMorphCommitOnMainThread(
 
     CacheMorphState(thin, muscular, fat);
     CancelPreviewNormalApply();
-    RefreshCachedMorphStateFromNative();
     ApplySelectedNormalMapTextureSet(true, "commit_slider");
 }
 

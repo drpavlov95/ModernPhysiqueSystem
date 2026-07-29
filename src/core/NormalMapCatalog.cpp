@@ -588,4 +588,31 @@ namespace mps
 
         return {};
     }
+
+    std::string BuildNormalMapDispatchKey(
+        std::string_view sexToken,
+        std::string_view bodyRelativePath,
+        std::string_view handRelativePath,
+        bool persist)
+    {
+        if ((sexToken != "male" && sexToken != "female") ||
+            bodyRelativePath.empty()) {
+            return {};
+        }
+
+        std::string key;
+        key.reserve(
+            sexToken.size() +
+            bodyRelativePath.size() +
+            handRelativePath.size() +
+            40);
+        key += "SEX:";
+        key += sexToken;
+        key += "|BODY:";
+        key += bodyRelativePath;
+        key += "|HAND:";
+        key += handRelativePath;
+        key += persist ? "|PERSIST:1" : "|PERSIST:0";
+        return key;
+    }
 }

@@ -105,7 +105,5 @@ std::string g_loadedBodyNormalMapDataFolder;
 std::string g_loadedBodyNormalMapRelativeFolder;
 std::string g_loadedHandNormalMapDataFolder;
 std::string g_loadedHandNormalMapRelativeFolder;
-std::string g_selectedNormalMapPath;
-std::string g_selectedNormalMapTextureSetEditorID;
-std::string g_selectedHandNormalMapPath;
+SelectedNormalMapCandidate g_selectedNormalMapCandidate;
 std::string g_appliedNormalMapDispatchKey;

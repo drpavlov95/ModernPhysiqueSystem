@@ -204,3 +204,40 @@ TEST_CASE("SelectHandNormalMap")
     CHECK(SelectHandNormalMap(h, 0.5f) == "hands_m60.dds");
     CHECK(SelectHandNormalMap(h, 0.0f) == "hands_base.dds");
 }
+
+TEST_CASE("Normal-map dispatch key includes sex and actual paths")
+{
+    const std::string body = "Textures\\Rley\\H50.dds";
+    const std::string hand = "Textures\\Rley\\Hands\\HANDS_M50.dds";
+
+    const auto male =
+        BuildNormalMapDispatchKey("male", body, hand, true);
+    const auto female =
+        BuildNormalMapDispatchKey("female", body, hand, true);
+
+    CHECK_FALSE(male.empty());
+    CHECK_FALSE(female.empty());
+    CHECK(male != female);
+    CHECK(male.find("BODY:" + body) != std::string::npos);
+    CHECK(male.find("HAND:" + hand) != std::string::npos);
+    CHECK(
+        BuildNormalMapDispatchKey(
+            "male",
+            body,
+            hand,
+            false) != male);
+    CHECK(
+        BuildNormalMapDispatchKey(
+            "male",
+            "Textures\\Rley\\H60.dds",
+            hand,
+            true) != male);
+    CHECK(
+        BuildNormalMapDispatchKey(
+            "male",
+            body,
+            "Textures\\Rley\\Hands\\HANDS_M60.dds",
+            true) != male);
+    CHECK(BuildNormalMapDispatchKey("", body, hand, true).empty());
+    CHECK(BuildNormalMapDispatchKey("male", "", hand, true).empty());
+}

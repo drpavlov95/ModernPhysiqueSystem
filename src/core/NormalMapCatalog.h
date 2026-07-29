@@ -97,4 +97,13 @@ namespace mps
         std::string_view previousRelativePath = {},
         int hysteresisPercent = 0);
     std::string SelectHandNormalMap(const HandNormalMapCatalog& catalog, float muscular);
+
+    // Deduplication must describe the effect actually sent to Papyrus. TXST
+    // editor IDs are intentionally excluded because male/female packs may
+    // reuse the same stem while resolving to different texture paths.
+    std::string BuildNormalMapDispatchKey(
+        std::string_view sexToken,
+        std::string_view bodyRelativePath,
+        std::string_view handRelativePath,
+        bool persist);
 }

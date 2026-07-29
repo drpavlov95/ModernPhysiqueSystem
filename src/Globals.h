@@ -146,6 +146,22 @@ struct FaceMorphTriplet
     float fat = 0.0f;
 };
 
+struct SelectedNormalMapCandidate
+{
+    static constexpr std::uint8_t kInvalidSex = 0xFF;
+
+    std::uint8_t sex = kInvalidSex;
+    std::string profileKey;
+    std::string bodyPath;
+    std::string bodyTextureSetEditorID;
+    std::string handPath;
+
+    [[nodiscard]] bool IsValid() const noexcept
+    {
+        return sex <= 1 && !bodyPath.empty();
+    }
+};
+
 struct FaceSliderApplyResult
 {
     bool success = false;
@@ -318,7 +334,5 @@ extern std::string g_loadedBodyNormalMapDataFolder;
 extern std::string g_loadedBodyNormalMapRelativeFolder;
 extern std::string g_loadedHandNormalMapDataFolder;
 extern std::string g_loadedHandNormalMapRelativeFolder;
-extern std::string g_selectedNormalMapPath;
-extern std::string g_selectedNormalMapTextureSetEditorID;
-extern std::string g_selectedHandNormalMapPath;
+extern SelectedNormalMapCandidate g_selectedNormalMapCandidate;
 extern std::string g_appliedNormalMapDispatchKey;
