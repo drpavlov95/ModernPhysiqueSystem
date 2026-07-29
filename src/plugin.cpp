@@ -1,5 +1,6 @@
 ﻿#include "log.h"
 #include "FaceMorphDiagnostics.h"
+#include "FaceSliderRouter.h"
 #include "PrismaUI_API.h"
 #include "RaceMenuInterop.h"
 #include "core/Text.h"
@@ -22,6 +23,7 @@
 #include <vector>
 #include <mutex>
 #include <array>
+#include <chrono>
 #include <unordered_map>
 #include <format>
 #include <fstream>
@@ -54,6 +56,22 @@ using mps::CallbackMentionsTarget;
 
 #include "Globals.h"
 
+namespace
+{
+    mps::FaceSliderRouter g_faceSliderRouter{
+        nullptr,
+        mps::FaceSliderRouterOptions{
+            .enableExactSkeeRepair = true,
+            // ExecuteMorphPreviewOnMainThread is the single 33 ms scheduler
+            // for both body and face. A second independent face clock creates
+            // a visible one-frame phase offset.
+            .previewInterval = std::chrono::milliseconds::zero(),
+            .readbackEpsilon = 0.001F
+        }
+    };
+    bool g_faceRouterAwaitingRsmRebuild = false;
+}
+
 // Lazy face-diagnostic logging. The std::format argument is only evaluated when
 // causal tracing is enabled, avoiding per-frame formatting cost on the shipping
 // (FaceCausalTrace=0) config. Preserves LogFaceDiag's seq/context wrapping and
@@ -78,7 +96,7 @@ void SetPhysiqueDesiredVisible(bool visible);
 bool GetPhysiqueDesiredVisible();
 
 bool TryAcquireRaceMenuBodyMorphInterface();
-bool ApplyMorphsNative(float thin, float muscular, float fat, bool isCommit, bool* outFaceApplySucceeded = nullptr);
+bool ApplyMorphsNative(float thin, float muscular, float fat, bool isCommit);
 bool ApplyBodyMorphTargetsOnly(float thin, float muscular, float fat, std::string_view reason);
 bool RefreshCachedMorphStateFromNative();
 void TryAcquireOptionalRaceMenuInterfaces();
@@ -149,6 +167,8 @@ void ResetRaceMenuSexTracking();
 void PrimeRaceMenuSexTracking();
 bool DidRaceMenuSexChange();
 void ResetRaceMenuBridgeState();
+[[nodiscard]] mps::FaceRouterTickResult TickFaceSliderRouter(
+    bool force = false);
 bool RegisterScaleform(RE::GFxMovieView* a_view, RE::GFxValue* a_root);
 void SetWeightSyncValue(float value);
 float GetWeightSyncValue();
@@ -2689,13 +2709,13 @@ void SetPhysiqueVisibilityForCategory(std::string_view categoryKey, std::uint32_
     const bool isBodyCategory = bodyByFlag || bodyByKey;
     const bool wasBodyCategory = g_bodyCategoryActive.load();
 
-    // RaceMenu briefly emits category=0 with an empty key during sex-switch UI rebuild.
-    // Treat that as transient while a switch transition is active so we don't freeze
-    // face updates waiting for a callback that may not be re-emitted.
+    // RaceMenu briefly emits category=0 with an empty key while ChangeSex is
+    // rebuilding the UI. Keep the wheel visible; only the face router is
+    // frozen during that boundary.
     if (!isBodyCategory &&
         wasBodyCategory &&
         g_raceMenuOpen.load() &&
-        IsFaceSwitchTransitionActive() &&
+        g_faceRouterAwaitingRsmRebuild &&
         categoryFlag == 0 &&
         trimmedCategoryKey.empty()) {
         spdlog::debug(
@@ -2714,25 +2734,9 @@ void SetPhysiqueVisibilityForCategory(std::string_view categoryKey, std::uint32_
             trimmedCategoryKey.empty() ? "<empty>" : trimmedCategoryKey,
             categoryFlag));
 
-    // RaceMenu can rebuild/rebind face sliders during category/race transitions.
-    // Force a rebind on first body-category activation without cancelling any
-    // pending sex-switch recovery replay.
-    if (isBodyCategory && !oldBodyCategory && g_raceMenuOpen.load()) {
-        const bool hasPendingValues = g_pendingRaceMenuFaceReapplyHasValues.load();
-        const bool hadSavedState = g_hasSavedState.load();
-        const float replayThin     = hasPendingValues ? g_pendingRaceMenuFaceReapplyThin.load()     : g_lastThin.load();
-        const float replayMuscular = hasPendingValues ? g_pendingRaceMenuFaceReapplyMuscular.load() : g_lastMuscular.load();
-        const float replayFat      = hasPendingValues ? g_pendingRaceMenuFaceReapplyFat.load()      : g_lastFat.load();
-        MarkRaceMenuFaceStateDirty("body_category_activated", /*pauseBurst=*/false);
-        // Dirty-state invalidation must not cancel the recovery burst; queue/update
-        // the latest target after bindings are invalidated.
-        if (FaceMorphDiagnostics::UseRaceMenuFaceRecoveryBursts() &&
-            (hasPendingValues || hadSavedState)) {
-            QueueRaceMenuFaceReapply(
-                "body_category_reactivated",
-                kPendingFaceReapplyRetryDelayMs,
-                replayThin, replayMuscular, replayFat);
-        }
+    if (oldBodyCategory != isBodyCategory &&
+        g_raceMenuOpen.load()) {
+        (void)g_faceSliderRouter.InvalidateRoute();
     }
 
     SetPhysiqueDesiredVisible(isBodyCategory);
@@ -2818,7 +2822,26 @@ public:
 
         g_raceMenuOpen.store(a_event->opening);
         if (a_event->opening) {
-            EndFaceSwitchTransition("menu_open");
+            g_faceRouterAwaitingRsmRebuild = false;
+            (void)TryAcquireRaceMenuBodyMorphInterface();
+            (void)RefreshCachedMorphStateFromNative();
+            if (!g_faceMorphInterface) {
+                spdlog::warn(
+                    "FaceRouter session not opened because FaceMorph is unavailable");
+            } else if (!g_faceSliderRouter.OpenSession()) {
+                spdlog::error(
+                    "FaceRouter failed to open the RaceMenu session");
+            } else {
+                const auto revision = g_faceSliderRouter.SubmitTarget(
+                    std::clamp(g_lastThin.load(), 0.0f, 1.0f),
+                    std::clamp(g_lastMuscular.load(), 0.0f, 1.0f),
+                    std::clamp(g_lastFat.load(), 0.0f, 1.0f),
+                    mps::FaceTargetKind::Commit);
+                if (revision == 0) {
+                    spdlog::warn(
+                        "FaceRouter rejected the initial RaceMenu target");
+                }
+            }
             ResetRaceMenuSexTracking();
             PrimeRaceMenuSexTracking();
             const bool oldBodyCategory = g_bodyCategoryActive.exchange(false);
@@ -2828,15 +2851,19 @@ public:
                 "0",
                 "racemenu_open");
             spdlog::info("RaceMenu open detected; physique wheel hidden until body category is active");
-            LogFaceNodeSnapshot("racemenu_open");
-            LogPlayerHeadPartSnapshot("racemenu_open");
-            DumpRaceMenuSliderEntries("racemenu_open");
+            if (FaceMorphDiagnostics::IsCausalTraceEnabled()) {
+                LogFaceNodeSnapshot("racemenu_open");
+                LogPlayerHeadPartSnapshot("racemenu_open");
+                DumpRaceMenuSliderEntries("racemenu_open");
+            }
             CancelPreviewNormalApply();
             SetPhysiqueDesiredVisible(false);
         } else {
             spdlog::info("RaceMenu close detected; scheduling deferred texture reapply");
-            LogFaceNodeSnapshot("racemenu_close_before_reset");
-            LogPlayerHeadPartSnapshot("racemenu_close_before_reset");
+            if (FaceMorphDiagnostics::IsCausalTraceEnabled()) {
+                LogFaceNodeSnapshot("racemenu_close_before_reset");
+                LogPlayerHeadPartSnapshot("racemenu_close_before_reset");
+            }
             CancelPreviewNormalApply();
             ResetRaceMenuBridgeState();
             SetPhysiqueDesiredVisible(false);
@@ -2912,46 +2939,11 @@ bool DidRaceMenuSexChange()
 
     const auto previousSex = g_lastTrackedRaceMenuSex;
     g_lastTrackedRaceMenuSex = currentSex;
-    MarkFaceGeometryDirtyAfterRebuild("sex_changed_detected");
-    const bool transitionActive = IsFaceSwitchTransitionActive();
-    if (!transitionActive) {
-        // Do not pause the burst — it may be the currently executing burst attempt, and
-        // killing it here prevents retry.  The burst has correct replay values from
-        // RSM_Initialized and will dispatch with fresh bindings on the next attempt after
-        // sex tracking is updated (DidRaceMenuSexChange returns false on the second attempt).
-        MarkRaceMenuFaceStateDirty("sex_changed_detected", /*pauseBurst=*/false);
-    } else {
-        // Mod callback events typically already dirtied state for this transition.
-        // Avoid re-dirtying/requeue churn here; just ensure the next apply pass fully rebinds.
-        AdvanceFaceReplayGeneration("sex_changed_detected_transition_active");
-        const bool hadSavedState = g_hasSavedState.exchange(false);
-        LogFaceFlagChange(
-            "hasSavedState",
-            hadSavedState ? "1" : "0",
-            "0",
-            "sex_changed_detected_transition_active");
-        ResetFaceSliderBindingCache();
-    }
-
-    const auto oldDispatchMode = g_faceSliderDispatchMode;
-    g_faceSliderDispatchMode = FaceSliderDispatchMode::kUnknown;
-    LogFaceFlagChange(
-        "faceSliderDispatchMode",
-        FaceSliderDispatchModeName(oldDispatchMode),
-        FaceSliderDispatchModeName(g_faceSliderDispatchMode),
-        "sex_changed_detected");
-    g_faceSliderBridgeCallsDisabled = false;
-    g_faceSliderBridgeDisabledLogged = false;
-    g_faceSliderBridgeUnavailableLogged = false;
-    spdlog::info(
-        "Detected RaceMenu sex switch oldSex={} newSex={} generation={} transitionActive={} burstActive={} burstAttempts={} pendingValues={}",
+    spdlog::debug(
+        "Detected RaceMenu sex switch oldSex={} newSex={} faceRebuildGate={}",
         static_cast<int>(previousSex),
         static_cast<int>(currentSex),
-        g_faceReplayGeneration.load(),
-        transitionActive ? 1 : 0,
-        g_pendingRaceMenuFaceReapply.load() ? 1 : 0,
-        g_pendingRaceMenuFaceReapplyAttempts.load(),
-        g_pendingRaceMenuFaceReapplyHasValues.load() ? 1 : 0);
+        g_faceRouterAwaitingRsmRebuild ? 1 : 0);
     return true;
 }
 
@@ -3873,6 +3865,64 @@ bool TryGetRaceMenuItemList(RE::GFxMovieView*& outMovie, RE::GFxValue& outItemLi
     }
 
     return false;
+}
+
+mps::FaceRouterTickResult TickFaceSliderRouter(bool force)
+{
+    if (!g_raceMenuOpen.load() ||
+        !g_faceSliderRouter.IsSessionOpen()) {
+        return mps::FaceRouterTickResult::Closed;
+    }
+
+    // ChangeSex/ChangeRace can leave the old current-sex GFx list visible for
+    // roughly 500 ms before RaceMenu emits its rebuild event. Never certify or
+    // dispatch that transitional list.
+    if (g_faceRouterAwaitingRsmRebuild) {
+        return mps::FaceRouterTickResult::AwaitingSnapshot;
+    }
+
+    if (!g_bodyCategoryActive.load()) {
+        return mps::FaceRouterTickResult::AwaitingSnapshot;
+    }
+
+    if (!force && !g_faceSliderRouter.NeedsTick()) {
+        return mps::FaceRouterTickResult::ReadyIdle;
+    }
+
+    RE::GFxMovieView* movie = nullptr;
+    RE::GFxValue itemList;
+    RE::GFxValue entryList;
+    if (!TryGetRaceMenuItemList(
+            movie,
+            itemList,
+            entryList)) {
+        (void)g_faceSliderRouter.InvalidateRoute();
+        return mps::FaceRouterTickResult::AwaitingSnapshot;
+    }
+
+    auto* player = RE::PlayerCharacter::GetSingleton();
+    auto* actorBase = player ? player->GetActorBase() : nullptr;
+    auto* race = actorBase ? actorBase->GetRace() : nullptr;
+    if (!actorBase || !race) {
+        (void)g_faceSliderRouter.InvalidateRoute();
+        return mps::FaceRouterTickResult::InvalidFrame;
+    }
+
+    const auto rawSex =
+        static_cast<std::uint8_t>(actorBase->GetSex());
+    if (rawSex > static_cast<std::uint8_t>(mps::FaceSex::Female)) {
+        (void)g_faceSliderRouter.InvalidateRoute();
+        return mps::FaceRouterTickResult::InvalidFrame;
+    }
+
+    return g_faceSliderRouter.Tick(
+        mps::FaceSliderFrame{
+            .movie = movie,
+            .entryList = std::addressof(entryList),
+            .npc = actorBase,
+            .race = race,
+            .sex = static_cast<mps::FaceSex>(rawSex)
+        });
 }
 
 bool TryGetRaceMenuGameDelegate(RE::GFxMovieView* movie, RE::GFxValue& outDelegate)
@@ -5679,6 +5729,11 @@ void TryAcquireOptionalRaceMenuInterfaces()
         g_faceMorphInterface = GetFaceMorphInterfaceFromMap(g_raceMenuInterfaceMap);
         if (g_faceMorphInterface) {
             g_faceMorphUnavailableLogged = false;
+            if (!g_faceSliderRouter.SetFaceMorphInterface(
+                    g_faceMorphInterface)) {
+                spdlog::error(
+                    "FaceRouter rejected FaceMorph interface configuration");
+            }
             spdlog::info("Acquired RaceMenu FaceMorph interface");
         } else if (!g_faceMorphUnavailableLogged) {
             spdlog::warn("RaceMenu FaceMorph interface unavailable");
@@ -5741,147 +5796,54 @@ public:
         else if (a_event->eventName == "Rley_ClosePhysique") {
             SetPhysiqueDesiredVisible(false);
         }
-        else if (a_event->eventName == "RSM_SliderChange" && a_event->strArg == "ChangeSex") {
-            const bool wasActive = g_faceSwitchTransitionActive.load();
-            LogFaceNodeSnapshot("before_RSM_SliderChange_ChangeSex");
-            LogPlayerHeadPartSnapshot("before_RSM_SliderChange_ChangeSex");
-            DidRaceMenuSexChange();
-            MarkFaceGeometryDirtyAfterRebuild("RSM_SliderChange:ChangeSex");
-            const bool oldAwaiting = g_faceSwitchAwaitingReinitialized.exchange(true);
-            LogFaceFlagChange(
-                "faceSwitchAwaitingReinitialized",
-                oldAwaiting ? "1" : "0",
-                "1",
-                "RSM_SliderChange:ChangeSex");
-            const bool oldAwaitingLogged = g_faceSwitchAwaitingReinitLogged.exchange(false);
-            LogFaceFlagChange(
-                "faceSwitchAwaitingReinitLogged",
-                oldAwaitingLogged ? "1" : "0",
-                "0",
-                "RSM_SliderChange:ChangeSex");
+        else if (a_event->eventName == "RSM_SliderChange" &&
+                 (a_event->strArg == "ChangeSex" ||
+                  a_event->strArg == "ChangeRace")) {
+            g_faceRouterAwaitingRsmRebuild = true;
+            ++g_previewDispatchSequence;
+            ++g_commitDispatchSequence;
+            (void)g_faceSliderRouter.InvalidateRoute();
 
-            const float snapshotThin = std::clamp(g_lastThin.load(), 0.0f, 1.0f);
-            const float snapshotMuscular = std::clamp(g_lastMuscular.load(), 0.0f, 1.0f);
-            const float snapshotFat = std::clamp(g_lastFat.load(), 0.0f, 1.0f);
-
-            StoreDesiredFaceTarget(snapshotThin, snapshotMuscular, snapshotFat, "sex_switch_preserve_desired_target");
-            InvalidateFaceAppliedCache("sex_switch_invalidates_visual_face_cache");
-            LogFaceDiag(
-                "FACE_REPLAY_STATE_CHANGE",
-                std::format(
-                    "action=preserve reason=sex_switch_invalidated_but_replay_preserved values=({:.3f},{:.3f},{:.3f}) pendingReplay={} attemptsLeft={} generation={} note=restore_613c478_survival_semantics",
-                    snapshotThin,
-                    snapshotMuscular,
-                    snapshotFat,
-                    g_pendingRaceMenuFaceReapply.load() ? 1 : 0,
-                    g_pendingRaceMenuFaceReapplyAttempts.load(),
-                    g_faceReplayGeneration.load()));
-            spdlog::info(
-                "SexSwitchFaceFreeze snapshot=({:.3f},{:.3f},{:.3f}) reason=sex_switch_preserve_desired_target note=no_MPS_face_SetMorphValue_no_ChangeDoubleMorph_until_recovery_transaction",
-                snapshotThin, snapshotMuscular, snapshotFat);
-
-            // Zero body morphs on the current geometry before sex switch rebuilds the mesh.
-            if (auto* player = RE::PlayerCharacter::GetSingleton(); player && player->Get3D()) {
-                SetOrClearMorph(player, kMorphThinName, 0.0f);
-                SetOrClearMorph(player, kMorphMuscularName, 0.0f);
-                SetOrClearMorph(player, kMorphFatName, 0.0f);
-                if (g_bodyMorphInterface) {
-                    g_bodyMorphInterface->UpdateModelWeight(player, false);
-                }
-            }
-
-            // Face writes are frozen across ChangeSex. No MPS face ValueMap writes
-            // and no ChangeDoubleMorph dispatch happen until the post-rebuild
-            // FaceSwitchRecoveryTransaction owns the operation.
-
-            BeginFaceSwitchTransition("RSM_SliderChange:ChangeSex");
-            if (!wasActive) {
-                MarkRaceMenuFaceStateDirty("RSM_SliderChange:ChangeSex", /*pauseBurst=*/false);
-            } else {
+            if (FaceMorphDiagnostics::IsCausalTraceEnabled()) {
                 spdlog::debug(
-                    "Ignored duplicate face dirty mark during active switch transition reason=RSM_SliderChange:ChangeSex");
+                    "FaceRouter rebuild gate armed callback={} session={} route={}",
+                    a_event->strArg.c_str(),
+                    g_faceSliderRouter.SessionGeneration(),
+                    g_faceSliderRouter.RouteGeneration());
             }
         }
-        else if (a_event->eventName == "RSM_Reinitialized") {
-            const bool wasActive = g_faceSwitchTransitionActive.load();
-            const bool wasAwaitingReinit = g_faceSwitchAwaitingReinitialized.exchange(false);
-            LogFaceFlagChange(
-                "faceSwitchAwaitingReinitialized",
-                wasAwaitingReinit ? "1" : "0",
-                "0",
-                "RSM_Reinitialized");
-            const bool oldAwaitingLogged = g_faceSwitchAwaitingReinitLogged.exchange(false);
-            LogFaceFlagChange(
-                "faceSwitchAwaitingReinitLogged",
-                oldAwaitingLogged ? "1" : "0",
-                "0",
-                "RSM_Reinitialized");
-            MarkFaceGeometryDirtyAfterRebuild("RSM_Reinitialized");
-            BeginFaceSwitchTransition("RSM_Reinitialized");
-            LogFaceNodeSnapshot("after_RSM_Reinitialized");
-            LogPlayerHeadPartSnapshot("after_RSM_Reinitialized");
-            DumpRaceMenuSliderEntries("after_RSM_Reinitialized");
-            spdlog::info(
-                "RaceMenu reinit observed reason=RSM_Reinitialized activeBefore={} awaitingBefore={} generation={} note=rebuild_boundary_bindings_will_be_invalidated",
-                wasActive ? 1 : 0,
-                wasAwaitingReinit ? 1 : 0,
-                g_faceReplayGeneration.load());
-            // RSM_Reinitialized is the rebuild boundary. Always invalidate cached
-            // bindings here, even during an active transition, but preserve any
-            // pending recovery replay by keeping pauseBurst=false.
-            MarkRaceMenuFaceStateDirty(a_event->eventName.c_str(), /*pauseBurst=*/false);
-            CompletePostRaceMenuSliderReloadReinitialized("post_reload_RSM_Reinitialized");
+        else if (a_event->eventName == "RSM_CategoriesInitialized") {
+            // SetCategoriesList does not guarantee a following slider rebuild.
+            // If a real ChangeSex/ChangeRace already armed the gate, keep it;
+            // otherwise this event is informational only.
+            if (g_faceRouterAwaitingRsmRebuild) {
+                (void)g_faceSliderRouter.InvalidateRoute();
+            }
         }
-        else if (a_event->eventName == "RSM_Initialized") {
-            const bool transitionActive = IsFaceSwitchTransitionActive();
-            const bool wasAwaitingReinit = g_faceSwitchAwaitingReinitialized.exchange(false);
-            LogFaceFlagChange(
-                "faceSwitchAwaitingReinitialized",
-                wasAwaitingReinit ? "1" : "0",
-                "0",
-                "RSM_Initialized");
-            if (wasAwaitingReinit) {
-                const bool oldAwaitingLogged = g_faceSwitchAwaitingReinitLogged.exchange(false);
-                LogFaceFlagChange(
-                    "faceSwitchAwaitingReinitLogged",
-                    oldAwaitingLogged ? "1" : "0",
-                    "0",
-                    "RSM_Initialized");
+        else if (a_event->eventName == "RSM_RaceChanged") {
+            // HideLoadingIcon can send this on either side of Reinitialized.
+            // Revoke a ready route, but never latch or clear the rebuild gate.
+            (void)g_faceSliderRouter.InvalidateRoute();
+        }
+        else if (a_event->eventName == "RSM_Initialized" ||
+                 a_event->eventName == "RSM_Reinitialized") {
+            const bool wasAwaiting = g_faceRouterAwaitingRsmRebuild;
+            g_faceRouterAwaitingRsmRebuild = false;
+            (void)g_faceSliderRouter.InvalidateRoute();
+
+            if (wasAwaiting && g_hasSavedState.load()) {
+                (void)ApplyBodyMorphTargetsOnly(
+                    std::clamp(g_lastThin.load(), 0.0f, 1.0f),
+                    std::clamp(g_lastMuscular.load(), 0.0f, 1.0f),
+                    std::clamp(g_lastFat.load(), 0.0f, 1.0f),
+                    a_event->eventName.c_str());
             }
-            if (transitionActive || wasAwaitingReinit) {
-                MarkFaceGeometryDirtyAfterRebuild("RSM_Initialized_switch_rebuild");
+
+            if (FaceMorphDiagnostics::IsCausalTraceEnabled()) {
+                LogFaceNodeSnapshot(a_event->eventName.c_str());
+                LogPlayerHeadPartSnapshot(a_event->eventName.c_str());
+                DumpRaceMenuSliderEntries(a_event->eventName.c_str());
             }
-            LogFaceNodeSnapshot("after_RSM_Initialized");
-            LogPlayerHeadPartSnapshot("after_RSM_Initialized");
-            DumpRaceMenuSliderEntries("after_RSM_Initialized");
-            // RaceMenu rebuilds slider lists during race/sex transitions. If we keep cached
-            // bindings/cached morph state across that boundary, wheel values can desync.
-            MarkRaceMenuFaceStateDirty(a_event->eventName.c_str(), /*pauseBurst=*/false);
-            // Replay from the desired target, not from SKEE ValueMap or visual proof.
-            const FaceMorphTriplet desiredTarget = HasDesiredFaceTarget() ? GetDesiredFaceTarget() : FaceMorphTriplet{
-                std::clamp(g_lastThin.load(), 0.0f, 1.0f),
-                std::clamp(g_lastMuscular.load(), 0.0f, 1.0f),
-                std::clamp(g_lastFat.load(), 0.0f, 1.0f)
-            };
-            const float replayThin = desiredTarget.thin;
-            const float replayMuscular = desiredTarget.muscular;
-            const float replayFat = desiredTarget.fat;
-            if (transitionActive || wasAwaitingReinit) {
-                BeginFaceSwitchTransition("RSM_Initialized");
-                spdlog::info(
-                    "RSM_Initialized handled as switch rebuild boundary generation={} transitionActiveBefore={} awaitingBefore={} replayValues=({:.3f},{:.3f},{:.3f}) note=defer_to_transition_settled_replay",
-                    g_faceReplayGeneration.load(),
-                    transitionActive ? 1 : 0,
-                    wasAwaitingReinit ? 1 : 0,
-                    replayThin,
-                    replayMuscular,
-                    replayFat);
-            } else if (FaceMorphDiagnostics::UseRaceMenuFaceRecoveryBursts()) {
-                QueueRaceMenuFaceReapply("RSM_Initialized", kPendingFaceReapplyInitialDelayMs, replayThin, replayMuscular, replayFat);
-            }
-            // No native SetMorphValue restore here: a direct write would pre-populate
-            // SKEE's ValueMap and make the GFx slider replay compute a zero delta (and
-            // thus do nothing visually). Replay stays purely on the GFx path.
         }
 
         return RE::BSEventNotifyControl::kContinue;
@@ -6063,10 +6025,13 @@ bool ApplyBodyMorphTargetsOnly(float thin, float muscular, float fat, std::strin
     return true;
 }
 
-bool ApplyMorphsNative(float thin, float muscular, float fat, bool isCommit, bool* outFaceApplySucceeded)
+bool ApplyMorphsNative(float thin, float muscular, float fat, bool isCommit)
 {
-    if (outFaceApplySucceeded) {
-        *outFaceApplySucceeded = false;
+    if (!std::isfinite(thin) ||
+        !std::isfinite(muscular) ||
+        !std::isfinite(fat)) {
+        spdlog::warn("Rejected non-finite morph target");
+        return false;
     }
 
     if (!TryAcquireRaceMenuBodyMorphInterface()) {
@@ -6079,98 +6044,43 @@ bool ApplyMorphsNative(float thin, float muscular, float fat, bool isCommit, boo
         return false;
     }
 
-    // Always keep pending-reapply targets in sync with the latest requested wheel state
-    // so any deferred retry uses fresh values instead of stale pre-switch morphs.
-    StoreDesiredFaceTarget(thin, muscular, fat, isCommit ? "commit_desired_face_target" : "preview_desired_face_target");
-    if (g_raceMenuOpen.load()) {
-        g_pendingRaceMenuFaceReapplyThin.store(std::clamp(thin, 0.0f, 1.0f));
-        g_pendingRaceMenuFaceReapplyMuscular.store(std::clamp(muscular, 0.0f, 1.0f));
-        g_pendingRaceMenuFaceReapplyFat.store(std::clamp(fat, 0.0f, 1.0f));
-        g_pendingRaceMenuFaceReapplyHasValues.store(true);
-    }
+    const float targetThin = std::clamp(thin, 0.0f, 1.0f);
+    const float targetMuscular =
+        std::clamp(muscular, 0.0f, 1.0f);
+    const float targetFat = std::clamp(fat, 0.0f, 1.0f);
 
-    const bool allowPreviewFaceCallbacks = FaceMorphDiagnostics::UseRaceMenuFacePreview();
-    bool shouldApplyFaceNow = isCommit || allowPreviewFaceCallbacks;
-    if (!isCommit && shouldApplyFaceNow && g_raceMenuOpen.load()) {
-        const std::uint64_t nowMs = GetTickCount64();
-        const std::uint64_t previousFacePreviewMs = g_lastFacePreviewApplyTimeMs.load();
-        if (nowMs > previousFacePreviewMs &&
-            (nowMs - previousFacePreviewMs) < kFacePreviewApplyMinIntervalMs) {
-            shouldApplyFaceNow = false;
-            spdlog::debug(
-                "RaceMenu face preview throttled trace={} generation={} elapsedMs={} minIntervalMs={}",
-                CurrentMorphTraceId(),
-                g_faceReplayGeneration.load(),
-                nowMs - previousFacePreviewMs,
-                kFacePreviewApplyMinIntervalMs);
-        } else {
-            g_lastFacePreviewApplyTimeMs.store(nowMs);
-        }
-    }
-
-    bool faceApplySucceeded = false;
-    if (shouldApplyFaceNow) {
-        faceApplySucceeded = ApplyFaceMorphsViaRaceMenuSliders(
-            thin,
-            muscular,
-            fat,
-            isCommit,
-            isCommit ? FaceApplyContext::kCommit : FaceApplyContext::kPreview);
-    } else if (!isCommit) {
-        spdlog::debug(
-            "RaceMenu face preview skipped trace={} generation={} values=({:.3f},{:.3f},{:.3f}) previewFaceCallbacks={}",
-            CurrentMorphTraceId(),
-            g_faceReplayGeneration.load(),
-            thin,
-            muscular,
-            fat,
-            allowPreviewFaceCallbacks ? 1 : 0);
-    }
-    if (outFaceApplySucceeded) {
-        *outFaceApplySucceeded = faceApplySucceeded;
-    }
-    if (faceApplySucceeded && ShouldVerifyFaceReadback(isCommit)) {
-        if (!VerifyFaceReadback(thin, muscular, fat, isCommit)) {
-            spdlog::error(
-                "Face slider routing verification failed; disabling bridge trace={} mode={}",
-                CurrentMorphTraceId(),
-                isCommit ? "commit" : "preview");
-            faceApplySucceeded = false;
-            if (outFaceApplySucceeded) {
-                *outFaceApplySucceeded = false;
-            }
-        }
-    }
-
-    if (!faceApplySucceeded && shouldApplyFaceNow) {
-        spdlog::warn(
-            "Face slider GFx apply failed; direct FaceMorph fallback is disabled for safety trace={} mode={} raceMenuOpen={}",
-            CurrentMorphTraceId(),
-            isCommit ? "commit" : "preview",
-            g_raceMenuOpen.load() ? 1 : 0);
-
-        if (g_raceMenuOpen.load() &&
-            isCommit &&
-            FaceMorphDiagnostics::UseRaceMenuFaceRecoveryBursts()) {
-            QueueRaceMenuFaceReapply(
-                "commit_face_apply_failed",
-                kPendingFaceReapplyRetryDelayMs,
-                thin,
-                muscular,
-                fat);
-        }
+    const bool submitFaceTarget =
+        g_raceMenuOpen.load() &&
+        g_faceSliderRouter.IsSessionOpen() &&
+        (isCommit ||
+         FaceMorphDiagnostics::UseRaceMenuFacePreview());
+    if (submitFaceTarget) {
+        (void)g_faceSliderRouter.SubmitTarget(
+            targetThin,
+            targetMuscular,
+            targetFat,
+            isCommit ?
+                mps::FaceTargetKind::Commit :
+                mps::FaceTargetKind::Preview);
     }
 
     if (!player->Get3D()) {
         return false;
     }
 
-    SetOrClearMorph(player, kMorphThinName, thin);
-    SetOrClearMorph(player, kMorphMuscularName, muscular);
-    SetOrClearMorph(player, kMorphFatName, fat);
+    // Body never waits for the face route. During a RaceMenu rebuild the
+    // router retains only the latest desired face target while these morphs
+    // continue to update immediately.
+    SetOrClearMorph(player, kMorphThinName, targetThin);
+    SetOrClearMorph(player, kMorphMuscularName, targetMuscular);
+    SetOrClearMorph(player, kMorphFatName, targetFat);
 
     g_bodyMorphInterface->UpdateModelWeight(player, isCommit);
     ApplyVertexDiffs(player, isCommit);
+
+    if (submitFaceTarget) {
+        (void)TickFaceSliderRouter(true);
+    }
     return true;
 }
 
@@ -6220,22 +6130,23 @@ void RestorePrismaMorphWheelTarget(float thin, float muscular, float fat, std::s
 
 bool ApplyWeightToCurrentDirection(float weight)
 {
+    if (!std::isfinite(weight)) {
+        spdlog::warn("Rejected non-finite RaceMenu weight");
+        return false;
+    }
+
+    if (g_raceMenuOpen.load() &&
+        g_faceRouterAwaitingRsmRebuild) {
+        // ChangeWeight can fire while ChangeSex is still rebuilding native
+        // arrays. Ignore that transient native callback without freezing the
+        // independent MPS wheel/body path.
+        return true;
+    }
+
     const float clampedWeight = std::clamp(weight, 0.0f, 1.0f);
     SetWeightSyncValue(clampedWeight);
 
     if (g_raceMenuOpen.load()) {
-        // Ignore RaceMenu-driven weight synchronization only while slider lists
-        // are rebuilding. Body-category state is advisory after a sex/race
-        // rebuild because RaceMenu may keep firing ChangeWeight without
-        // re-emitting our active-category callback.
-        if (IsFaceSwitchTransitionActive()) {
-            spdlog::debug(
-                "ApplyWeightToCurrentDirection skipped reason=switch_transition_active weight={:.3f} generation={}",
-                clampedWeight,
-                g_faceReplayGeneration.load());
-            return true;
-        }
-
         if (!g_bodyCategoryActive.load()) {
             spdlog::debug(
                 "ApplyWeightToCurrentDirection continuing despite inactive body category because SetWeightSync fired weight={:.3f} generation={}",
@@ -6399,6 +6310,12 @@ bool RegisterScaleform(RE::GFxMovieView* a_view, RE::GFxValue* a_root)
 
 void ResetRaceMenuBridgeState()
 {
+    if (g_faceSliderRouter.IsSessionOpen()) {
+        (void)g_faceSliderRouter.CloseSession();
+    }
+    g_faceRouterAwaitingRsmRebuild = false;
+    ++g_previewDispatchSequence;
+    ++g_commitDispatchSequence;
     g_raceMenuOpen.store(false);
     const bool oldBodyCategory = g_bodyCategoryActive.exchange(false);
     LogFaceFlagChange(
@@ -6436,7 +6353,6 @@ void ResetRaceMenuBridgeState()
         "0",
         "bridge_reset");
     g_switchTransitionReplayHasValues.store(false);
-    EndFaceSwitchTransition("bridge_reset");
     g_pendingRaceMenuFaceReapplyInFlight.store(false);
     ClearRaceMenuFaceReapply("bridge_reset");
     g_lastActorUpdateFlushMs.store(0);
@@ -6462,27 +6378,6 @@ void ExecuteMorphPreviewOnMainThread(
 
     ScopedMorphTrace traceScope(std::move(traceId));
 
-    if (g_raceMenuOpen.load() && IsFaceSwitchTransitionActive()) {
-        StoreDesiredFaceTarget(thin, muscular, fat, "preview_captured_during_switch_transition");
-        g_pendingRaceMenuFaceReapplyThin.store(std::clamp(thin, 0.0f, 1.0f));
-        g_pendingRaceMenuFaceReapplyMuscular.store(std::clamp(muscular, 0.0f, 1.0f));
-        g_pendingRaceMenuFaceReapplyFat.store(std::clamp(fat, 0.0f, 1.0f));
-        g_pendingRaceMenuFaceReapplyHasValues.store(true);
-        const bool oldPendingAfterSwitch = g_pendingFaceReplayAfterSwitchTransition.exchange(true);
-        LogFaceFlagChange(
-            "pendingFaceReplayAfterSwitchTransition",
-            oldPendingAfterSwitch ? "1" : "0",
-            "1",
-            "preview_captured_during_switch_transition");
-        spdlog::debug(
-            "Captured preview morph during switch transition trace={} values=({:.3f},{:.3f},{:.3f})",
-            CurrentMorphTraceId(),
-            thin,
-            muscular,
-            fat);
-        return;
-    }
-
     const bool sexChanged = DidRaceMenuSexChange();
     const bool unchanged = !sexChanged && IsSameAsCached(thin, muscular, fat);
     if (unchanged) {
@@ -6496,15 +6391,11 @@ void ExecuteMorphPreviewOnMainThread(
     }
     g_lastPreviewApplyTimeMs.store(nowMs);
 
-    bool faceApplySucceeded = false;
-    if (!ApplyMorphsNative(thin, muscular, fat, false, &faceApplySucceeded)) {
+    if (!ApplyMorphsNative(thin, muscular, fat, false)) {
         return;
     }
 
     CacheMorphState(thin, muscular, fat);
-    if (faceApplySucceeded) {
-        ClearRaceMenuFaceReapply("preview_applied");
-    }
     SchedulePreviewNormalApply();
 }
 
@@ -6527,36 +6418,11 @@ void ExecuteMorphCommitOnMainThread(
 
     ScopedMorphTrace traceScope(std::move(traceId));
 
-    if (g_raceMenuOpen.load() && IsFaceSwitchTransitionActive()) {
-        StoreDesiredFaceTarget(thin, muscular, fat, "commit_captured_during_switch_transition");
-        g_pendingRaceMenuFaceReapplyThin.store(std::clamp(thin, 0.0f, 1.0f));
-        g_pendingRaceMenuFaceReapplyMuscular.store(std::clamp(muscular, 0.0f, 1.0f));
-        g_pendingRaceMenuFaceReapplyFat.store(std::clamp(fat, 0.0f, 1.0f));
-        g_pendingRaceMenuFaceReapplyHasValues.store(true);
-        const bool oldPendingAfterSwitch = g_pendingFaceReplayAfterSwitchTransition.exchange(true);
-        LogFaceFlagChange(
-            "pendingFaceReplayAfterSwitchTransition",
-            oldPendingAfterSwitch ? "1" : "0",
-            "1",
-            "commit_captured_during_switch_transition");
-        spdlog::debug(
-            "Captured commit morph during switch transition trace={} values=({:.3f},{:.3f},{:.3f})",
-            CurrentMorphTraceId(),
-            thin,
-            muscular,
-            fat);
-        return;
-    }
-
-    bool faceApplySucceeded = false;
-    if (!ApplyMorphsNative(thin, muscular, fat, true, &faceApplySucceeded)) {
+    if (!ApplyMorphsNative(thin, muscular, fat, true)) {
         return;
     }
 
     CacheMorphState(thin, muscular, fat);
-    if (faceApplySucceeded) {
-        ClearRaceMenuFaceReapply("commit_applied");
-    }
     CancelPreviewNormalApply();
     RefreshCachedMorphStateFromNative();
     ApplySelectedNormalMapTextureSet(true, "commit_slider");
@@ -6571,19 +6437,7 @@ void QueueMorphPreviewApply(float thin, float muscular, float fat, std::string t
     }
 
     const std::uint64_t sequence = ++g_previewDispatchSequence;
-    const std::uint64_t capturedGeneration = g_faceReplayGeneration.load();
-    taskInterface->AddTask([thin, muscular, fat, traceId = std::move(traceId), sequence, capturedGeneration]() mutable {
-        const std::uint64_t currentGeneration = g_faceReplayGeneration.load();
-        if (capturedGeneration != currentGeneration) {
-            spdlog::debug(
-                "Skipping stale preview morph task trace={} capturedGeneration={} currentGeneration={} seq={} latestSeq={}",
-                traceId,
-                capturedGeneration,
-                currentGeneration,
-                sequence,
-                g_previewDispatchSequence.load());
-            return;
-        }
+    taskInterface->AddTask([thin, muscular, fat, traceId = std::move(traceId), sequence]() mutable {
         ExecuteMorphPreviewOnMainThread(thin, muscular, fat, std::move(traceId), sequence);
     });
 }
@@ -6600,19 +6454,7 @@ void QueueMorphCommitApply(float thin, float muscular, float fat, std::string tr
     ++g_previewDispatchSequence;
 
     const std::uint64_t sequence = ++g_commitDispatchSequence;
-    const std::uint64_t capturedGeneration = g_faceReplayGeneration.load();
-    taskInterface->AddTask([thin, muscular, fat, traceId = std::move(traceId), sequence, capturedGeneration]() mutable {
-        const std::uint64_t currentGeneration = g_faceReplayGeneration.load();
-        if (capturedGeneration != currentGeneration) {
-            spdlog::debug(
-                "Skipping stale commit morph task trace={} capturedGeneration={} currentGeneration={} seq={} latestSeq={}",
-                traceId,
-                capturedGeneration,
-                currentGeneration,
-                sequence,
-                g_commitDispatchSequence.load());
-            return;
-        }
+    taskInterface->AddTask([thin, muscular, fat, traceId = std::move(traceId), sequence]() mutable {
         ExecuteMorphCommitOnMainThread(thin, muscular, fat, std::move(traceId), sequence);
     });
 }
@@ -6622,6 +6464,13 @@ void OnMorphsPreview(const char* argument)
     ParsedMorphPayload payload;
     if (!ParseMorphPayload(argument, payload)) {
         spdlog::error("OnMorphsPreview got invalid payload");
+        return;
+    }
+    if (!std::isfinite(payload.thin) ||
+        !std::isfinite(payload.muscular) ||
+        !std::isfinite(payload.fat)) {
+        spdlog::error(
+            "OnMorphsPreview rejected non-finite payload");
         return;
     }
 
@@ -6649,6 +6498,13 @@ void OnMorphsCommit(const char* argument)
     ParsedMorphPayload payload;
     if (!ParseMorphPayload(argument, payload)) {
         spdlog::error("OnMorphsCommit got invalid payload");
+        return;
+    }
+    if (!std::isfinite(payload.thin) ||
+        !std::isfinite(payload.muscular) ||
+        !std::isfinite(payload.fat)) {
+        spdlog::error(
+            "OnMorphsCommit rejected non-finite payload");
         return;
     }
 
@@ -6785,14 +6641,11 @@ void RunMainThreadTick()
         CloseMenu();
     }
 
-    // Transition expiry must be polled even when no morph payloads are arriving.
-    // Otherwise repeated ChangeSex/Reinitialized events can leave the transition
-    // gate effectively latched until the next slider callback happens.
-    PollFaceSwitchTransitionExpiry();
+    (void)TickFaceSliderRouter();
 
-    UpdateFaceDiagnosticDelayedReads();
-    UpdatePostRaceMenuSliderReloadReplayAfterSettle();
-    UpdatePendingRaceMenuFaceReapply();
+    if (FaceMorphDiagnostics::IsCausalTraceEnabled()) {
+        UpdateFaceDiagnosticDelayedReads();
+    }
 
     int remainingPreviewNormalApplyTicks = g_previewNormalApplyTicks.load();
     if (remainingPreviewNormalApplyTicks > 0) {
@@ -6839,7 +6692,16 @@ void UpdateLoop()
         if (!g_mainThreadTickInFlight.exchange(true)) {
             if (auto* taskInterface = SKSE::GetTaskInterface()) {
                 taskInterface->AddTask([]() {
-                    RunMainThreadTick();
+                    try {
+                        RunMainThreadTick();
+                    } catch (const std::exception& error) {
+                        spdlog::error(
+                            "Main-thread tick failed: {}",
+                            error.what());
+                    } catch (...) {
+                        spdlog::error(
+                            "Main-thread tick failed with an unknown exception");
+                    }
                     g_mainThreadTickInFlight.store(false);
                 });
             } else {

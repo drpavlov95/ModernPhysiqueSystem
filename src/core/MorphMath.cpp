@@ -19,6 +19,11 @@ namespace mps
         if (sscanf_s(argument, "%f,%f,%f", std::addressof(thin), std::addressof(muscular), std::addressof(fat)) != 3) {
             return false;
         }
+        if (!std::isfinite(thin) ||
+            !std::isfinite(muscular) ||
+            !std::isfinite(fat)) {
+            return false;
+        }
 
         payload.thin = thin;
         payload.muscular = muscular;

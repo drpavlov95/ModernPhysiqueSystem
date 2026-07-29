@@ -2,6 +2,7 @@ set(headers ${headers}
 	src/PCH.h
     src/log.h
     src/FaceMorphDiagnostics.h
+    src/FaceSliderRouter.h
     src/Globals.h
     src/PrismaUI_API.h
     src/RaceMenuInterop.h

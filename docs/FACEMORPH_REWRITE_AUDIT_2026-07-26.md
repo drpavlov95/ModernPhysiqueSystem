@@ -121,19 +121,20 @@ The installed `skee64.dll` vtable reverse engineering identifies:
 
 | Concrete slot | Function |
 | ---: | --- |
-| 3 | additional/reserved function |
-| 4 | serialize/save path |
+| 3 | `Load(void*, uint32_t)` |
+| 4 | `Save(void*, uint32_t)` |
 | 5 | `GetMorphValueByName` |
 | 6 | `SetMorphValue` |
 
-The current `IFaceMorphInterface` declaration places
-`GetMorphValueByName` before its two reserved entries. With the external
-interface's base layout, reads land on the earlier no-op slot and return zero.
-The two reserved declarations were historically inserted only to move
-`SetMorphValue` away from the serialize slot after a crash, but the read slot
-was never corrected.
+The former `IFaceMorphInterface` declaration placed `GetMorphValueByName`
+before its two reserved entries. With the external interface's base layout,
+reads landed on the earlier no-op slot and returned zero. The two reserved
+declarations were historically inserted only to move `SetMorphValue` away
+from the serialize slot after a crash, but the read slot was never corrected.
 
-The rewrite must model both reserved slots before the two public morph methods.
+The rewrite models both serialization slots before the two public morph
+methods. The active binary reports interface version `2`; the older enum value
+`1` must not be used as a compatibility gate.
 `SetMorphValue` remains forbidden for normal/recovery face application even
 with the corrected ABI: it changes saved state only and can make the later
 relative callback compute a zero delta.
@@ -187,6 +188,32 @@ native saved-state write was not observed.
 
 The rewrite uses one game-thread-owned controller with an explicit lifecycle.
 
+### The current hot path explains the performance symptoms
+
+`ResolveFaceSliderBindings` clears all three bindings and rescans the complete
+GFx entry list for every wheel apply. Each entry is evaluated separately for
+thin, muscular, and heavy, so the 295-entry male list causes roughly 885
+candidate evaluations before any face callback is sent.
+
+The old path then:
+
+- dispatches all three `ChangeDoubleMorph` callbacks even when only one axis
+  changed;
+- performs repeated full-triplet ValueMap reads around each axis;
+- runs a second full binding/diagnostic scan for every resulting
+  `RSM_SliderChange`;
+- formats and writes event logs on that feedback path;
+- mutates `entry.position` and requests a native list update.
+
+It also computes `nativeWriteObserved` but defines success as callback-returned
+true. A wrong-sex route can therefore be accepted, cached, and removed from the
+recovery queue even though the expected `FACE_RLY*` ValueMap entry never
+changed.
+
+This combination accounts for the ticking, sex-slider flicker, high CPU cost,
+and the observable delay before the body update which currently runs only
+after the full face pipeline.
+
 ## Rewrite architecture
 
 ### Immutable route snapshot
@@ -206,34 +233,75 @@ RouteSnapshot
 The GFx `entryList` is read-only. A snapshot becomes dispatchable only after
 two identical observations after the last rebuild event.
 
-### Race-scoped internal-list owner
+### Prove the race-scoped internal-list sex
 
-For each race in the current menu session, the controller tracks which sex most
-recently caused SKEE to build that race's internal list.
+The controller must not infer the SKEE internal-list owner from RaceMenu
+lifecycle events. Those events describe the visible arrays, not whether
+`m_internalMap[race]` was actually rebuilt.
 
-- First observed race/sex route in a fresh menu session is the initial owner.
-- First visit to a previously unseen sex for that race becomes the new owner
-  after its rebuild settles.
-- Returning to an already cached sex does not assume that the race-only SKEE
-  list changed.
+For the exact supported Trixter slider set, three read-only sentinel indices can
+identify the current internal-list sex through `CharGen.GetSliderData`:
 
-When current sex differs from the internal-list owner, dispatch must use a
-current native slider whose extended index equals the owner's exact RLY index.
-This is an **index alias**, not the visible RLY ID. It is resolved and validated
-read-only through `GetSliderData`; it is never guessed by numeric offset.
+| Internal index | Male subtype | Female subtype |
+| ---: | ---: | ---: |
+| 15 | Slider (`0`) | Preset (`1`) |
+| 17 | Preset (`1`) | Slider (`0`) |
+| 258 | Slider (`0`) | HeadPart (`2`) |
 
-This aligns both halves used by `DoubleMorphCallback_Hook`:
+The implementation locates the current GFx entries whose native extended
+indices are `215`, `217`, and `458`; it does not hard-code their visible
+slider IDs. The observed subtype triplet means:
 
-```text
-current-sex native slider array
-  -> validated alias slider ID
-  -> owner's extended index
-  -> race-only SKEE internal list
-  -> owner's FACE_RLY SliderInternal
-```
+- `(0, 1, 0)`: male internal list;
+- `(1, 0, 2)`: female internal list;
+- any other or missing result: unknown.
 
-If no fully validated alias exists, face dispatch fails closed. Body morphs
-continue; no unrelated face callback is attempted.
+Unknown always fails closed. Body morphs continue, but no face callback is
+attempted.
+
+### Why index-alias dispatch is rejected
+
+An earlier design proposed dispatching a current-sex native slider whose
+extended index happened to address the desired entry in the stale internal
+list. That can reach the intended `SliderInternal`, but it is still unsafe:
+`DoubleMorphCallback_Hook` writes the new value into the selected current-sex
+native slider object before it resolves the internal list. The alias therefore
+pollutes an unrelated visible/native slider and can later corrupt UI state or
+geometry.
+
+The shipping implementation must dispatch only the exact current-sex
+`FACE_RLY*` bindings, and only after the sentinel proof says the internal list
+belongs to that same sex.
+
+### Exact-build internal-list repair
+
+The public SKEE API cannot rebuild only `m_internalMap[race]`. Calling
+`CharGen.ReloadSliders` also rebuilds RaceMenu arrays, queues geometry work, and
+reintroduces the ticking/flicker loop.
+
+For the one explicitly supported `skee64.dll`, the rewrite may use a narrowly
+gated private call to `FaceMorphInterface::CreateSliderList(race, sex)` after
+the GFx snapshot is stable:
+
+- file version `4.0.0.0`;
+- PE timestamp `0x5F799CB1`;
+- `SizeOfImage` `0x1E4000`;
+- SHA-256
+  `255C0DB0BA5FF14640CC6D75CCDDFB24474B498D35B77F3140CCB05EB80E7273`;
+- function RVA `0x5F060`;
+- unique 30-byte prologue signature
+  `48 89 5C 24 20 44 88 44 24 18 48 89 54 24 10 55 56 57 48 8D 6C 24 B9 48 81 EC 90 00 00 00`;
+- queried interface pointer exactly at module base plus `0x1CAB10`;
+- concrete vptr exactly at module base plus `0x174170`, with public read/write
+  slots at base plus `0x59B20` and `0x59C20`;
+- one repair attempt per route transition;
+- game-thread only and guarded against a native exception.
+
+This call replaces only SKEE's race-only internal list. It does not invoke
+`ReloadSliders`, mutate GFx, or queue a NiNode update. After the call, the
+sentinel proof is repeated. Face dispatch becomes available only when both the
+stable exact snapshot and the internal-list sex agree. Any module/version/hash/
+signature mismatch disables the repair and leaves face preview fail-closed.
 
 ### Minimal lifecycle
 
@@ -245,17 +313,24 @@ Closed
 Ready + ChangeSex/race change
   -> Rebuilding (freeze face dispatch, keep newest desired target)
   -> AwaitingSnapshot
+  -> verify internal-list sex
+     -> exact-build internal-list repair once when mismatched
+     -> verify again
   -> Ready (one replay of newest target)
 ```
 
-There is no native reload and no retry burst. A bounded settle timeout may
-leave the controller in a non-dispatchable state, but cannot mutate RaceMenu to
-force recovery.
+There is no native reload and no retry burst. Snapshot discovery is capped at
+12 observations spaced by at least 16 ms; exhausting that budget leaves the
+controller non-dispatchable until a real lifecycle boundary, without mutating
+RaceMenu to force recovery.
 
 ### Apply policy
 
-- Preview body: latest-only, quantized and throttled.
-- Preview face: latest-only, throttled, only in `Ready`.
+- Preview body: latest-only, quantized and throttled at the single 33 ms
+  scheduler boundary.
+- Preview face: latest-only and only in `Ready`; it shares the accepted body
+  preview task and has no independent clock that could add a visible phase
+  offset.
 - Commit body: always apply.
 - Commit face: dispatch one triplet only in `Ready`; otherwise retain one
   desired target for the post-rebuild replay.
@@ -265,7 +340,9 @@ force recovery.
 ## Explicit non-goals
 
 - No direct `IFaceMorphInterface::SetMorphValue` recovery.
-- No private `ApplyMorphs`, direct `FaceGenApplyMorph`, or SKEE binary hook.
+- No private `ApplyMorphs`, direct `FaceGenApplyMorph`, or detour/hook inside
+  SKEE. The optional exact-build `CreateSliderList` call is the only private
+  entry point.
 - No `CharGen.ReloadSliders`.
 - No GFx label, list, position, category, or order mutation.
 - No edits to installed or versioned `meshes`/`interface\translations` assets.
@@ -277,14 +354,16 @@ force recovery.
 
 ### Host tests
 
-- first visit and revisit owner transitions;
-- male -> female -> male alias selection;
+- first visit and revisit route transitions;
+- male -> female -> male alignment proof and bounded repair;
 - female -> male -> female symmetry;
 - race change and return;
 - rapid switch with missing snapshot fails closed;
 - unstable fingerprints never dispatch;
 - exact-label/callback-only binding rejection;
-- no alias when native index proof is missing;
+- no dispatch when sentinel proof is missing or disagrees;
+- no second repair attempt for the same transition;
+- unsupported SKEE build never calls a private address;
 - latest desired target wins while rebuilding.
 
 ### Static safety checks

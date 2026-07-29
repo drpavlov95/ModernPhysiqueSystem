@@ -19,6 +19,9 @@ TEST_CASE("ParseMorphPayload parses triplet and optional traceId")
     CHECK_FALSE(ParseMorphPayload(nullptr, p));
     CHECK_FALSE(ParseMorphPayload("0.5,0.25", p));
     CHECK_FALSE(ParseMorphPayload("abc", p));
+    CHECK_FALSE(ParseMorphPayload("nan,0.25,0.1", p));
+    CHECK_FALSE(ParseMorphPayload("0.5,inf,0.1", p));
+    CHECK_FALSE(ParseMorphPayload("0.5,0.25,-inf", p));
 }
 
 TEST_CASE("QuantizeMorphValue clamps then snaps to step")
