@@ -5107,9 +5107,6 @@ FaceSliderApplyResult ApplyBoundFaceSliderViaRaceMenu(
         }
     }
 
-    RE::GFxValue newPosition;
-    newPosition.SetNumber(clampedValue);
-
     const bool delegateInvoked = TryDispatchFaceSliderViaDelegate(
         movie,
         fxDelegate,
@@ -5120,9 +5117,6 @@ FaceSliderApplyResult ApplyBoundFaceSliderViaRaceMenu(
 
     bool internalInvoked = false;
     if (delegateInvoked) {
-        // Keep UI-side entry metadata coherent after the native DoubleMorph path.
-        // This is explicitly not visual success proof.
-        boundEntry.SetMember("position", newPosition);
         if (binding.hasInternalCallback && !isPreviewTrace) {
             LogFaceDiag(
                 "FACE_DISPATCH_CAUSAL",
@@ -5157,7 +5151,8 @@ FaceSliderApplyResult ApplyBoundFaceSliderViaRaceMenu(
         !result.visualDeltaPredicted;
     result.success =
         delegateInvoked &&
-        !result.relativeZeroBlocked;
+        !result.relativeZeroBlocked &&
+        result.nativeWriteObserved;
 
     const char* outcome = "callback_failed";
     if (delegateInvoked && result.relativeZeroBlocked) {
@@ -5593,10 +5588,6 @@ bool ApplyFaceMorphsViaRaceMenuSliders(
 
     const bool allApplied = dispatchAll(thin, muscular, fat);
 
-    if (allApplied && requestUiUpdate && itemList.IsObject()) {
-        itemList.Invoke("requestUpdate");
-    }
-
     if (allApplied) {
         g_faceSliderBridgeUnavailableLogged = false;
 
@@ -5726,8 +5717,9 @@ public:
         const char* strArg = a_event->strArg.c_str();
         const std::string_view eventNameView(eventName);
 
-        if (eventNameView.rfind("RSM_", 0) == 0) {
-            spdlog::info(
+        if (eventNameView.rfind("RSM_", 0) == 0 &&
+            FaceMorphDiagnostics::IsCausalTraceEnabled()) {
+            spdlog::debug(
                 "RaceMenu mod event name={} strArg={} numArg={:.3f} sender={:08X} generation={} pending={} attemptsLeft={}",
                 eventName,
                 strArg,
@@ -5738,7 +5730,8 @@ public:
                 g_pendingRaceMenuFaceReapplyAttempts.load());
         }
 
-        if (a_event->eventName == "RSM_SliderChange") {
+        if (a_event->eventName == "RSM_SliderChange" &&
+            FaceMorphDiagnostics::IsCausalTraceEnabled()) {
             LogRaceMenuSliderChangeDiagnostic(*a_event);
         }
 

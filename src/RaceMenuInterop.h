@@ -169,11 +169,18 @@ public:
 		kCurrentPluginVersion = 1
 	};
 
-	// Keep the reserved slots before SetMorphValue so a ValueMap write cannot
-	// accidentally land on SKEE's save/serialize path.
+	// The installed skee64.dll concrete FaceMorph vtable contains two methods
+	// between IPluginInterface::Revert and the public ValueMap accessors.  Keep
+	// both placeholders *before* GetMorphValueByName so reads land on slot 5
+	// and writes land on slot 6.  The old declaration put the placeholders
+	// between Get/Set: reads hit a no-op slot and always appeared to return 0,
+	// while the original unpadded declaration sent writes into serialization.
+	//
+	// These methods are declared only to preserve the concrete vtable layout.
+	// MPS must never invoke either serialization method.
+	virtual bool SKEEReserved_Load(void*, std::uint32_t) = 0;
+	virtual void SKEEReserved_Save(void*, std::uint32_t) = 0;
 	virtual float GetMorphValueByName(RE::TESNPC* npc, const SKEEFixedString& name) = 0;
-	virtual void SKEEReserved_Serialize(void*, void*, unsigned int) = 0;
-	virtual unsigned int SKEEReserved_GetByHash(void*, unsigned long long, char*) = 0;
 	virtual void SetMorphValue(RE::TESNPC* npc, const SKEEFixedString& name, float value) = 0;
 };
 

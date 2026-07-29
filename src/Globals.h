@@ -117,7 +117,10 @@ constexpr int kPendingFaceReapplyMaxAttempts = 8;
 constexpr std::uint64_t kFaceSwitchTransitionSettleMs = 1200;
 constexpr std::uint64_t kFaceSwitchTransitionHardCapMs = 3500;
 constexpr int kFaceReadbackDisableThreshold = 3;
-constexpr bool kEnableRaceMenuSliderReloadAfterSexSwitch = true;
+// Full ReloadSliders rebuilds RaceMenu UI/native arrays and queues a NiNode
+// update. It is intentionally disabled; the face router may repair only SKEE's
+// race-scoped internal list on an exact, verified build.
+constexpr bool kEnableRaceMenuSliderReloadAfterSexSwitch = false;
 constexpr int kPostRaceMenuSliderReloadSettleTicks = 30;
 constexpr int kPostRaceMenuSliderReloadReinitTimeoutTicks = 180;
 
