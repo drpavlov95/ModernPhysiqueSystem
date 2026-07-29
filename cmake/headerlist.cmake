@@ -9,6 +9,5 @@ set(headers ${headers}
     src/core/Text.h
     src/core/MorphMath.h
     src/core/NormalMapCatalog.h
-    src/core/BindingScore.h
     src/core/FaceRouteState.h
 )

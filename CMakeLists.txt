@@ -131,7 +131,6 @@ if(MPS_BUILD_TESTS)
         src/core/Text.cpp
         src/core/MorphMath.cpp
         src/core/NormalMapCatalog.cpp
-        src/core/BindingScore.cpp
         src/core/FaceRouteState.cpp
     )
     set(MPS_TEST_SOURCES
@@ -140,7 +139,6 @@ if(MPS_BUILD_TESTS)
         tests/cpp/test_text.cpp
         tests/cpp/test_morphmath.cpp
         tests/cpp/test_normalmap.cpp
-        tests/cpp/test_bindingscore.cpp
         tests/cpp/test_faceroutestate.cpp
     )
     add_executable(mps_tests ${MPS_CORE_SOURCES} ${MPS_TEST_SOURCES})
@@ -149,4 +147,12 @@ if(MPS_BUILD_TESTS)
     target_link_libraries(mps_tests PRIVATE doctest::doctest)
     enable_testing()
     add_test(NAME mps_tests COMMAND mps_tests)
+    add_test(
+        NAME mps_face_route_static_safety
+        COMMAND
+            "${CMAKE_COMMAND}"
+            "-DMPS_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
+            -P
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/FaceRouteStaticSafety.cmake"
+    )
 endif()

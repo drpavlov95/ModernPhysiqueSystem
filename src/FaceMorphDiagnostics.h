@@ -12,7 +12,6 @@ namespace FaceMorphDiagnostics
 	inline constexpr bool kEnableFaceNodeSnapshot = false;
 	inline constexpr bool kEnableRaceMenuEntryDump = false;
 	inline constexpr bool kEnableRaceMenuFacePreview = true;
-	inline constexpr bool kEnableRaceMenuFaceRecoveryBursts = false;
 	inline constexpr int kDefaultStableNormalMapHysteresisPercent = 3;
 
 	void LoadConfig();
@@ -21,7 +20,6 @@ namespace FaceMorphDiagnostics
 	[[nodiscard]] bool IsRaceMenuEntryDumpEnabled();
 	[[nodiscard]] bool IsVerboseLoggingEnabled();
 	[[nodiscard]] bool UseRaceMenuFacePreview();
-	[[nodiscard]] bool UseRaceMenuFaceRecoveryBursts();
 	[[nodiscard]] bool UseStableNormalMapSelection();
 	[[nodiscard]] int GetStableNormalMapHysteresisPercent();
 

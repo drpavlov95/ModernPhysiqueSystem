@@ -21,7 +21,6 @@ namespace
 	std::atomic_bool g_raceMenuEntryDump{ FaceMorphDiagnostics::kEnableRaceMenuEntryDump };
 	std::atomic_bool g_verboseLogging{ false };
 	std::atomic_bool g_raceMenuFacePreview{ FaceMorphDiagnostics::kEnableRaceMenuFacePreview };
-	std::atomic_bool g_raceMenuFaceRecoveryBursts{ FaceMorphDiagnostics::kEnableRaceMenuFaceRecoveryBursts };
 	std::atomic_bool g_stableNormalMapSelection{ false };
 	std::atomic_int g_stableNormalMapHysteresisPercent{
 		FaceMorphDiagnostics::kDefaultStableNormalMapHysteresisPercent
@@ -122,7 +121,6 @@ namespace FaceMorphDiagnostics
 		const bool raceMenuEntryDump = ReadBool(configPath, "Diagnostics", "RaceMenuEntryDump", kEnableRaceMenuEntryDump);
 		const bool verboseLogging = ReadBool(configPath, "Diagnostics", "VerboseLogging", false);
 		const bool raceMenuFacePreview = ReadBool(configPath, "FaceMorphs", "PreviewRaceMenuFaceSliders", kEnableRaceMenuFacePreview);
-		const bool raceMenuFaceRecoveryBursts = ReadBool(configPath, "FaceMorphs", "RaceMenuFaceRecoveryBursts", kEnableRaceMenuFaceRecoveryBursts);
 		const std::string logLevelText = ReadString(configPath, "Logging", "Level", "warn");
 		std::string normalMapSelectionMode = ReadString(configPath, "NormalMaps", "SelectionMode", "legacy");
 		std::ranges::transform(normalMapSelectionMode, normalMapSelectionMode.begin(), [](unsigned char ch) {
@@ -147,7 +145,6 @@ namespace FaceMorphDiagnostics
 		g_raceMenuEntryDump.store(raceMenuEntryDump);
 		g_verboseLogging.store(verboseLogging);
 		g_raceMenuFacePreview.store(raceMenuFacePreview);
-		g_raceMenuFaceRecoveryBursts.store(raceMenuFaceRecoveryBursts);
 		g_stableNormalMapSelection.store(stableNormalMapSelection);
 		g_stableNormalMapHysteresisPercent.store(stableNormalMapHysteresisPercent);
 
@@ -155,7 +152,7 @@ namespace FaceMorphDiagnostics
 		spdlog::flush_on(logLevel <= spdlog::level::debug ? spdlog::level::debug : spdlog::level::warn);
 
 		spdlog::info(
-			"ModernPhysiqueSystem config path={} exists={} logLevel={} FaceCausalTrace={} FaceNodeSnapshot={} RaceMenuEntryDump={} VerboseLogging={} PreviewRaceMenuFaceSliders={} RaceMenuFaceRecoveryBursts={} NormalSelectionMode={} StableHysteresisPercent={}",
+			"ModernPhysiqueSystem config path={} exists={} logLevel={} FaceCausalTrace={} FaceNodeSnapshot={} RaceMenuEntryDump={} VerboseLogging={} PreviewRaceMenuFaceSliders={} NormalSelectionMode={} StableHysteresisPercent={}",
 			configPath.string(),
 			configExists ? 1 : 0,
 			logLevelText,
@@ -164,7 +161,6 @@ namespace FaceMorphDiagnostics
 			raceMenuEntryDump ? 1 : 0,
 			verboseLogging ? 1 : 0,
 			raceMenuFacePreview ? 1 : 0,
-			raceMenuFaceRecoveryBursts ? 1 : 0,
 			normalMapSelectionMode,
 			stableNormalMapHysteresisPercent);
 	}
@@ -192,11 +188,6 @@ namespace FaceMorphDiagnostics
 	bool UseRaceMenuFacePreview()
 	{
 		return g_raceMenuFacePreview.load();
-	}
-
-	bool UseRaceMenuFaceRecoveryBursts()
-	{
-		return g_raceMenuFaceRecoveryBursts.load();
 	}
 
 	bool UseStableNormalMapSelection()

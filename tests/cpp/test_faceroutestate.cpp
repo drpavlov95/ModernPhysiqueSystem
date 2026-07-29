@@ -299,6 +299,54 @@ TEST_CASE("male female male transitions never dispatch through a sex alias")
     CHECK_FALSE(controller.ReplayPending());
 }
 
+TEST_CASE("female male female transitions remain symmetric and exact")
+{
+    FaceRouteController controller;
+    REQUIRE(controller.UpdateDesired(
+        DesiredFaceTarget{ { 0.4F, 0.4F, 0.2F } }) != 0);
+
+    const auto female = MakeSnapshot(200, 356, 0x4101);
+    const auto male = MakeSnapshot(221, 377, 0x4102);
+
+    controller.OpenSession();
+    REQUIRE(controller.Visit(kFemaleNord));
+    CertifyAndAlign(controller, kFemaleNord, female);
+    REQUIRE(controller.BuildReplayPlan().has_value());
+
+    REQUIRE(controller.Visit(kMaleNord));
+    Certify(controller, kMaleNord, male);
+    REQUIRE(controller.ObserveInternalMapSex(
+        kMaleNord,
+        male.sourceFingerprint,
+        FaceSex::Female));
+    CHECK_FALSE(controller.BuildReplayPlan().has_value());
+    REQUIRE(controller.ConsumeRepairRequest().has_value());
+    REQUIRE(controller.ObserveInternalMapSex(
+        kMaleNord,
+        male.sourceFingerprint,
+        FaceSex::Male));
+    const auto malePlan = controller.BuildReplayPlan();
+    REQUIRE(malePlan.has_value());
+    CHECK(malePlan->exactRoutes == male.axes);
+
+    REQUIRE(controller.Visit(kFemaleNord));
+    Certify(controller, kFemaleNord, female);
+    REQUIRE(controller.ObserveInternalMapSex(
+        kFemaleNord,
+        female.sourceFingerprint,
+        FaceSex::Male));
+    CHECK_FALSE(controller.BuildReplayPlan().has_value());
+    REQUIRE(controller.ConsumeRepairRequest().has_value());
+    REQUIRE(controller.ObserveInternalMapSex(
+        kFemaleNord,
+        female.sourceFingerprint,
+        FaceSex::Female));
+    const auto femalePlan = controller.BuildReplayPlan();
+    REQUIRE(femalePlan.has_value());
+    CHECK(femalePlan->exactRoutes == female.axes);
+    CHECK(femalePlan->exactRoutes != male.axes);
+}
+
 TEST_CASE("latest desired revision wins over an in-flight replay")
 {
     FaceRouteController controller;

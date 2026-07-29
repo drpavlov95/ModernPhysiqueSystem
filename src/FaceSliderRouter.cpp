@@ -151,25 +151,49 @@ namespace mps
             return true;
         }
 
-        [[nodiscard]] bool MatchesExactToken(
-            std::string_view value,
-            std::string_view token) noexcept
+        [[nodiscard]] std::optional<std::size_t>
+            FindExactAxisToken(std::string_view value) noexcept
         {
             if (!value.empty() && value.front() == '$') {
                 value.remove_prefix(1);
             }
-            return value == token;
+
+            for (std::size_t axis = 0;
+                 axis < kFaceAxisCount;
+                 ++axis) {
+                if (value == kAxisTokens[axis]) {
+                    return axis;
+                }
+            }
+            return std::nullopt;
         }
 
-        [[nodiscard]] bool EntryMatchesExactToken(
+        [[nodiscard]] bool TryFindEntryAxis(
             RE::GFxValue& entry,
-            std::string_view token)
+            std::optional<std::size_t>& outAxis)
         {
-            std::string_view value;
-            return (TryGetStringMember(entry, "text", value) &&
-                       MatchesExactToken(value, token)) ||
-                   (TryGetStringMember(entry, "name", value) &&
-                       MatchesExactToken(value, token));
+            outAxis.reset();
+            constexpr std::array members{ "text", "name" };
+            for (const char* memberName : members) {
+                std::string_view value;
+                if (!TryGetStringMember(
+                        entry,
+                        memberName,
+                        value)) {
+                    continue;
+                }
+
+                const auto candidate =
+                    FindExactAxisToken(value);
+                if (!candidate) {
+                    continue;
+                }
+                if (outAxis && *outAxis != *candidate) {
+                    return false;
+                }
+                outAxis = candidate;
+            }
+            return true;
         }
 
         void HashOptionalStringMember(
@@ -1197,6 +1221,23 @@ namespace mps
         return sessionOpen_;
     }
 
+    bool FaceSliderRouter::TryReadCurrentValues(
+        RE::TESNPC* npc,
+        std::array<float, kFaceAxisCount>& outValues)
+    {
+        if (!CheckThread("TryReadCurrentValues") ||
+            !sessionOpen_ ||
+            !npc) {
+            return false;
+        }
+
+        std::uint32_t exceptionCode = 0;
+        return TryReadAxisValues(
+            npc,
+            outValues,
+            exceptionCode);
+    }
+
     bool FaceSliderRouter::CheckThread(
         const char* operation,
         bool bindIfUnset)
@@ -1321,76 +1362,75 @@ namespace mps
                 continue;
             }
 
-            for (std::size_t axis = 0;
-                 axis < kFaceAxisCount;
-                 ++axis) {
-                if (!EntryMatchesExactToken(
-                        entry,
-                        kAxisTokens[axis])) {
-                    continue;
-                }
-
-                if (++matchCounts[axis] != 1) {
-                    return std::nullopt;
-                }
-
-                std::string_view callback;
-                if (!TryGetStringMember(
-                        entry,
-                        "callbackName",
-                        callback) ||
-                    callback != kDoubleMorphCallback) {
-                    return std::nullopt;
-                }
-
-                std::uint32_t sliderId = 0;
-                double position = 0.0;
-                if (!TryGetExactUIntMember(
-                        entry,
-                        "sliderID",
-                        sliderId) ||
-                    !TryGetEntryPosition(entry, position)) {
-                    return std::nullopt;
-                }
-
-                RE::GFxValue nativeData;
-                std::uint32_t exceptionCode = 0;
-                if (!InvokeGetSliderData(
-                        frame.movie,
-                        charGen,
-                        sliderId,
-                        position,
-                        nativeData,
-                        exceptionCode)) {
-                    return std::nullopt;
-                }
-
-                std::uint32_t nativeType = 0;
-                std::uint32_t nativeIndex = 0;
-                std::uint32_t subType = 0;
-                if (!TryGetExactUIntMember(
-                        nativeData,
-                        "type",
-                        nativeType) ||
-                    nativeType != kNativeDoubleMorphType ||
-                    !TryGetExactUIntMember(
-                        nativeData,
-                        "index",
-                        nativeIndex) ||
-                    nativeIndex != expectedIndices[axis] ||
-                    !TryGetExactUIntMember(
-                        nativeData,
-                        "subType",
-                        subType) ||
-                    subType != 0) {
-                    return std::nullopt;
-                }
-
-                snapshot.axes[axis] = AxisRoute{
-                    .visibleSliderId = sliderId,
-                    .extendedIndex = nativeIndex
-                };
+            std::optional<std::size_t> matchedAxis;
+            if (!TryFindEntryAxis(entry, matchedAxis)) {
+                return std::nullopt;
             }
+            if (!matchedAxis) {
+                continue;
+            }
+            const std::size_t axis = *matchedAxis;
+
+            if (++matchCounts[axis] != 1) {
+                return std::nullopt;
+            }
+
+            std::string_view callback;
+            if (!TryGetStringMember(
+                    entry,
+                    "callbackName",
+                    callback) ||
+                callback != kDoubleMorphCallback) {
+                return std::nullopt;
+            }
+
+            std::uint32_t sliderId = 0;
+            double position = 0.0;
+            if (!TryGetExactUIntMember(
+                    entry,
+                    "sliderID",
+                    sliderId) ||
+                !TryGetEntryPosition(entry, position)) {
+                return std::nullopt;
+            }
+
+            RE::GFxValue nativeData;
+            std::uint32_t exceptionCode = 0;
+            if (!InvokeGetSliderData(
+                    frame.movie,
+                    charGen,
+                    sliderId,
+                    position,
+                    nativeData,
+                    exceptionCode)) {
+                return std::nullopt;
+            }
+
+            std::uint32_t nativeType = 0;
+            std::uint32_t nativeIndex = 0;
+            std::uint32_t subType = 0;
+            if (!TryGetExactUIntMember(
+                    nativeData,
+                    "type",
+                    nativeType) ||
+                nativeType != kNativeDoubleMorphType ||
+                !TryGetExactUIntMember(
+                    nativeData,
+                    "index",
+                    nativeIndex) ||
+                nativeIndex != expectedIndices[axis] ||
+                !TryGetExactUIntMember(
+                    nativeData,
+                    "subType",
+                    subType) ||
+                subType != 0) {
+                return std::nullopt;
+            }
+
+            snapshot.axes[axis] = AxisRoute{
+                .visibleSliderId = sliderId,
+                .extendedIndex = nativeIndex
+            };
         }
 
         if (std::ranges::any_of(
@@ -1733,12 +1773,21 @@ namespace mps
                     npc,
                     std::addressof(keys[axis]),
                     std::addressof(outValues[axis]),
-                    std::addressof(outExceptionCode)) ||
-                !std::isfinite(outValues[axis]) ||
+                    std::addressof(outExceptionCode))) {
+                // An exception means the verified callable boundary no longer
+                // behaves like the audited ABI. Keep it disabled until the
+                // interface itself is explicitly replaced.
+                readbackGateState_ = GateState::Unavailable;
+                return false;
+            }
+
+            if (!std::isfinite(outValues[axis]) ||
                 outValues[axis] < -options_.readbackEpsilon ||
                 outValues[axis] >
                     1.0f + options_.readbackEpsilon) {
-                readbackGateState_ = GateState::Unavailable;
+                // A bad value faults the current route, but it is not proof
+                // that the process-wide vtable/ABI gate is wrong. A new menu
+                // session may safely retry through the still-verified slot.
                 return false;
             }
         }

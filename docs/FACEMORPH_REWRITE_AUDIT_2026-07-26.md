@@ -397,3 +397,43 @@ Pass conditions:
   MPS;
 - no `$` tokens once the external package encoding is corrected;
 - no edits or deployments to the read-only asset trees.
+
+## Implementation status — 2026-07-29
+
+The rewrite is implemented on branch `codex/facemorph-routing-rewrite`.
+
+- `FaceSliderRouter` is now the only production face-apply controller.
+- The old reload/replay/retry dispatcher, transition timers, global binding
+  cache, direct ValueMap writer, actor-update flush path, and their shared
+  globals have been removed.
+- The legacy fuzzy binding scorer and its diagnostic-only fallback were
+  removed; diagnostics cannot disagree with the router by selecting aliases.
+- The controller certifies exact labels, callbacks, visible IDs, native
+  extended indices, list fingerprint, and internal-list sex before dispatch.
+- The exact-label matching pass reads each entry's `text` and `name` at most
+  once and rejects conflicting labels.
+- Body and face share the same accepted 33 ms preview task; the router has no
+  second preview clock.
+- Dispatch/readback failures fault the current route instead of starting a
+  retry burst.
+- Diagnostic reads now go through the router's exact ABI and SEH gate. An
+  access violation disables that audited boundary, while a finite-range
+  anomaly faults only the current route/session.
+- A missing `RSM_Reinitialized` event can hold the transition gate for at most
+  1500 ms; certification then resumes with every exact proof still mandatory.
+- `mps_face_route_static_safety` now fails the host test suite if production
+  code reintroduces `ReloadSliders`, GFx `position` writes,
+  `requestUpdate`, direct `SetMorphValue`, or plugin-side direct face readback.
+
+Host verification completed after the cleanup:
+
+```text
+ModernPhysiqueSystem.dll: built successfully
+mps_tests: passed
+mps_face_route_static_safety: passed
+JavaScript syntax: passed
+git diff --check: passed
+```
+
+This is not an in-game pass. No DLL or asset was deployed while Mod Organizer
+was running. The male/female transition matrix above remains the release gate.

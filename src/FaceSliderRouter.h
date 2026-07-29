@@ -114,6 +114,13 @@ namespace mps
         [[nodiscard]] std::uint64_t RouteGeneration() const noexcept;
         [[nodiscard]] bool IsSessionOpen() const noexcept;
 
+        // Diagnostic read through the same exact-build ABI gate and SEH
+        // boundary used by dispatch verification. Never call FaceMorph
+        // directly from plugin diagnostics.
+        [[nodiscard]] bool TryReadCurrentValues(
+            RE::TESNPC* npc,
+            std::array<float, kFaceAxisCount>& outValues);
+
     private:
         struct DispatchAttemptToken
         {
