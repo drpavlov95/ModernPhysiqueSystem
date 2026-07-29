@@ -6,4 +6,5 @@ set(sources ${sources}
     src/core/MorphMath.cpp
     src/core/NormalMapCatalog.cpp
     src/core/BindingScore.cpp
+    src/core/FaceRouteState.cpp
 )

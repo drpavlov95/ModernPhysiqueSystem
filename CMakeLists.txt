@@ -132,6 +132,7 @@ if(MPS_BUILD_TESTS)
         src/core/MorphMath.cpp
         src/core/NormalMapCatalog.cpp
         src/core/BindingScore.cpp
+        src/core/FaceRouteState.cpp
     )
     set(MPS_TEST_SOURCES
         tests/cpp/test_main.cpp
@@ -140,6 +141,7 @@ if(MPS_BUILD_TESTS)
         tests/cpp/test_morphmath.cpp
         tests/cpp/test_normalmap.cpp
         tests/cpp/test_bindingscore.cpp
+        tests/cpp/test_faceroutestate.cpp
     )
     add_executable(mps_tests ${MPS_CORE_SOURCES} ${MPS_TEST_SOURCES})
     target_compile_features(mps_tests PRIVATE cxx_std_23)
