@@ -819,9 +819,19 @@ namespace mps
             if (snapshotExhausted_ &&
                 key &&
                 !controller_.IsCertified(*key)) {
-                ResetSnapshotBudget();
-                lastDiagnosticKey_.clear();
-                return true;
+                // Exhaustion may retain one candidate observation. A real
+                // lifecycle boundary must start a fresh route generation so
+                // pre-boundary and post-boundary samples can never combine
+                // into a false two-snapshot certification.
+                if (controller_.InvalidateCurrentRoute()) {
+                    observedRouteGeneration_ =
+                        controller_.RouteGeneration();
+                    ResetSnapshotBudget();
+                    nextPreviewAttempt_ = Clock::time_point{};
+                    lastDispatchAttempt_.reset();
+                    lastDiagnosticKey_.clear();
+                    return true;
+                }
             }
             return controller_.Status() != FaceRouteStatus::Closed &&
                    controller_.Status() != FaceRouteStatus::Faulted;
@@ -1815,11 +1825,13 @@ namespace mps
         for (std::size_t axis = 0;
              axis < kFaceAxisCount;
              ++axis) {
-            if (needsDispatch[axis] &&
-                std::abs(
+            // Verify the whole triplet. A misrouted native callback can hit
+            // the requested axis and corrupt another axis that was already at
+            // target; checking only needsDispatch would accept that state.
+            if (std::abs(
                     after[axis] -
                     plan.desired.values[axis]) >
-                    options_.readbackEpsilon) {
+                options_.readbackEpsilon) {
                 return false;
             }
         }

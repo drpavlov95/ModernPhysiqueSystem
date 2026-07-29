@@ -105,9 +105,9 @@ namespace mps
         [[nodiscard]] FaceRouterTickResult Tick(
             const FaceSliderFrame& frame);
 
-        // Cheap scheduler gate. Once a fail-closed probe/repair/dispatch has
-        // exhausted its bounded budget, this remains false until an explicit
-        // lifecycle invalidation or a new route visit makes work possible.
+        // Cheap scheduler gate. Snapshot exhaustion can be rearmed by an
+        // explicit lifecycle invalidation. A terminal probe/repair/dispatch
+        // failure remains closed until a new route key or menu session.
         [[nodiscard]] bool NeedsTick() const noexcept;
         [[nodiscard]] FaceRouteStatus Status() const noexcept;
         [[nodiscard]] std::uint64_t SessionGeneration() const noexcept;
