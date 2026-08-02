@@ -2,6 +2,7 @@
 
 #include "core/FaceRouteState.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <optional>
@@ -91,6 +92,16 @@ namespace mps
         // route became Ready again.
         [[nodiscard]] bool InvalidateRoute();
 
+        // Synchronize SKEE's process-global per-race slider map with the
+        // native list that RaceMenu is about to expose for this sex. This is
+        // called synchronously from RaceMenu.SetSliders, before GetSliderData
+        // builds any UI descriptors. The private SKEE call remains protected
+        // by the exact module/version/signature gate in TryExactRepair.
+        [[nodiscard]] bool PrepareMapForCurrentSex(
+            RE::GFxMovieView* movie,
+            RE::TESRace* race,
+            FaceSex sex);
+
         // Always updates the latest desired target, including while throttled
         // or while the route is unavailable. Zero means invalid input/thread.
         [[nodiscard]] std::uint64_t SubmitTarget(
@@ -158,9 +169,10 @@ namespace mps
         [[nodiscard]] std::optional<RouteSnapshot> BuildSnapshot(
             const FaceSliderFrame& frame,
             RE::GFxValue& charGen);
-        [[nodiscard]] std::optional<FaceSex> ProbeInternalMapSex(
+        [[nodiscard]] bool ValidatePreparedAxes(
             const FaceSliderFrame& frame,
-            RE::GFxValue& charGen);
+            RE::GFxValue& charGen,
+            const RouteSnapshot& snapshot);
         [[nodiscard]] bool ResolveCharGen(
             RE::GFxMovieView* movie,
             RE::GFxValue& outCharGen) const;
@@ -195,6 +207,10 @@ namespace mps
         std::uint8_t snapshotAttempts_ = 0;
         Clock::time_point nextSnapshotAttempt_{};
         bool snapshotExhausted_ = false;
+        std::atomic<bool> preflightProofValid_{ false };
+        std::optional<RouteKey> preparedMapKey_;
+        RE::GFxMovieView* preparedMapMovie_ = nullptr;
+        std::string lastSnapshotFailure_;
 
         GateState readbackGateState_ = GateState::Unchecked;
         GateState repairGateState_ = GateState::Unchecked;

@@ -22,6 +22,7 @@
 #include <chrono>
 #include <format>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <source_location>
 #include <unordered_set>
@@ -1290,6 +1291,42 @@ public:
     }
 };
 
+class PrepareFaceMapForCurrentSexHandler : public RE::GFxFunctionHandler
+{
+public:
+    void Call(Params& a_params) override
+    {
+        // Interface exchange is intentionally kept out of this synchronous
+        // SetSliders callback. Normal plugin/menu lifecycle points acquire and
+        // cache FaceMorph before RaceMenu begins constructing descriptors.
+        // Always enter the router, even with invalid inputs: it atomically
+        // revokes any older proof before it validates this boundary.
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        auto* actorBase = player ? player->GetActorBase() : nullptr;
+        auto* race = actorBase ? actorBase->GetRace() : nullptr;
+        const auto rawSex = actorBase ?
+            static_cast<std::uint8_t>(actorBase->GetSex()) :
+            std::numeric_limits<std::uint8_t>::max();
+        const bool ready =
+            g_faceSliderRouter.PrepareMapForCurrentSex(
+                static_cast<RE::GFxMovieView*>(a_params.movie),
+                race,
+                static_cast<mps::FaceSex>(rawSex));
+
+        if (!ready) {
+            spdlog::error(
+                "PrepareFaceMapForCurrentSex failed cachedFace={} race={} sex={}",
+                g_faceMorphInterface ? 1 : 0,
+                race ? race->GetFormID() : 0,
+                static_cast<unsigned>(rawSex));
+        }
+
+        if (a_params.retVal) {
+            a_params.retVal->SetBoolean(ready);
+        }
+    }
+};
+
 class SetWeightSyncHandler : public RE::GFxFunctionHandler
 {
 public:
@@ -1708,8 +1745,8 @@ mps::FaceRouterTickResult TickFaceSliderRouter(bool force)
 
         // RSM_Reinitialized is the normal release signal, but another mod or
         // a malformed SWF must not leave the face route frozen forever. The
-        // router's exact double-snapshot, native-index and sentinel checks
-        // remain mandatory after this bounded fallback.
+        // router's exact double-snapshot, dynamic native-index and prepared-
+        // map validation checks remain mandatory after this bounded fallback.
         g_faceRouterAwaitingRsmRebuild = false;
         g_faceRouterRebuildGateDeadlineMs = 0;
         spdlog::warn(
@@ -2686,6 +2723,19 @@ bool RegisterScaleform(RE::GFxMovieView* a_view, RE::GFxValue* a_root)
         return false;
     }
 
+    RE::GFxValue prepareFaceMapCallback;
+    a_view->CreateFunction(
+        std::addressof(prepareFaceMapCallback),
+        new PrepareFaceMapForCurrentSexHandler());
+    if (!a_root->SetMember(
+            kScaleformPrepareFaceMapFunction,
+            prepareFaceMapCallback)) {
+        spdlog::error(
+            "Failed to register Scaleform function {}",
+            kScaleformPrepareFaceMapFunction);
+        return false;
+    }
+
     RE::GFxValue categoryCallback;
     a_view->CreateFunction(std::addressof(categoryCallback), new SetActiveCategoryHandler());
     if (!a_root->SetMember(kScaleformSetCategoryFunction, categoryCallback)) {
@@ -2708,8 +2758,9 @@ bool RegisterScaleform(RE::GFxMovieView* a_view, RE::GFxValue* a_root)
     }
 
     spdlog::info(
-        "Registered Scaleform bridge {}.{} / {} / {}",
+        "Registered Scaleform bridge {}.{} / {} / {} / {}",
         kScaleformPluginName,
+        kScaleformPrepareFaceMapFunction,
         kScaleformSetCategoryFunction,
         kScaleformSetWeightFunction,
         kScaleformGetWeightFunction);

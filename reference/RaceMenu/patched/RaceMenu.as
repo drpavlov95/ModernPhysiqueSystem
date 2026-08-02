@@ -654,6 +654,11 @@ class RaceMenu extends MovieClip
       // The old GFx list can coexist briefly with the new native sex/race.
       // Never drive its Weight row while that list is being replaced.
       this.suspendPhysiqueWeightSyncForRebuild();
+      var faceMapReady = false;
+      if(_global.skse && _global.skse.plugins && _global.skse.plugins.ModernPhysiqueSystem && _global.skse.plugins.ModernPhysiqueSystem.PrepareFaceMapForCurrentSex)
+      {
+         faceMapReady = Boolean(_global.skse.plugins.ModernPhysiqueSystem.PrepareFaceMapForCurrentSex());
+      }
       var _loc4_;
       if(this.itemList.entryList.length > 0)
       {
@@ -706,6 +711,10 @@ class RaceMenu extends MovieClip
          if(_loc7_.callbackName == "ChangeWeight")
          {
             _loc7_.interval = 0.01;
+         }
+         if(!faceMapReady && _loc7_.callbackName == "ChangeDoubleMorph")
+         {
+            _loc7_.enabled = false;
          }
          if(_global.skse.plugins.CharGen.GetSliderData)
          {

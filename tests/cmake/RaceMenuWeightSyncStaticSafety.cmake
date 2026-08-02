@@ -99,6 +99,70 @@ if(set_sliders_shared_timer_offset GREATER -1)
     )
 endif()
 
+# SKEE keeps one process-global face-slider map per race. The native bridge
+# must rebuild that map for the player's current sex before RaceMenu asks
+# CharGen to describe even the first slider. If the exact-gated bridge cannot
+# do that, fail closed only for extended ChangeDoubleMorph entries; ordinary
+# RaceMenu sliders must remain available.
+set(
+    face_map_preflight_fragment
+    "varfaceMapReady=false;if(_global.skse&&_global.skse.plugins&&_global.skse.plugins.ModernPhysiqueSystem&&_global.skse.plugins.ModernPhysiqueSystem.PrepareFaceMapForCurrentSex){faceMapReady=Boolean(_global.skse.plugins.ModernPhysiqueSystem.PrepareFaceMapForCurrentSex());}"
+)
+set(
+    face_map_failure_fragment
+    "if(!faceMapReady&&_loc7_.callbackName==\"ChangeDoubleMorph\"){_loc7_.enabled=false;}"
+)
+string(
+    FIND
+    "${set_sliders_source}"
+    "${face_map_preflight_fragment}"
+    face_map_preflight_offset
+)
+string(
+    FIND
+    "${set_sliders_source}"
+    "GetSliderData"
+    first_get_slider_data_offset
+)
+if(
+    face_map_preflight_offset EQUAL -1
+    OR first_get_slider_data_offset EQUAL -1
+    OR face_map_preflight_offset GREATER_EQUAL first_get_slider_data_offset
+)
+    message(
+        FATAL_ERROR
+        "RaceMenu SetSliders must prepare the current-sex face map before its first GetSliderData use"
+    )
+endif()
+
+string(
+    FIND
+    "${set_sliders_source}"
+    "${face_map_failure_fragment}"
+    face_map_failure_offset
+)
+if(
+    face_map_failure_offset EQUAL -1
+    OR face_map_failure_offset GREATER_EQUAL first_get_slider_data_offset
+)
+    message(
+        FATAL_ERROR
+        "RaceMenu face-map failure must disable every ChangeDoubleMorph slider without trusting GetSliderData"
+    )
+endif()
+
+# The exact fragment above is the sole negative use of faceMapReady. This
+# prevents a future broad fallback from disabling Weight, Sex, Race, tint, or
+# other native sliders when the private SKEE preflight is unavailable.
+string(REGEX MATCHALL "!faceMapReady" face_map_failure_uses "${set_sliders_source}")
+list(LENGTH face_map_failure_uses face_map_failure_use_count)
+if(NOT face_map_failure_use_count EQUAL 1)
+    message(
+        FATAL_ERROR
+        "RaceMenu SetSliders must have exactly one narrowly scoped face-map failure gate"
+    )
+endif()
+
 string(FIND "${compact_source}" "functionSetMakeup(" set_makeup_offset)
 if(set_makeup_offset EQUAL -1 OR set_makeup_offset LESS_EQUAL initialize_sliders_offset)
     message(FATAL_ERROR "RaceMenu InitializeSliders/SetMakeup boundary is missing")
@@ -251,11 +315,11 @@ string(SHA256 racemenu_source_sha256 "${normalized_racemenu_source}")
 file(SHA256 "${MPS_RACEMENU_SWF}" racemenu_swf_sha256)
 set(
     expected_racemenu_source_sha256
-    "fb654a80cc18b0083443253a33c9a5cab8c898fd6f3f94410290a24cd84aa052"
+    "fc04a0ac1afaa2669902228569c5291cfdd904fe4f3f6bbe15a19c4c94e250f2"
 )
 set(
     expected_racemenu_swf_sha256
-    "9136f6d50d9ec952f926acf01b4cfd2c221bccdb4342754220231956c26f514b"
+    "fa6de41dbb9fbefcef7f05ceace53c52822a8e1b8b98cf6d5f42b951d1e4f4e8"
 )
 if(NOT racemenu_source_sha256 STREQUAL expected_racemenu_source_sha256)
     message(

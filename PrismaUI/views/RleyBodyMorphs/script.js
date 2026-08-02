@@ -10,8 +10,16 @@ const snapToggleEl = document.getElementById("snapToggle");
 const center = { x: canvas.width / 2, y: canvas.height / 2 };
 const radius = 138;
 const anchorRadius = 6;
+const MOUSE_POINTER_ID = -1;
+const supportsCapturedPointerEvents =
+    typeof window.PointerEvent !== "undefined" &&
+    typeof canvas.setPointerCapture === "function" &&
+    typeof canvas.hasPointerCapture === "function" &&
+    typeof canvas.releasePointerCapture === "function";
 
-let dragging = false;
+let activePointerId = null;
+let pointerStartPos = null;
+let pointerMoved = false;
 let knob = { x: center.x, y: center.y };
 
 let morphPreviewTimeout = null;
@@ -21,6 +29,7 @@ let lastPreviewSendTime = 0;
 const MORPH_PREVIEW_INTERVAL = 48;
 const MORPH_COMMIT_DELAY = 120;
 const MORPH_DELTA_THRESHOLD = 0.01;
+const DRAG_START_DISTANCE = 2;
 
 let pendingMorphValues = { thin: 0, muscular: 0, fat: 0 };
 let lastPreviewSentValues = null;
@@ -207,7 +216,9 @@ function markSlidingActivity() {
     }
 
     stopSlidingTimeout = setTimeout(() => {
-        if (dragging) {
+        stopSlidingTimeout = null;
+
+        if (activePointerId !== null) {
             setSnapLineHighlight(null, "off");
         }
     }, STOP_SLIDING_DELAY);
@@ -756,11 +767,14 @@ function draw() {
     drawSelectionDot();
 }
 
-function getMousePos(event) {
+function getCanvasPos(event) {
     const rect = canvas.getBoundingClientRect();
+    const scaleX = rect.width > 0 ? canvas.width / rect.width : 1;
+    const scaleY = rect.height > 0 ? canvas.height / rect.height : 1;
+
     return {
-        x: event.clientX - rect.left,
-        y: event.clientY - rect.top
+        x: (event.clientX - rect.left) * scaleX,
+        y: (event.clientY - rect.top) * scaleY
     };
 }
 
@@ -898,48 +912,205 @@ function setKnobFromPoint(x, y, options = {}) {
     scheduleMorphUpdate(options);
 }
 
-function finishDrag() {
-    if (!dragging) return;
-    dragging = false;
+function finishPointerInteraction(event) {
+    if (activePointerId === null) return;
+    if (event && typeof event.pointerId === "number" && event.pointerId !== activePointerId) return;
+
+    if (event) {
+        event.preventDefault();
+        event.stopPropagation();
+    }
+
+    const pointerId = activePointerId;
+    const wasMoved = pointerMoved;
+
+    // Clear first: releasePointerCapture dispatches lostpointercapture, so the
+    // finish path must already be inert when that event arrives.
+    activePointerId = null;
+    pointerStartPos = null;
+    pointerMoved = false;
+
+    detachPointerFallbackListeners();
+    detachMouseFallbackListeners();
 
     if (stopSlidingTimeout !== null) {
         clearTimeout(stopSlidingTimeout);
         stopSlidingTimeout = null;
     }
 
-    flushPreviewNow();
+    if (supportsCapturedPointerEvents &&
+        pointerId !== MOUSE_POINTER_ID &&
+        canvas.hasPointerCapture(pointerId)) {
+        try {
+            canvas.releasePointerCapture(pointerId);
+        } catch (_) {
+            // Capture can already be gone after a native cancel or focus loss.
+        }
+    }
+
+    if (wasMoved) {
+        flushPreviewNow();
+    } else {
+        cancelPendingPreview();
+    }
+
     flushCommitNow();
 
     setSnapLineHighlight(null, "off");
 }
 
-function handleDragMove(event) {
-    const rect = canvas.getBoundingClientRect();
-    setKnobFromPoint(event.clientX - rect.left, event.clientY - rect.top);
+function updatePointerPosition(event, preview) {
+    const pos = getCanvasPos(event);
+
+    if (pointerStartPos &&
+        length(pos.x - pointerStartPos.x, pos.y - pointerStartPos.y) >= DRAG_START_DISTANCE) {
+        pointerMoved = true;
+    }
+
+    if (pointerMoved) {
+        setKnobFromPoint(pos.x, pos.y, { preview });
+    }
 }
 
-function handleDragEnd() {
-    document.removeEventListener("mousemove", handleDragMove);
-    document.removeEventListener("mouseup", handleDragEnd);
-    finishDrag();
-}
-
-canvas.addEventListener("mousedown", (event) => {
-    if (event.button !== 0) return;
-
-    if (dragging) {
-        document.removeEventListener("mousemove", handleDragMove);
-        document.removeEventListener("mouseup", handleDragEnd);
-        dragging = false;
+function beginPointerInteraction(event, pointerId) {
+    if (activePointerId !== null) {
+        finishPointerInteraction();
     }
 
     event.preventDefault();
     event.stopPropagation();
 
-    const pos = getMousePos(event);
-    setKnobFromPoint(pos.x, pos.y, { preview: false });
-    flushCommitNow();
-    setSnapLineHighlight(null, "off");
+    activePointerId = pointerId;
+    pointerStartPos = getCanvasPos(event);
+    pointerMoved = false;
+
+    setKnobFromPoint(pointerStartPos.x, pointerStartPos.y, { preview: false });
+}
+
+function handlePointerDown(event) {
+    if (event.button !== 0) return;
+    if (typeof event.isPrimary === "boolean" && !event.isPrimary) return;
+
+    beginPointerInteraction(event, event.pointerId);
+
+    try {
+        canvas.setPointerCapture(event.pointerId);
+        if (!canvas.hasPointerCapture(event.pointerId)) {
+            attachPointerFallbackListeners();
+        }
+    } catch (_) {
+        attachPointerFallbackListeners();
+    }
+}
+
+function handlePointerMove(event) {
+    if (event.pointerId !== activePointerId) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (typeof event.buttons === "number" && (event.buttons & 1) === 0) {
+        updatePointerPosition(event, false);
+        finishPointerInteraction(event);
+        return;
+    }
+
+    updatePointerPosition(event, true);
+}
+
+function handlePointerUp(event) {
+    if (event.pointerId !== activePointerId) return;
+
+    updatePointerPosition(event, false);
+    finishPointerInteraction(event);
+}
+
+function attachPointerFallbackListeners() {
+    window.addEventListener("pointermove", handlePointerMove, true);
+    window.addEventListener("pointerup", handlePointerUp, true);
+    window.addEventListener("pointercancel", finishPointerInteraction, true);
+}
+
+function detachPointerFallbackListeners() {
+    window.removeEventListener("pointermove", handlePointerMove, true);
+    window.removeEventListener("pointerup", handlePointerUp, true);
+    window.removeEventListener("pointercancel", finishPointerInteraction, true);
+}
+
+function attachMouseFallbackListeners() {
+    window.addEventListener("mousemove", handleMouseMove, true);
+    window.addEventListener("mouseup", handleMouseUp, true);
+}
+
+function detachMouseFallbackListeners() {
+    window.removeEventListener("mousemove", handleMouseMove, true);
+    window.removeEventListener("mouseup", handleMouseUp, true);
+}
+
+function handleMouseDown(event) {
+    if (event.button !== 0) return;
+
+    // Some embedded hosts expose PointerEvent but inject only MouseEvent. If a
+    // real pointerdown already started the gesture, consume its compatibility
+    // mousedown; otherwise this becomes the runtime mouse fallback.
+    if (activePointerId !== null && activePointerId !== MOUSE_POINTER_ID) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+    }
+
+    beginPointerInteraction(event, MOUSE_POINTER_ID);
+    attachMouseFallbackListeners();
+}
+
+function handleMouseMove(event) {
+    if (activePointerId !== MOUSE_POINTER_ID) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (typeof event.buttons === "number" && (event.buttons & 1) === 0) {
+        updatePointerPosition(event, false);
+        finishPointerInteraction(event);
+        return;
+    }
+
+    updatePointerPosition(event, true);
+}
+
+function handleMouseUp(event) {
+    if (activePointerId !== MOUSE_POINTER_ID) return;
+
+    if (event.button !== 0 &&
+        (typeof event.buttons !== "number" || (event.buttons & 1) !== 0)) {
+        return;
+    }
+
+    updatePointerPosition(event, false);
+    finishPointerInteraction(event);
+}
+
+function handleMouseLeave(event) {
+    if (activePointerId !== MOUSE_POINTER_ID) return;
+
+    updatePointerPosition(event, false);
+    finishPointerInteraction(event);
+}
+
+if (supportsCapturedPointerEvents) {
+    canvas.addEventListener("pointerdown", handlePointerDown);
+    canvas.addEventListener("pointermove", handlePointerMove);
+    canvas.addEventListener("pointerup", handlePointerUp);
+    canvas.addEventListener("pointercancel", finishPointerInteraction);
+    canvas.addEventListener("lostpointercapture", finishPointerInteraction);
+}
+
+canvas.addEventListener("mousedown", handleMouseDown);
+canvas.addEventListener("mouseleave", handleMouseLeave);
+
+canvas.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
 });
 
 canvas.addEventListener("contextmenu", (event) => {
@@ -948,9 +1119,7 @@ canvas.addEventListener("contextmenu", (event) => {
 });
 
 window.addEventListener("blur", () => {
-    document.removeEventListener("mousemove", handleDragMove);
-    document.removeEventListener("mouseup", handleDragEnd);
-    finishDrag();
+    finishPointerInteraction();
 });
 
 resetButton.addEventListener("click", () => {

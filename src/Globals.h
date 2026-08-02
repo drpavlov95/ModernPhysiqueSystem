@@ -46,6 +46,8 @@ constexpr const char* kScaleformPluginName = "ModernPhysiqueSystem";
 constexpr const char* kScaleformSetCategoryFunction = "SetActiveCategory";
 constexpr const char* kScaleformSetWeightFunction = "SetWeightSync";
 constexpr const char* kScaleformGetWeightFunction = "GetWeightSync";
+constexpr const char* kScaleformPrepareFaceMapFunction =
+    "PrepareFaceMapForCurrentSex";
 constexpr std::uint32_t kBodyCategoryFlag = 4;
 
 constexpr float kMorphApplyDeltaThreshold = 0.001f;

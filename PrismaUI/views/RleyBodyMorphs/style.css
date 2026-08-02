@@ -53,6 +53,8 @@ canvas {
     margin: 0 auto 14px;
     border-radius: 12px;
     background: transparent;
+    touch-action: none;
+    user-select: none;
 }
 
 .readout {

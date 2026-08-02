@@ -11,6 +11,7 @@
 #include <bit>
 #include <cmath>
 #include <filesystem>
+#include <format>
 #include <limits>
 #include <string_view>
 #include <vector>
@@ -28,14 +29,6 @@ namespace mps
             "FACE_RLYHeavy"
         };
 
-        constexpr std::array<std::uint32_t, kFaceAxisCount>
-            kExpectedMaleIndices{ 379, 378, 377 };
-        constexpr std::array<std::uint32_t, kFaceAxisCount>
-            kExpectedFemaleIndices{ 358, 357, 356 };
-
-        constexpr std::uint32_t kSentinelIndex15 = 215;
-        constexpr std::uint32_t kSentinelIndex17 = 217;
-        constexpr std::uint32_t kSentinelIndex258 = 458;
         constexpr std::string_view kDoubleMorphCallback =
             "ChangeDoubleMorph";
 
@@ -47,7 +40,10 @@ namespace mps
         constexpr std::size_t kExpectedSkeeImageSize = 0x1E4000;
         constexpr std::uint32_t kExpectedSkeeTimestamp = 0x5F799CB1;
         constexpr std::uint32_t kNativeDoubleMorphType = 2;
-        constexpr std::uint8_t kMaxSnapshotAttempts = 12;
+        // The native list can finish its RaceMenu lifecycle around the 500 ms
+        // InitializeSliders boundary. Keep the fast 16 ms happy path while
+        // allowing a failed route to remain observable beyond that boundary.
+        constexpr std::uint8_t kMaxSnapshotAttempts = 40;
         constexpr std::chrono::milliseconds kSnapshotRetryInterval{ 16 };
 
         constexpr std::array<std::uint8_t, 30>
@@ -148,6 +144,21 @@ namespace mps
             }
 
             outValue = static_cast<std::uint32_t>(value);
+            return true;
+        }
+
+        [[nodiscard]] bool TryGetBoolMember(
+            RE::GFxValue& object,
+            const char* name,
+            bool& outValue)
+        {
+            RE::GFxValue member;
+            if (!object.GetMember(name, std::addressof(member)) ||
+                !member.IsBool()) {
+                return false;
+            }
+
+            outValue = member.GetBool();
             return true;
         }
 
@@ -793,6 +804,11 @@ namespace mps
         repairGateState_ = GateState::Unchecked;
         createSliderList_ = nullptr;
         skeeModuleBase_ = nullptr;
+        preflightProofValid_.store(
+            false,
+            std::memory_order_release);
+        preparedMapKey_.reset();
+        preparedMapMovie_ = nullptr;
         return true;
     }
 
@@ -826,6 +842,11 @@ namespace mps
         controller_.CloseSession();
         sessionOpen_ = false;
         ResetSessionEphemera();
+        preflightProofValid_.store(
+            false,
+            std::memory_order_release);
+        preparedMapKey_.reset();
+        preparedMapMovie_ = nullptr;
         spdlog::info("FaceRouter session closed");
         return true;
     }
@@ -871,6 +892,78 @@ namespace mps
             lastDispatchAttempt_.reset();
         }
         return invalidated;
+    }
+
+    bool FaceSliderRouter::PrepareMapForCurrentSex(
+        RE::GFxMovieView* movie,
+        RE::TESRace* race,
+        FaceSex sex)
+    {
+        // This atomic revocation is intentionally safe even if an unexpected
+        // host invokes the GFx bridge off the already-bound game thread. Tick
+        // cannot reuse an older proof while this SetSliders call fails.
+        preflightProofValid_.store(
+            false,
+            std::memory_order_release);
+        if (!CheckThread("PrepareMapForCurrentSex", true)) {
+            return false;
+        }
+
+        // SetSliders is a native/GFx list-generation boundary even if the
+        // private repair cannot run. Revoke the old route before attempting
+        // anything so a failure can never leave old IDs dispatchable while
+        // the new list is being built.
+        preparedMapKey_.reset();
+        preparedMapMovie_ = nullptr;
+        lastSnapshotFailure_ = "setsliders_preflight_started";
+        if (sessionOpen_ && controller_.CurrentKey()) {
+            (void)controller_.InvalidateCurrentRoute();
+            observedRouteGeneration_ = controller_.RouteGeneration();
+        }
+        ResetSnapshotBudget();
+        nextPreviewAttempt_ = Clock::time_point{};
+        lastDispatchAttempt_.reset();
+        lastDiagnosticKey_.clear();
+
+        if (!movie ||
+            !race ||
+            race->GetFormID() == 0 ||
+            (sex != FaceSex::Male && sex != FaceSex::Female)) {
+            lastSnapshotFailure_ =
+                "setsliders_preflight_invalid_movie_race_or_sex";
+            preparedMapKey_.reset();
+            preparedMapMovie_ = nullptr;
+            return false;
+        }
+
+        const RouteKey key{
+            .raceFormId = race->GetFormID(),
+            .sex = sex
+        };
+        if (!TryExactRepair(race, sex)) {
+            lastSnapshotFailure_ =
+                "setsliders_preflight_exact_repair_failed";
+            preparedMapKey_.reset();
+            preparedMapMovie_ = nullptr;
+            spdlog::error(
+                "FaceRouter SetSliders preflight failed sex={} race={:08X}",
+                sex == FaceSex::Male ? "male" : "female",
+                key.raceFormId);
+            return false;
+        }
+
+        preparedMapKey_ = key;
+        preparedMapMovie_ = movie;
+        preflightProofValid_.store(
+            true,
+            std::memory_order_release);
+        lastSnapshotFailure_.clear();
+
+        spdlog::info(
+            "FaceRouter SetSliders preflight ready sex={} race={:08X}",
+            sex == FaceSex::Male ? "male" : "female",
+            key.raceFormId);
+        return true;
     }
 
     std::uint64_t FaceSliderRouter::SubmitTarget(
@@ -984,13 +1077,37 @@ namespace mps
             }
 
             snapshotExhausted_ = true;
+            const std::string diagnostic = std::format(
+                "FaceRouter snapshot budget exhausted; waiting for a lifecycle boundary lastFailure={}",
+                lastSnapshotFailure_.empty() ?
+                    "unknown" :
+                    lastSnapshotFailure_);
             LogOnce(
                 "snapshot_exhausted_" +
                     std::to_string(
                         controller_.RouteGeneration()),
-                "FaceRouter snapshot budget exhausted; waiting for a lifecycle boundary",
+                diagnostic,
                 true);
         };
+
+        // Only the patched SetSliders boundary can authorize a route. The UI
+        // disables extended double morphs when this proof is missing, and the
+        // native side independently refuses to observe or dispatch them.
+        if (!preflightProofValid_.load(
+                std::memory_order_acquire) ||
+            !preparedMapKey_ ||
+            *preparedMapKey_ != key ||
+            preparedMapMovie_ != frame.movie) {
+            lastSnapshotFailure_ =
+                "successful_setsliders_preflight_missing_for_route";
+            (void)controller_.Observe(key, RouteSnapshot{});
+            finishFailedSnapshotAttempt();
+            LogOnce(
+                "preflight_missing_" +
+                    std::to_string(controller_.RouteGeneration()),
+                "FaceRouter awaiting successful SetSliders preflight");
+            return FaceRouterTickResult::AwaitingSnapshot;
+        }
 
         RE::GFxValue charGen;
         if (!ResolveCharGen(frame.movie, charGen)) {
@@ -1017,18 +1134,23 @@ namespace mps
         if (!controller_.IsCertified(key)) {
             const auto snapshot =
                 BuildSnapshot(frame, charGen);
-                if (!snapshot) {
-                    (void)controller_.Observe(
-                        key,
-                        RouteSnapshot{});
+            if (!snapshot) {
+                (void)controller_.Observe(
+                    key,
+                    RouteSnapshot{});
+            }
+            if (!snapshot ||
+                !controller_.Observe(key, *snapshot)) {
+                if (snapshot) {
+                    lastSnapshotFailure_ = std::format(
+                        "valid_snapshot_waiting_for_identical_repeat fingerprint=0x{:016X}",
+                        snapshot->sourceFingerprint);
                 }
-                if (!snapshot ||
-                    !controller_.Observe(key, *snapshot)) {
-                    finishFailedSnapshotAttempt();
-                    LogOnce(
-                        "snapshot_wait_" +
-                            std::to_string(
-                            controller_.RouteGeneration()),
+                finishFailedSnapshotAttempt();
+                LogOnce(
+                    "snapshot_wait_" +
+                        std::to_string(
+                        controller_.RouteGeneration()),
                     "FaceRouter awaiting two identical exact snapshots");
                 return FaceRouterTickResult::AwaitingSnapshot;
             }
@@ -1041,44 +1163,14 @@ namespace mps
                 return FaceRouterTickResult::AwaitingSnapshot;
             }
 
-            const auto observedSex =
-                ProbeInternalMapSex(frame, charGen);
-            if (observedSex) {
-                (void)controller_.ObserveInternalMapSex(
-                    key,
-                    certified->sourceFingerprint,
-                    *observedSex);
-            } else {
+            // Repeat the exact-gated repair at certification time. The first
+            // call made GetSliderData safe while SetSliders built descriptors;
+            // this second call proves the process-global race map immediately
+            // before validation and dispatch, so a key-only proof cannot age.
+            if (!TryExactRepair(frame.race, frame.sex)) {
                 (void)controller_.ObserveUnknownInternalMap(
                     key,
                     certified->sourceFingerprint);
-            }
-        }
-
-        if (controller_.RepairRequestPending()) {
-            const auto repairRequest =
-                controller_.ConsumeRepairRequest();
-            if (!repairRequest) {
-                return FaceRouterTickResult::AwaitingMapAlignment;
-            }
-
-            const bool repaired =
-                TryExactRepair(frame.race, frame.sex);
-            const auto observedSex = repaired ?
-                ProbeInternalMapSex(frame, charGen) :
-                std::optional<FaceSex>{};
-            if (observedSex) {
-                (void)controller_.ObserveInternalMapSex(
-                    key,
-                    repairRequest->sourceFingerprint,
-                    *observedSex);
-            } else {
-                (void)controller_.ObserveUnknownInternalMap(
-                    key,
-                    repairRequest->sourceFingerprint);
-            }
-
-            if (!repaired) {
                 LogOnce(
                     "repair_unavailable_" +
                         std::to_string(
@@ -1086,9 +1178,43 @@ namespace mps
                         "_" +
                         std::to_string(
                             controller_.RouteGeneration()),
-                    "FaceRouter exact SKEE repair unavailable; face route remains closed");
+                    "FaceRouter exact SKEE repair unavailable at certification; face route remains closed",
+                    true);
                 return FaceRouterTickResult::RepairUnavailable;
             }
+
+            if (!ValidatePreparedAxes(
+                    frame,
+                    charGen,
+                    *certified)) {
+                const std::string validationFailure =
+                    lastSnapshotFailure_.empty() ?
+                        "unknown" :
+                        lastSnapshotFailure_;
+
+                // GetSliderData can be transient during the 500 ms native/UI
+                // settle. Revoke only this observation and retry through the
+                // same bounded snapshot budget instead of latching a single
+                // failed read for the whole menu session.
+                (void)controller_.Observe(
+                    key,
+                    RouteSnapshot{});
+                lastSnapshotFailure_ = validationFailure;
+                finishFailedSnapshotAttempt();
+                LogOnce(
+                    "prepared_axis_validation_failed_" +
+                        std::to_string(
+                            controller_.RouteGeneration()),
+                    std::format(
+                        "FaceRouter prepared-map validation will retry reason={}",
+                        validationFailure));
+                return FaceRouterTickResult::AwaitingSnapshot;
+            }
+
+            (void)controller_.ObserveInternalMapSex(
+                key,
+                certified->sourceFingerprint,
+                frame.sex);
         }
 
         if (!controller_.CanDispatchExactCurrentRoute()) {
@@ -1174,8 +1300,7 @@ namespace mps
                    Clock::now() >= nextSnapshotAttempt_;
         }
 
-        if (controller_.MapProbePending() ||
-            controller_.RepairRequestPending()) {
+        if (controller_.MapProbePending()) {
             return true;
         }
 
@@ -1279,6 +1404,7 @@ namespace mps
         nextPreviewAttempt_ = Clock::time_point{};
         lastDispatchAttempt_.reset();
         lastDiagnosticKey_.clear();
+        lastSnapshotFailure_.clear();
     }
 
     void FaceSliderRouter::ResetSnapshotBudget() noexcept
@@ -1336,17 +1462,20 @@ namespace mps
             const FaceSliderFrame& frame,
             RE::GFxValue& charGen)
     {
+        lastSnapshotFailure_.clear();
+        const auto fail = [&](std::string reason)
+            -> std::optional<RouteSnapshot> {
+            lastSnapshotFailure_ = std::move(reason);
+            return std::nullopt;
+        };
+
         RouteSnapshot snapshot;
         if (!HashEntryList(
                 *frame.entryList,
                 snapshot.sourceFingerprint)) {
-            return std::nullopt;
+            return fail("entry_list_hash_failed");
         }
 
-        const auto& expectedIndices =
-            frame.sex == FaceSex::Male ?
-                kExpectedMaleIndices :
-                kExpectedFemaleIndices;
         std::array<std::uint8_t, kFaceAxisCount> matchCounts{};
 
         const std::uint32_t count =
@@ -1364,7 +1493,9 @@ namespace mps
 
             std::optional<std::size_t> matchedAxis;
             if (!TryFindEntryAxis(entry, matchedAxis)) {
-                return std::nullopt;
+                return fail(std::format(
+                    "axis_label_conflict entry={}",
+                    entryIndex));
             }
             if (!matchedAxis) {
                 continue;
@@ -1372,7 +1503,10 @@ namespace mps
             const std::size_t axis = *matchedAxis;
 
             if (++matchCounts[axis] != 1) {
-                return std::nullopt;
+                return fail(std::format(
+                    "duplicate_axis axis={} entry={}",
+                    kAxisTokens[axis],
+                    entryIndex));
             }
 
             std::string_view callback;
@@ -1381,17 +1515,28 @@ namespace mps
                     "callbackName",
                     callback) ||
                 callback != kDoubleMorphCallback) {
-                return std::nullopt;
+                return fail(std::format(
+                    "callback_mismatch axis={} observed={}",
+                    kAxisTokens[axis],
+                    callback.empty() ? "<missing>" : callback));
             }
 
             std::uint32_t sliderId = 0;
             double position = 0.0;
+            bool enabled = false;
             if (!TryGetExactUIntMember(
                     entry,
                     "sliderID",
                     sliderId) ||
-                !TryGetEntryPosition(entry, position)) {
-                return std::nullopt;
+                !TryGetEntryPosition(entry, position) ||
+                !TryGetBoolMember(
+                    entry,
+                    "enabled",
+                    enabled) ||
+                !enabled) {
+                return fail(std::format(
+                    "slider_identity_or_enabled_invalid axis={}",
+                    kAxisTokens[axis]));
             }
 
             RE::GFxValue nativeData;
@@ -1403,28 +1548,42 @@ namespace mps
                     position,
                     nativeData,
                     exceptionCode)) {
-                return std::nullopt;
+                return fail(std::format(
+                    "get_slider_data_failed axis={} sliderId={} exception=0x{:08X}",
+                    kAxisTokens[axis],
+                    sliderId,
+                    exceptionCode));
             }
 
             std::uint32_t nativeType = 0;
             std::uint32_t nativeIndex = 0;
-            std::uint32_t subType = 0;
             if (!TryGetExactUIntMember(
                     nativeData,
                     "type",
-                    nativeType) ||
-                nativeType != kNativeDoubleMorphType ||
-                !TryGetExactUIntMember(
+                    nativeType)) {
+                return fail(std::format(
+                    "native_type_missing axis={} sliderId={}",
+                    kAxisTokens[axis],
+                    sliderId));
+            }
+            if (!TryGetExactUIntMember(
                     nativeData,
                     "index",
-                    nativeIndex) ||
-                nativeIndex != expectedIndices[axis] ||
-                !TryGetExactUIntMember(
-                    nativeData,
-                    "subType",
-                    subType) ||
-                subType != 0) {
-                return std::nullopt;
+                    nativeIndex)) {
+                return fail(std::format(
+                    "native_index_missing axis={} sliderId={} type={}",
+                    kAxisTokens[axis],
+                    sliderId,
+                    nativeType));
+            }
+            if (nativeType != kNativeDoubleMorphType ||
+                nativeIndex < AxisRoute::kFirstExtendedIndex) {
+                return fail(std::format(
+                    "native_route_invalid axis={} sliderId={} type={} index={}",
+                    kAxisTokens[axis],
+                    sliderId,
+                    nativeType,
+                    nativeIndex));
             }
 
             snapshot.axes[axis] = AxisRoute{
@@ -1437,143 +1596,95 @@ namespace mps
                 matchCounts,
                 [](std::uint8_t count) {
                     return count != 1;
-                }) ||
-            !snapshot.IsValid()) {
-            return std::nullopt;
+                })) {
+            return fail(std::format(
+                "missing_axis counts={},{},{}",
+                matchCounts[0],
+                matchCounts[1],
+                matchCounts[2]));
         }
+        if (!snapshot.IsValid()) {
+            return fail(std::format(
+                "snapshot_route_collision ids={},{},{} indices={},{},{}",
+                snapshot.axes[0].visibleSliderId,
+                snapshot.axes[1].visibleSliderId,
+                snapshot.axes[2].visibleSliderId,
+                snapshot.axes[0].extendedIndex,
+                snapshot.axes[1].extendedIndex,
+                snapshot.axes[2].extendedIndex));
+        }
+
+        lastSnapshotFailure_ = std::format(
+            "snapshot_valid fingerprint=0x{:016X} indices={},{},{}",
+            snapshot.sourceFingerprint,
+            snapshot.axes[0].extendedIndex,
+            snapshot.axes[1].extendedIndex,
+            snapshot.axes[2].extendedIndex);
         return snapshot;
     }
 
-    std::optional<FaceSex>
-        FaceSliderRouter::ProbeInternalMapSex(
-            const FaceSliderFrame& frame,
-            RE::GFxValue& charGen)
+    bool FaceSliderRouter::ValidatePreparedAxes(
+        const FaceSliderFrame& frame,
+        RE::GFxValue& charGen,
+        const RouteSnapshot& snapshot)
     {
-        struct Sentinel
-        {
-            bool found = false;
-            std::uint32_t sliderId = 0;
-            double position = 0.0;
-        };
-
-        Sentinel sentinel15;
-        Sentinel sentinel17;
-        Sentinel sentinel258;
-        const std::uint32_t count =
-            frame.entryList->GetArraySize();
-        for (std::uint32_t index = 0; index < count; ++index) {
-            RE::GFxValue entry;
-            if (!frame.entryList->GetElement(
-                    index,
-                    std::addressof(entry)) ||
-                !entry.IsObject()) {
-                continue;
-            }
-
-            RE::GFxValue extraData;
-            if (!entry.GetMember(
-                    "extraData",
-                    std::addressof(extraData)) ||
-                !extraData.IsObject()) {
-                continue;
-            }
-
-            std::uint32_t nativeIndex = 0;
-            if (!TryGetExactUIntMember(
-                    extraData,
-                    "index",
-                    nativeIndex) ||
-                (nativeIndex != kSentinelIndex15 &&
-                    nativeIndex != kSentinelIndex17 &&
-                    nativeIndex != kSentinelIndex258)) {
-                continue;
-            }
-
-            Sentinel* sentinel = nullptr;
-            if (nativeIndex == kSentinelIndex15) {
-                sentinel = std::addressof(sentinel15);
-            } else if (nativeIndex == kSentinelIndex17) {
-                sentinel = std::addressof(sentinel17);
-            } else {
-                sentinel = std::addressof(sentinel258);
-            }
-            if (sentinel->found ||
-                !TryGetExactUIntMember(
-                    entry,
-                    "sliderID",
-                    sentinel->sliderId) ||
-                !TryGetEntryPosition(
-                    entry,
-                    sentinel->position)) {
-                return std::nullopt;
-            }
-            sentinel->found = true;
+        if (!snapshot.IsValid()) {
+            lastSnapshotFailure_ = "prepared_axis_snapshot_invalid";
+            return false;
         }
 
-        if (!sentinel15.found ||
-            !sentinel17.found ||
-            !sentinel258.found) {
-            return std::nullopt;
-        }
-
-        const auto readSubType =
-            [&](const Sentinel& sentinel,
-                std::uint32_t expectedIndex)
-            -> std::optional<std::uint32_t> {
+        for (std::size_t axis = 0;
+             axis < kFaceAxisCount;
+             ++axis) {
+            const auto& route = snapshot.axes[axis];
             RE::GFxValue nativeData;
             std::uint32_t exceptionCode = 0;
             if (!InvokeGetSliderData(
                     frame.movie,
                     charGen,
-                    sentinel.sliderId,
-                    sentinel.position,
+                    route.visibleSliderId,
+                    0.0,
                     nativeData,
                     exceptionCode)) {
-                return std::nullopt;
+                lastSnapshotFailure_ = std::format(
+                    "prepared_axis_get_slider_data_failed axis={} sliderId={} exception=0x{:08X}",
+                    kAxisTokens[axis],
+                    route.visibleSliderId,
+                    exceptionCode);
+                return false;
             }
 
             std::uint32_t nativeType = 0;
-            std::uint32_t returnedIndex = 0;
+            std::uint32_t nativeIndex = 0;
             std::uint32_t subType = 0;
             if (!TryGetExactUIntMember(
                     nativeData,
                     "type",
                     nativeType) ||
-                nativeType != kNativeDoubleMorphType ||
                 !TryGetExactUIntMember(
                     nativeData,
                     "index",
-                    returnedIndex) ||
-                returnedIndex != expectedIndex ||
+                    nativeIndex) ||
                 !TryGetExactUIntMember(
                     nativeData,
                     "subType",
-                    subType)) {
-                return std::nullopt;
+                    subType) ||
+                nativeType != kNativeDoubleMorphType ||
+                nativeIndex != route.extendedIndex ||
+                subType != 0) {
+                lastSnapshotFailure_ = std::format(
+                    "prepared_axis_invalid axis={} sliderId={} expectedIndex={} observedType={} observedIndex={} observedSubType={}",
+                    kAxisTokens[axis],
+                    route.visibleSliderId,
+                    route.extendedIndex,
+                    nativeType,
+                    nativeIndex,
+                    subType);
+                return false;
             }
-            return subType;
-        };
+        }
 
-        const auto type15 =
-            readSubType(sentinel15, kSentinelIndex15);
-        const auto type17 =
-            readSubType(sentinel17, kSentinelIndex17);
-        const auto type258 =
-            readSubType(sentinel258, kSentinelIndex258);
-        if (!type15 || !type17 || !type258) {
-            return std::nullopt;
-        }
-        if (*type15 == 0 &&
-            *type17 == 1 &&
-            *type258 == 0) {
-            return FaceSex::Male;
-        }
-        if (*type15 == 1 &&
-            *type17 == 0 &&
-            *type258 == 2) {
-            return FaceSex::Female;
-        }
-        return std::nullopt;
+        return true;
     }
 
     bool FaceSliderRouter::ResolveCharGen(
