@@ -12,37 +12,27 @@ project(ModernPhysiqueSystem VERSION 0.0.1 LANGUAGES CXX)
 # Please see the "Project setup" section of README.md
 #
 
-# If you're not using a mod manager, you probably want the SKSE plugin to go
-# inside of your Skyrim "Data" folder.
-#
-# To do this automatically, set the `SKYRIM_FOLDER` environment variable
-# to the path of your Skyrim Special Edition folder
-if(DEFINED ENV{SKYRIM_FOLDER} AND IS_DIRECTORY "$ENV{SKYRIM_FOLDER}/Data")
-    set(OUTPUT_FOLDER "$ENV{SKYRIM_FOLDER}/Data")
-endif()
-
-# If you're using Mod Organizer 2 or Vortex, you might want this to go inside
-# of your "mods" folder, inside of a subfolder named "<your mod>".
-#
-# To do this automatically, set the `SKYRIM_MODS_FOLDER` environment variable
-# to the path of your "mods" folder
-if(DEFINED ENV{SKYRIM_MODS_FOLDER} AND IS_DIRECTORY "$ENV{SKYRIM_MODS_FOLDER}")
-    set(OUTPUT_FOLDER "$ENV{SKYRIM_MODS_FOLDER}/${PROJECT_NAME} ${CMAKE_BUILD_TYPE}")
-endif()
-
-# Otherwise, you can set OUTPUT_FOLDER to any place you'd like :)
-# set(OUTPUT_FOLDER "C:/path/to/any/folder")
-#
-# Project-local deploy root override:
-# If set, this path is used as-is and takes priority over SKYRIM_FOLDER /
-# SKYRIM_MODS_FOLDER environment variables above.
+# Ordinary CMake builds are side-effect free. Post-build deployment must be
+# explicitly enabled as well as given a destination; environment variables and
+# a stale destination cache alone are intentionally insufficient.
+option(
+    MPS_ENABLE_POST_BUILD_DEPLOY
+    "Allow CMake post-build commands to copy the SKSE plugin"
+    OFF
+)
 set(
     MPS_DEPLOY_OUTPUT
     ""
     CACHE PATH
     "Deploy output root folder (contains SKSE/Plugins)"
 )
-if(MPS_DEPLOY_OUTPUT)
+if(MPS_ENABLE_POST_BUILD_DEPLOY)
+    if(NOT MPS_DEPLOY_OUTPUT)
+        message(
+            FATAL_ERROR
+            "MPS_ENABLE_POST_BUILD_DEPLOY requires an explicit MPS_DEPLOY_OUTPUT"
+        )
+    endif()
     set(OUTPUT_FOLDER "${MPS_DEPLOY_OUTPUT}")
 endif()
 
@@ -82,11 +72,9 @@ target_include_directories(
 		${SIMPLEINI_INCLUDE_DIRS}
 		"${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
-# When your SKSE .dll is compiled, this will automatically copy the .dll into your mods folder.
-# Only works if you configure DEPLOY_ROOT above (or set the SKYRIM_MODS_FOLDER environment variable)
-if(DEFINED OUTPUT_FOLDER)
-    # If you specify an <OUTPUT_FOLDER> (including via environment variables)
-    # then we'll copy your mod files into Skyrim or a mod manager for you!
+# Optional post-build deployment. This is disabled in all ordinary presets;
+# tools/BuildAndDeployDebug.ps1 performs the reviewed paired deployment instead.
+if(MPS_ENABLE_POST_BUILD_DEPLOY)
 
     # Copy the SKSE plugin .dll files into the SKSE/Plugins/ folder
     set(DLL_FOLDER "${OUTPUT_FOLDER}/SKSE/Plugins")
@@ -162,5 +150,21 @@ if(MPS_BUILD_TESTS)
             "-DMPS_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
             -P
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/NormalMapBridgeStaticSafety.cmake"
+    )
+    add_test(
+        NAME mps_racemenu_weight_sync_static_safety
+        COMMAND
+            "${CMAKE_COMMAND}"
+            "-DMPS_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
+            -P
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/RaceMenuWeightSyncStaticSafety.cmake"
+    )
+    add_test(
+        NAME mps_deploy_static_safety
+        COMMAND
+            "${CMAKE_COMMAND}"
+            "-DMPS_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
+            -P
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/DeploySafetyStatic.cmake"
     )
 endif()

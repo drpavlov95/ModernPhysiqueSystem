@@ -48,20 +48,45 @@ instead of dispatching persistent Papyrus/NiOverride work for every drag event.
 The periodic worker stays at 16 ms only while UI or deferred work is active and
 backs off to 50 ms while idle.
 
-## Remaining issues kept out of the current checkpoints
+## Remaining risks and deferred work
 
-### Patched RaceMenu SWF polls every 50 ms
+### Stable RaceMenu state still polls every 50 ms
 
-`reference/RaceMenu/patched/RaceMenu.as` starts
-`syncWeightSliderFromPhysique` on a 50 ms interval while the Body category is
-active. When values differ it writes the native weight entry's `position` and
-calls `itemList.requestUpdate()`.
+The tracked RaceMenu source and SWF now stop Weight synchronization before a
+`ChangeSex`, `ChangeRace`, or `SetSliders` rebuild. `InitializeSliders` schedules
+one restart 100 ms after the rebuilt list is published. Slider initialization
+has its own timer, separate from tint/makeup data updates, so neither operation
+can suppress the other's completion callback.
 
-That loop is independent of the DLL face rewrite and is the strongest
-remaining explanation for weight/Sex-slider flicker during a native sex
-rebuild. The safe follow-up is a separate SWF checkpoint that suspends sync
-during `ChangeSex`/`ChangeRace` rebuilds and performs a single resync after
-`Reinitialized`, followed by an in-game sound/flicker test.
+Leaving the Body category stops the active poll. If its one-shot restart is
+already pending, that callback runs once to clear the rebuild gate and refuses
+to restart outside Body. Switching to Presets, Camera, or Sculpt also stops the
+poll and disables the native overlay route; returning to Sliders resumes only
+when Body is selected and the rebuilt list is stable. Closing the menu cancels
+the active poll, pending restart, and pending slider initialization. Name,
+color, and makeup dialogs likewise stop polling while their RacePanel is
+hidden and resume it only after the dialog closes in a valid Body/Sliders
+context.
+
+The 50 ms poll remains while the Body list is stable because it is currently
+the only bridge from a wheel-driven body change back to the native Weight row.
+Replacing that stable-state poll requires a separate event-driven DLL-to-GFx
+callback. It is an optional optimization rather than part of the sex-switch
+correctness fix.
+
+`tools/BuildRaceMenuSwf.ps1` reproduces the reviewed binary with FFDec 26.0.0.
+The CTest guard verifies the transition gates plus the normalized source and
+exact SWF hashes, so a source change cannot be committed with a stale binary.
+
+Ordinary CMake presets explicitly disable post-build deployment. A stale
+destination cache or `SKYRIM_FOLDER`/`SKYRIM_MODS_FOLDER` environment variable
+cannot copy into the game or mod manager; CMake deployment now requires both
+`MPS_ENABLE_POST_BUILD_DEPLOY=ON` and an explicit `MPS_DEPLOY_OUTPUT`.
+`tools/BuildAndDeployDebug.ps1` remains the paired deployment path: it runs the
+five-test manifest and suite, compiles Papyrus, verifies every required
+artifact, then copies PEX and SWF before the DLL. It refuses to start while Mod
+Organizer or Skyrim is running and repeats that process check immediately
+before the first filesystem write.
 
 ### `$` prefixes are a packaging/encoding failure
 
@@ -83,7 +108,9 @@ Use a fresh game process for each start sex:
 4. move native face, lip, nose, and weight controls after every switch;
 5. close/reopen RaceMenu and repeat;
 6. verify body/face settle together and normal maps follow the current sex;
-7. check the log for one accepted face dispatch per action and no retry burst.
+7. hold on the Body category during each sex switch and confirm there is no
+   repeating focus sound or Weight/Sex-row flicker;
+8. check the log for one accepted face dispatch per action and no retry burst.
 
 Do not deploy the current build while Mod Organizer or Skyrim owns the plugin
 files.

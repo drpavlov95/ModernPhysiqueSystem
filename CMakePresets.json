@@ -87,6 +87,14 @@
                 "MPS_DEPLOY_OUTPUT": {
                     "type": "PATH",
                     "value": ""
+                },
+                "MPS_ENABLE_POST_BUILD_DEPLOY": {
+                    "type": "BOOL",
+                    "value": false
+                },
+                "MPS_BUILD_TESTS": {
+                    "type": "BOOL",
+                    "value": true
                 }
             }
         },
@@ -111,6 +119,14 @@
                 "MPS_DEPLOY_OUTPUT": {
                     "type": "PATH",
                     "value": ""
+                },
+                "MPS_ENABLE_POST_BUILD_DEPLOY": {
+                    "type": "BOOL",
+                    "value": false
+                },
+                "MPS_BUILD_TESTS": {
+                    "type": "BOOL",
+                    "value": true
                 }
             }
         }

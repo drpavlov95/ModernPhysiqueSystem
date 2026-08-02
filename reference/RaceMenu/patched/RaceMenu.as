@@ -13,6 +13,7 @@ class RaceMenu extends MovieClip
    var _reloadInterval;
    var _savedColor;
    var _searchControl;
+   var _sliderInitializeInterval;
    var _sortFilter;
    var _textureControl;
    var _typeFilter;
@@ -68,8 +69,11 @@ class RaceMenu extends MovieClip
    var bRaceChanging = false;
    var bCustomMenu = true;
    var bPhysiqueBodyCategoryActive = false;
+   var bPhysiqueSlidersModeActive = true;
+   var bPhysiqueWeightSyncRebuilding = false;
    var physiqueTitle = null;
    var physiqueWeightSyncInterval = null;
+   var physiqueWeightSyncResumeInterval = null;
    var statusText = "";
    function RaceMenu()
    {
@@ -332,6 +336,14 @@ class RaceMenu extends MovieClip
       this.ShowBottomBar(!abShowTextEntry);
       this.ShowModeSwitcher(!abShowTextEntry);
       this.syncPhysiqueOverlayState();
+      if(abShowTextEntry)
+      {
+         this.stopPhysiqueWeightSync();
+      }
+      else
+      {
+         this.startPhysiqueWeightSync();
+      }
    }
    function HideTextEntryWithoutRestoringPanels()
    {
@@ -370,6 +382,14 @@ class RaceMenu extends MovieClip
       this.ShowBottomBar(!bShowField);
       this.ShowModeSwitcher(!bShowField);
       this.syncPhysiqueOverlayState();
+      if(bShowField)
+      {
+         this.stopPhysiqueWeightSync();
+      }
+      else
+      {
+         this.startPhysiqueWeightSync();
+      }
    }
    function ShowRaceDescription(bShowDescription)
    {
@@ -439,6 +459,14 @@ class RaceMenu extends MovieClip
       this.ShowBottomBar(!bShowPanel);
       this.ShowModeSwitcher(!bShowPanel);
       this.syncPhysiqueOverlayState();
+      if(bShowPanel)
+      {
+         this.stopPhysiqueWeightSync();
+      }
+      else
+      {
+         this.startPhysiqueWeightSync();
+      }
    }
    function ShowRacePanel(bShowPanel)
    {
@@ -623,6 +651,9 @@ class RaceMenu extends MovieClip
    }
    function SetSliders()
    {
+      // The old GFx list can coexist briefly with the new native sex/race.
+      // Never drive its Weight row while that list is being replaced.
+      this.suspendPhysiqueWeightSyncForRebuild();
       var _loc4_;
       if(this.itemList.entryList.length > 0)
       {
@@ -731,12 +762,29 @@ class RaceMenu extends MovieClip
                }
             };
          }
+         else if(_loc7_.callbackName == "ChangeSex" || _loc7_.callbackName == "ChangeRace")
+         {
+            _loc7_.internalCallback = function()
+            {
+               if(this.sliderID != undefined && this.position != undefined && _global.skse.plugins.CharGen.GetSliderData)
+               {
+                  this.entryObject.extraData = _global.skse.plugins.CharGen.GetSliderData(this.sliderID,this.position);
+               }
+               else
+               {
+                  this.entryObject.extraData = null;
+               }
+               var _loc2_ = _root.RaceSexMenuBaseInstance.RaceSexPanelsInstance;
+               _loc2_.updateItemDescriptor();
+               _loc2_.suspendPhysiqueWeightSyncForRebuild();
+            };
+         }
          this.itemList.entryList.push(_loc7_);
          _loc6_ += RaceMenuDefines.SLIDER_STRIDE;
       }
-      if(!this._updateInterval)
+      if(!this._sliderInitializeInterval)
       {
-         this._updateInterval = setInterval(this,"InitializeSliders",500);
+         this._sliderInitializeInterval = setInterval(this,"InitializeSliders",500);
       }
    }
    function InitializeSliders()
@@ -751,8 +799,9 @@ class RaceMenu extends MovieClip
          skse.SendModEvent(_global.eventPrefix + "Reinitialized");
       }
       this.itemList.requestInvalidate();
-      clearInterval(this._updateInterval);
-      delete this._updateInterval;
+      this.schedulePhysiqueWeightSyncAfterRebuild();
+      clearInterval(this._sliderInitializeInterval);
+      delete this._sliderInitializeInterval;
    }
    function SetMakeup(a_types, a_colors, a_textures, a_glows, a_tintType, a_categoryFilter, a_makeupType, a_entryType)
    {
@@ -892,9 +941,13 @@ class RaceMenu extends MovieClip
       }
       return null;
    }
+   function isPhysiqueWeightSyncContextActive()
+   {
+      return this.bPhysiqueBodyCategoryActive && this.bPhysiqueSlidersModeActive && !this.textEntry.enabled && !this.colorField.enabled && !this.makeupPanel.enabled;
+   }
    function syncWeightSliderFromPhysique()
    {
-      if(!this.bPhysiqueBodyCategoryActive)
+      if(!this.isPhysiqueWeightSyncContextActive() || this.bPhysiqueWeightSyncRebuilding)
       {
          return undefined;
       }
@@ -922,9 +975,37 @@ class RaceMenu extends MovieClip
    }
    function startPhysiqueWeightSync()
    {
+      if(!this.isPhysiqueWeightSyncContextActive() || this.bPhysiqueWeightSyncRebuilding)
+      {
+         return undefined;
+      }
       this.stopPhysiqueWeightSync();
+      this.cancelPhysiqueWeightSyncResume();
       this.syncWeightSliderFromPhysique();
       this.physiqueWeightSyncInterval = setInterval(this,"syncWeightSliderFromPhysique",50);
+   }
+   function suspendPhysiqueWeightSyncForRebuild()
+   {
+      this.bPhysiqueWeightSyncRebuilding = true;
+      this.stopPhysiqueWeightSync();
+      this.cancelPhysiqueWeightSyncResume();
+   }
+   function schedulePhysiqueWeightSyncAfterRebuild()
+   {
+      this.stopPhysiqueWeightSync();
+      this.cancelPhysiqueWeightSyncResume();
+      // Always hold the gate while RSM_(Re)initialized and list invalidation
+      // settle. The callback decides whether Body/Sliders still needs polling.
+      this.physiqueWeightSyncResumeInterval = setInterval(this,"resumePhysiqueWeightSyncAfterRebuild",100);
+   }
+   function resumePhysiqueWeightSyncAfterRebuild()
+   {
+      this.cancelPhysiqueWeightSyncResume();
+      this.bPhysiqueWeightSyncRebuilding = false;
+      if(this.isPhysiqueWeightSyncContextActive())
+      {
+         this.startPhysiqueWeightSync();
+      }
    }
    function stopPhysiqueWeightSync()
    {
@@ -934,13 +1015,21 @@ class RaceMenu extends MovieClip
          delete this.physiqueWeightSyncInterval;
       }
    }
+   function cancelPhysiqueWeightSyncResume()
+   {
+      if(this.physiqueWeightSyncResumeInterval != null)
+      {
+         clearInterval(this.physiqueWeightSyncResumeInterval);
+         delete this.physiqueWeightSyncResumeInterval;
+      }
+   }
    function syncPhysiqueOverlayState()
    {
       if(!_global.skse.plugins.ModernPhysiqueSystem.SetActiveCategory)
       {
          return undefined;
       }
-      if(this.bPhysiqueBodyCategoryActive && !this.textEntry.enabled && !this.colorField.enabled && !this.makeupPanel.enabled && this.categoryList.selectedEntry != undefined)
+      if(this.isPhysiqueWeightSyncContextActive() && this.categoryList.selectedEntry != undefined)
       {
          _global.skse.plugins.ModernPhysiqueSystem.SetActiveCategory(this.categoryList.selectedEntry.flag,this.categoryList.selectedEntry.textFilter);
       }
@@ -1087,6 +1176,15 @@ class RaceMenu extends MovieClip
    }
    function onChangeMode(event)
    {
+      this.bPhysiqueSlidersModeActive = event.index == 0;
+      if(this.bPhysiqueSlidersModeActive)
+      {
+         this.startPhysiqueWeightSync();
+      }
+      else
+      {
+         this.stopPhysiqueWeightSync();
+      }
       switch(event.index)
       {
          case 0:
@@ -1372,6 +1470,7 @@ class RaceMenu extends MovieClip
          this.itemList.listState.activeEntry = _loc3_;
          this.itemList.requestUpdate();
          this.loadingIcon._visible = true;
+         this.suspendPhysiqueWeightSyncForRebuild();
          gfx.io.GameDelegate.call("ChangeRace",[_loc3_.raceID,-1]);
          this.bRaceChanging = true;
          this.bPlayerZoom = true;
@@ -1568,7 +1667,14 @@ class RaceMenu extends MovieClip
       {
          return undefined;
       }
+      if(this._sliderInitializeInterval != null)
+      {
+         clearInterval(this._sliderInitializeInterval);
+         delete this._sliderInitializeInterval;
+      }
       this.stopPhysiqueWeightSync();
+      this.cancelPhysiqueWeightSyncResume();
+      this.bPhysiqueWeightSyncRebuilding = false;
       if(_global.skse.plugins.ModernPhysiqueSystem.SetActiveCategory)
       {
          _global.skse.plugins.ModernPhysiqueSystem.SetActiveCategory(0,"");
@@ -1615,6 +1721,7 @@ class RaceMenu extends MovieClip
          this.itemList.listState.activeEntry = _loc2_;
          this.itemList.requestUpdate();
          this.loadingIcon._visible = true;
+         this.suspendPhysiqueWeightSyncForRebuild();
          gfx.io.GameDelegate.call("ChangeRace",[_loc2_.raceID,-1]);
          this.bRaceChanging = true;
          this.bPlayerZoom = true;
