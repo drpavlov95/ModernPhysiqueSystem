@@ -73,6 +73,201 @@ string(REGEX REPLACE "[ \t\r\n]+" "" compact_face_router_header "${face_router_h
 string(REGEX REPLACE "[ \t\r\n]+" "" compact_plugin "${plugin_source}")
 string(REGEX REPLACE "[ \t\r\n]+" "" compact_globals "${globals_source}")
 
+# The supported RaceMenu 0.4.16 binary has a display string version of
+# 4.0.0.0 but a VS_FIXEDFILEINFO value of 3.4.5.0. The native gate reads the
+# fixed block, so pin that exact value alongside the stronger hash/PE/signature
+# checks. This guards against silently reintroducing the all-face-disabled bug.
+foreach(required_fixed_version_fragment IN ITEMS
+    "kExpectedSkeeFixedVersionMajor=3"
+    "kExpectedSkeeFixedVersionMinor=4"
+    "kExpectedSkeeFixedVersionBuild=5"
+    "kExpectedSkeeFixedVersionPrivate=0"
+    "TryReadFixedFileVersion(modulePath,actualVersion)"
+    "version.major==kExpectedSkeeFixedVersionMajor"
+    "version.minor==kExpectedSkeeFixedVersionMinor"
+    "version.build==kExpectedSkeeFixedVersionBuild"
+    "version.privatePart==kExpectedSkeeFixedVersionPrivate"
+    "!MatchesExpectedFixedFileVersion(actualVersion)"
+    "reason=fixed_file_version_mismatch"
+)
+    string(
+        FIND
+        "${compact_face_router}"
+        "${required_fixed_version_fragment}"
+        fixed_version_offset
+    )
+    if(fixed_version_offset EQUAL -1)
+        message(
+            FATAL_ERROR
+            "FaceRouter exact SKEE fixed-version gate fragment is missing: ${required_fixed_version_fragment}"
+        )
+    endif()
+endforeach()
+
+# A null route-specific CreateSliderList result must not permanently poison
+# the already-certified ABI shim. Only an SEH fault can latch it unavailable.
+string(
+    FIND
+    "${compact_face_router}"
+    "boolFaceSliderRouter::TryExactRepair("
+    try_exact_repair_offset
+)
+string(
+    FIND
+    "${compact_face_router}"
+    "boolFaceSliderRouter::TryReadAxisValues("
+    try_read_axis_offset
+)
+if(
+    try_exact_repair_offset EQUAL -1
+    OR try_read_axis_offset LESS_EQUAL try_exact_repair_offset
+)
+    message(FATAL_ERROR "FaceRouter TryExactRepair boundary is missing")
+endif()
+math(
+    EXPR
+    try_exact_repair_length
+    "${try_read_axis_offset} - ${try_exact_repair_offset}"
+)
+string(
+    SUBSTRING
+    "${compact_face_router}"
+    ${try_exact_repair_offset}
+    ${try_exact_repair_length}
+    try_exact_repair_source
+)
+string(FIND "${try_exact_repair_source}" "if(!result){" null_result_offset)
+string(
+    REGEX MATCHALL
+    "repairGateState_=GateState::Unavailable"
+    repair_poison_matches
+    "${try_exact_repair_source}"
+)
+string(
+    REGEX MATCHALL
+    "createSliderList_=nullptr"
+    function_poison_matches
+    "${try_exact_repair_source}"
+)
+list(LENGTH repair_poison_matches repair_poison_count)
+list(LENGTH function_poison_matches function_poison_count)
+if(
+    null_result_offset EQUAL -1
+    OR NOT repair_poison_count EQUAL 1
+    OR NOT function_poison_count EQUAL 1
+)
+    message(
+        FATAL_ERROR
+        "Only the CreateSliderList SEH-fault branch may disable the ABI shim"
+    )
+endif()
+
+# File metadata/path reads can fail transiently under a virtualized MO2 path.
+# They must leave the gate Unchecked so another SetSliders boundary can retry;
+# exact identity mismatches remain permanently unavailable.
+string(
+    FIND
+    "${compact_face_router}"
+    "boolFaceSliderRouter::PrepareExactRepair()"
+    prepare_exact_repair_offset
+)
+if(
+    prepare_exact_repair_offset EQUAL -1
+    OR try_exact_repair_offset LESS_EQUAL prepare_exact_repair_offset
+)
+    message(FATAL_ERROR "FaceRouter PrepareExactRepair boundary is missing")
+endif()
+math(
+    EXPR
+    prepare_exact_repair_length
+    "${try_exact_repair_offset} - ${prepare_exact_repair_offset}"
+)
+string(
+    SUBSTRING
+    "${compact_face_router}"
+    ${prepare_exact_repair_offset}
+    ${prepare_exact_repair_length}
+    prepare_exact_repair_source
+)
+string(
+    FIND
+    "${prepare_exact_repair_source}"
+    "TryReadFixedFileVersion(modulePath,actualVersion)"
+    fixed_version_read_offset
+)
+string(
+    FIND
+    "${prepare_exact_repair_source}"
+    "!MatchesExpectedFixedFileVersion(actualVersion)"
+    fixed_version_match_offset
+)
+string(
+    FIND
+    "${prepare_exact_repair_source}"
+    "ComputeSha256(modulePath,actualHash)"
+    fixed_version_hash_offset
+)
+string(
+    FIND
+    "${prepare_exact_repair_source}"
+    "repairGateState_=GateState::Available"
+    repair_available_offset
+)
+if(
+    fixed_version_read_offset EQUAL -1
+    OR fixed_version_match_offset LESS_EQUAL fixed_version_read_offset
+    OR fixed_version_hash_offset LESS_EQUAL fixed_version_match_offset
+    OR repair_available_offset LESS_EQUAL fixed_version_hash_offset
+)
+    message(
+        FATAL_ERROR
+        "FaceRouter must validate the fixed file version before hashing and enabling the shim"
+    )
+endif()
+foreach(transient_reason IN ITEMS
+    "reason=module_path_unavailable"
+    "reason=fixed_file_version_unreadable"
+    "reason=sha256_unreadable"
+)
+    string(
+        FIND
+        "${prepare_exact_repair_source}"
+        "${transient_reason}"
+        transient_reason_offset
+    )
+    if(transient_reason_offset EQUAL -1)
+        message(
+            FATAL_ERROR
+            "FaceRouter transient exact-gate reason is missing: ${transient_reason}"
+        )
+    endif()
+endforeach()
+string(
+    FIND
+    "${prepare_exact_repair_source}"
+    "repairGateState_=GateState::Unavailable;if(!PrepareReadbackAbi()"
+    eager_repair_poison_offset
+)
+if(NOT eager_repair_poison_offset EQUAL -1)
+    message(
+        FATAL_ERROR
+        "FaceRouter must not eagerly latch transient exact-gate failures unavailable"
+    )
+endif()
+string(
+    REGEX MATCHALL
+    "repairGateState_=GateState::Unavailable"
+    permanent_repair_poison_matches
+    "${prepare_exact_repair_source}"
+)
+list(LENGTH permanent_repair_poison_matches permanent_repair_poison_count)
+if(NOT permanent_repair_poison_count EQUAL 4)
+    message(
+        FATAL_ERROR
+        "FaceRouter exact repair gate must latch only its four permanent ABI/identity failures"
+    )
+endif()
+
 # The current route is discovered from the UI descriptors produced after the
 # current-sex SKEE map is prepared. Never restore the old per-sex arrays or the
 # sentinel/subType probe that tried to prove a map by reading the same map.

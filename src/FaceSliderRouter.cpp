@@ -39,6 +39,13 @@ namespace mps
         constexpr std::uintptr_t kFaceMorphSetRva = 0x59C20;
         constexpr std::size_t kExpectedSkeeImageSize = 0x1E4000;
         constexpr std::uint32_t kExpectedSkeeTimestamp = 0x5F799CB1;
+        // RaceMenu 0.4.16 reports 4.0.0.0 in its StringFileInfo block, but
+        // the exact supported skee64.dll stores 3.4.5.0 in VS_FIXEDFILEINFO.
+        // GetFileVersionInfo/VerQueryValue below reads the latter.
+        constexpr std::uint16_t kExpectedSkeeFixedVersionMajor = 3;
+        constexpr std::uint16_t kExpectedSkeeFixedVersionMinor = 4;
+        constexpr std::uint16_t kExpectedSkeeFixedVersionBuild = 5;
+        constexpr std::uint16_t kExpectedSkeeFixedVersionPrivate = 0;
         constexpr std::uint32_t kNativeDoubleMorphType = 2;
         // The native list can finish its RaceMenu lifecycle around the 500 ms
         // InitializeSliders boundary. Keep the fast 16 ms happy path while
@@ -624,8 +631,17 @@ namespace mps
             return true;
         }
 
-        [[nodiscard]] bool HasExpectedFileVersion(
-            const std::filesystem::path& path)
+        struct FixedFileVersion
+        {
+            std::uint16_t major = 0;
+            std::uint16_t minor = 0;
+            std::uint16_t build = 0;
+            std::uint16_t privatePart = 0;
+        };
+
+        [[nodiscard]] bool TryReadFixedFileVersion(
+            const std::filesystem::path& path,
+            FixedFileVersion& outVersion)
         {
             DWORD ignored = 0;
             const DWORD size = GetFileVersionInfoSizeW(
@@ -658,10 +674,21 @@ namespace mps
                 return false;
             }
 
-            return HIWORD(info->dwFileVersionMS) == 4 &&
-                   LOWORD(info->dwFileVersionMS) == 0 &&
-                   HIWORD(info->dwFileVersionLS) == 0 &&
-                   LOWORD(info->dwFileVersionLS) == 0;
+            outVersion.major = HIWORD(info->dwFileVersionMS);
+            outVersion.minor = LOWORD(info->dwFileVersionMS);
+            outVersion.build = HIWORD(info->dwFileVersionLS);
+            outVersion.privatePart = LOWORD(info->dwFileVersionLS);
+            return true;
+        }
+
+        [[nodiscard]] bool MatchesExpectedFixedFileVersion(
+            const FixedFileVersion& version) noexcept
+        {
+            return version.major == kExpectedSkeeFixedVersionMajor &&
+                   version.minor == kExpectedSkeeFixedVersionMinor &&
+                   version.build == kExpectedSkeeFixedVersionBuild &&
+                   version.privatePart ==
+                       kExpectedSkeeFixedVersionPrivate;
         }
 
         [[nodiscard]] bool ComputeSha256(
@@ -1720,23 +1747,37 @@ namespace mps
 
         readbackGateState_ = GateState::Unavailable;
         if (!faceMorphInterface_) {
+            spdlog::error(
+                "FaceRouter SKEE ABI gate rejected reason=face_interface_missing");
             return false;
         }
 
         HMODULE module = GetModuleHandleW(L"skee64.dll");
         std::size_t imageSize = 0;
         std::uint32_t timestamp = 0;
-        if (!module ||
-            !GetModuleImageSize(
+        if (!module) {
+            spdlog::error(
+                "FaceRouter SKEE ABI gate rejected reason=module_missing");
+            return false;
+        }
+        if (!GetModuleImageSize(
                 module,
                 imageSize,
-                timestamp) ||
-            imageSize != kExpectedSkeeImageSize ||
+                timestamp)) {
+            spdlog::error(
+                "FaceRouter SKEE ABI gate rejected reason=pe_header_unreadable");
+            return false;
+        }
+        if (imageSize != kExpectedSkeeImageSize ||
             timestamp != kExpectedSkeeTimestamp ||
             imageSize <= kFaceMorphObjectRva ||
             imageSize <= kFaceMorphVtableRva ||
             imageSize <= kFaceMorphGetRva ||
             imageSize <= kFaceMorphSetRva) {
+            spdlog::error(
+                "FaceRouter SKEE ABI gate rejected reason=pe_identity_mismatch imageSize=0x{:X} timestamp=0x{:08X}",
+                imageSize,
+                timestamp);
             return false;
         }
 
@@ -1745,6 +1786,8 @@ namespace mps
         if (faceMorphInterface_ !=
             reinterpret_cast<IFaceMorphInterface*>(
                 base + kFaceMorphObjectRva)) {
+            spdlog::error(
+                "FaceRouter SKEE ABI gate rejected reason=face_object_mismatch");
             return false;
         }
 
@@ -1753,6 +1796,8 @@ namespace mps
                 faceMorphInterface_,
                 std::addressof(vtable)) ||
             vtable != base + kFaceMorphVtableRva) {
+            spdlog::error(
+                "FaceRouter SKEE ABI gate rejected reason=face_vtable_mismatch");
             return false;
         }
 
@@ -1766,6 +1811,8 @@ namespace mps
                 std::addressof(setSlot)) ||
             getSlot != base + kFaceMorphGetRva ||
             setSlot != base + kFaceMorphSetRva) {
+            spdlog::error(
+                "FaceRouter SKEE ABI gate rejected reason=face_slots_mismatch");
             return false;
         }
 
@@ -1782,8 +1829,10 @@ namespace mps
             return repairGateState_ == GateState::Available;
         }
 
-        repairGateState_ = GateState::Unavailable;
         if (!PrepareReadbackAbi() || !skeeModuleBase_) {
+            repairGateState_ = GateState::Unavailable;
+            spdlog::error(
+                "FaceRouter exact repair gate rejected reason=readback_abi_unavailable");
             return false;
         }
 
@@ -1791,18 +1840,52 @@ namespace mps
             static_cast<std::uint8_t*>(skeeModuleBase_);
         HMODULE module = static_cast<HMODULE>(skeeModuleBase_);
         std::filesystem::path modulePath;
-        if (!GetModulePath(module, modulePath) ||
-            !HasExpectedFileVersion(modulePath)) {
+        if (!GetModulePath(module, modulePath)) {
+            spdlog::error(
+                "FaceRouter exact repair gate rejected reason=module_path_unavailable");
+            return false;
+        }
+
+        FixedFileVersion actualVersion{};
+        if (!TryReadFixedFileVersion(modulePath, actualVersion)) {
+            spdlog::error(
+                "FaceRouter exact repair gate rejected reason=fixed_file_version_unreadable");
+            return false;
+        }
+        if (!MatchesExpectedFixedFileVersion(actualVersion)) {
+            repairGateState_ = GateState::Unavailable;
+            spdlog::error(
+                "FaceRouter exact repair gate rejected reason=fixed_file_version_mismatch actual={}.{}.{}.{} expected={}.{}.{}.{}",
+                actualVersion.major,
+                actualVersion.minor,
+                actualVersion.build,
+                actualVersion.privatePart,
+                kExpectedSkeeFixedVersionMajor,
+                kExpectedSkeeFixedVersionMinor,
+                kExpectedSkeeFixedVersionBuild,
+                kExpectedSkeeFixedVersionPrivate);
             return false;
         }
 
         std::array<std::uint8_t, 32> actualHash{};
-        if (!ComputeSha256(modulePath, actualHash) ||
-            actualHash != kExpectedSkeeSha256 ||
-            !MemoryMatchesSEH(
+        if (!ComputeSha256(modulePath, actualHash)) {
+            spdlog::error(
+                "FaceRouter exact repair gate rejected reason=sha256_unreadable");
+            return false;
+        }
+        if (actualHash != kExpectedSkeeSha256) {
+            repairGateState_ = GateState::Unavailable;
+            spdlog::error(
+                "FaceRouter exact repair gate rejected reason=sha256_mismatch");
+            return false;
+        }
+        if (!MemoryMatchesSEH(
                 base + kCreateSliderListRva,
                 kCreateSliderListSignature.data(),
                 kCreateSliderListSignature.size())) {
+            repairGateState_ = GateState::Unavailable;
+            spdlog::error(
+                "FaceRouter exact repair gate rejected reason=create_slider_list_signature_mismatch");
             return false;
         }
 
@@ -1836,13 +1919,22 @@ namespace mps
                 race,
                 static_cast<std::uint8_t>(sex),
                 std::addressof(result),
-                std::addressof(exceptionCode)) ||
-            !result) {
+                std::addressof(exceptionCode))) {
             spdlog::error(
                 "FaceRouter CreateSliderList repair failed exception=0x{:08X}",
                 exceptionCode);
             repairGateState_ = GateState::Unavailable;
             createSliderList_ = nullptr;
+            return false;
+        }
+        if (!result) {
+            // A missing SliderSet for one transient race/sex route is not an
+            // ABI failure. Keep the exact-build shim available so a later
+            // SetSliders boundary can retry or prepare a different route.
+            spdlog::warn(
+                "FaceRouter CreateSliderList repair returned no list sex={} race={:08X}",
+                sex == FaceSex::Male ? "male" : "female",
+                race->GetFormID());
             return false;
         }
 

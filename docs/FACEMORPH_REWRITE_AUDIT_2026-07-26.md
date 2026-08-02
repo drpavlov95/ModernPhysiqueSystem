@@ -283,7 +283,9 @@ For the one explicitly supported `skee64.dll`, the rewrite may use a narrowly
 gated private call to `FaceMorphInterface::CreateSliderList(race, sex)` after
 the GFx snapshot is stable:
 
-- file version `4.0.0.0`;
+- exact version-resource identity: display string `4.0.0.0`, with the
+  `VS_FIXEDFILEINFO` value actually read by the native gate equal to
+  `3.4.5.0`;
 - PE timestamp `0x5F799CB1`;
 - `SizeOfImage` `0x1E4000`;
 - SHA-256
