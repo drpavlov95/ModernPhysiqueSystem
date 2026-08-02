@@ -155,4 +155,12 @@ if(MPS_BUILD_TESTS)
             -P
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/FaceRouteStaticSafety.cmake"
     )
+    add_test(
+        NAME mps_normal_map_bridge_static_safety
+        COMMAND
+            "${CMAKE_COMMAND}"
+            "-DMPS_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
+            -P
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/NormalMapBridgeStaticSafety.cmake"
+    )
 endif()

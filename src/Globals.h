@@ -40,7 +40,8 @@ constexpr const char* kNormalMapRelativeFolder = "Textures\\RleyBodyMorphs";
 constexpr const char* kHandNormalMapDataFolder = "Data\\Textures\\RleyBodyMorphs\\Hands";
 constexpr const char* kHandNormalMapRelativeFolder = "Textures\\RleyBodyMorphs\\Hands";
 constexpr const char* kTextureBridgeScriptName = "RleyTextureBridge";
-constexpr const char* kTextureBridgeApplySelectedNormalPathsFunction = "ApplySelectedNormalPaths";
+constexpr const char* kTextureBridgeApplySelectedNormalPathsForSexFunction =
+    "ApplySelectedNormalPathsForSex";
 constexpr const char* kScaleformPluginName = "ModernPhysiqueSystem";
 constexpr const char* kScaleformSetCategoryFunction = "SetActiveCategory";
 constexpr const char* kScaleformSetWeightFunction = "SetWeightSync";

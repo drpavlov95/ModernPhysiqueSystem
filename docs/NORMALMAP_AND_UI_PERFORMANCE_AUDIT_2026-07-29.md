@@ -25,6 +25,14 @@ already changed sex. RaceMenu close/reopen work is protected by a lifecycle
 epoch so an old deferred task cannot clear the new session's dispatch key or
 apply stale paths.
 
+The DLL now dispatches the validated candidate sex to the new
+`ApplySelectedNormalPathsForSex` Papyrus entrypoint. Every active NiOverride
+read, removal, and write uses that value instead of the old hard-coded female
+namespace. The original four-argument `ApplySelectedNormalPaths` remains as a
+compatibility wrapper and resolves the current player sex. The matching
+`Scripts/RleyTextureBridge.pex` was rebuilt, and a static CTest rejects a
+source/PEX entrypoint mismatch or a reintroduced hard-coded sex argument.
+
 The wheel now uses click-only commits:
 
 - click moves the knob once and does not latch mouse tracking;
@@ -40,25 +48,7 @@ instead of dispatching persistent Papyrus/NiOverride work for every drag event.
 The periodic worker stays at 16 ms only while UI or deferred work is active and
 backs off to 50 ms while idle.
 
-## Remaining issues kept out of the current face checkpoint
-
-### Papyrus always uses the female NiOverride namespace
-
-`Source/Scripts/RleyTextureBridge.psc` passes `True` as `isFemale` to every
-active NiOverride read, removal, and write. C++ now distinguishes male and
-female candidates, but the compiled bridge still stores both in the female
-override namespace.
-
-This needs a coordinated source/binary change:
-
-1. pass the already-validated candidate sex from the DLL;
-2. use that value for every NiOverride gender argument in
-   `ApplySelectedNormalPaths`;
-3. compile and version `Scripts/RleyTextureBridge.pex`;
-4. deploy the matching DLL and PEX together.
-
-Changing only one side would break the Papyrus call contract, so this belongs
-in its own checkpoint and runtime matrix.
+## Remaining issues kept out of the current checkpoints
 
 ### Patched RaceMenu SWF polls every 50 ms
 

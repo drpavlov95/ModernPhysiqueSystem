@@ -465,6 +465,7 @@ std::string BuildTextureSetEditorID(std::string_view variantKey)
 bool DispatchSelectedNormalPathsStatic(
     std::string_view bodyNormalPath,
     std::string_view handNormalPath,
+    bool isFemale,
     bool persist,
     std::string_view applySource)
 {
@@ -485,30 +486,33 @@ bool DispatchSelectedNormalPathsStatic(
     auto* args = RE::MakeFunctionArguments(
         std::string(bodyNormalPath),
         std::string(handNormalPath),
+        isFemale ? true : false,
         persist ? true : false,
         std::string(applySource));
     const bool dispatched = vm->DispatchStaticCall(
         RE::BSFixedString(kTextureBridgeScriptName),
-        RE::BSFixedString(kTextureBridgeApplySelectedNormalPathsFunction),
+        RE::BSFixedString(kTextureBridgeApplySelectedNormalPathsForSexFunction),
         args,
         result);
 
     if (!dispatched) {
         spdlog::warn(
-            "Failed to dispatch static texture bridge call {}.{}(bodyNormalPath={}, handNormalPath={}, persist={}, source={})",
+            "Failed to dispatch static texture bridge call {}.{}(bodyNormalPath={}, handNormalPath={}, isFemale={}, persist={}, source={})",
             kTextureBridgeScriptName,
-            kTextureBridgeApplySelectedNormalPathsFunction,
+            kTextureBridgeApplySelectedNormalPathsForSexFunction,
             bodyNormalPath,
             handNormalPath.empty() ? "<empty>" : handNormalPath,
+            isFemale,
             persist,
             applySource);
     } else {
         spdlog::debug(
-            "Dispatched static texture bridge call {}.{} with bodyNormalPath={}, handNormalPath={}, persist={}, source={}",
+            "Dispatched static texture bridge call {}.{} with bodyNormalPath={}, handNormalPath={}, isFemale={}, persist={}, source={}",
             kTextureBridgeScriptName,
-            kTextureBridgeApplySelectedNormalPathsFunction,
+            kTextureBridgeApplySelectedNormalPathsForSexFunction,
             bodyNormalPath,
             handNormalPath.empty() ? "<empty>" : handNormalPath,
+            isFemale,
             persist,
             applySource);
     }
@@ -603,11 +607,13 @@ bool ApplySelectedNormalMapTextureSet(bool persist, std::string_view applySource
         hasHandNormalPath ?
         std::string_view(candidate.handPath) :
         std::string_view{};
+    const bool targetIsFemale = candidate.sex == 1;
 
     if (hasNormalPath &&
         DispatchSelectedNormalPathsStatic(
             candidate.bodyPath,
             handNormalPath,
+            targetIsFemale,
             persist,
             tracedApplySource)) {
         g_appliedNormalMapDispatchKey = dispatchKey;

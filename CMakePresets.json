@@ -86,7 +86,7 @@
                 },
                 "MPS_DEPLOY_OUTPUT": {
                     "type": "PATH",
-                    "value": "E:/Wabbajack/InstallPacks/mods/ModernPhysiquePicker"
+                    "value": ""
                 }
             }
         },
@@ -110,7 +110,7 @@
                 },
                 "MPS_DEPLOY_OUTPUT": {
                     "type": "PATH",
-                    "value": "E:/Wabbajack/InstallPacks/mods/ModernPhysiquePicker"
+                    "value": ""
                 }
             }
         }

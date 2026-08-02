@@ -12,7 +12,24 @@ EndFunction
 
 Function ApplySelectedNormalPaths(String bodyNormalTexturePath, String handNormalTexturePath, Bool persist, String applySource = "unspecified") global
 	String prefix = "[ModernPhysiqueSystem] [RleyTextureBridge] "
-	TraceVerbose(prefix + "ApplySelectedNormalPaths called for body=" + bodyNormalTexturePath + " hand=" + handNormalTexturePath + " persist=" + persist + " source=" + applySource)
+	Actor playerRef = Game.GetPlayer()
+	If playerRef == None
+		TraceVerbose(prefix + "Legacy ApplySelectedNormalPaths aborted: player is None")
+		Return
+	EndIf
+
+	ActorBase playerBase = playerRef.GetLeveledActorBase()
+	If playerBase == None
+		TraceVerbose(prefix + "Legacy ApplySelectedNormalPaths aborted: player base is None")
+		Return
+	EndIf
+
+	ApplySelectedNormalPathsForSex(bodyNormalTexturePath, handNormalTexturePath, playerBase.GetSex() == 1, persist, applySource)
+EndFunction
+
+Function ApplySelectedNormalPathsForSex(String bodyNormalTexturePath, String handNormalTexturePath, Bool isFemale, Bool persist, String applySource = "unspecified") global
+	String prefix = "[ModernPhysiqueSystem] [RleyTextureBridge] "
+	TraceVerbose(prefix + "ApplySelectedNormalPathsForSex called for body=" + bodyNormalTexturePath + " hand=" + handNormalTexturePath + " isFemale=" + isFemale + " persist=" + persist + " source=" + applySource)
 
 	Actor playerRef = Game.GetPlayer()
 	If playerRef == None
@@ -81,8 +98,8 @@ Function ApplySelectedNormalPaths(String bodyNormalTexturePath, String handNorma
 			bodyAddonNode1p = NiOverride.HasArmorAddonNode(playerRef, True, cotrSkinArmor, cotrBodyAddon, bodyNodeName, True)
 			bodyAddonNamedNode3p = NiOverride.HasArmorAddonNode(playerRef, False, cotrSkinArmor, cotrBodyAddon, bodyNamedNodeName, True)
 			bodyAddonNamedNode1p = NiOverride.HasArmorAddonNode(playerRef, True, cotrSkinArmor, cotrBodyAddon, bodyNamedNodeName, True)
-			bodyAddonOverrideBefore = NiOverride.HasOverride(playerRef, True, cotrSkinArmor, cotrBodyAddon, bodyNodeName, stringOverrideKey, normalTextureIndex)
-			bodyAddonNamedOverrideBefore = NiOverride.HasOverride(playerRef, True, cotrSkinArmor, cotrBodyAddon, bodyNamedNodeName, stringOverrideKey, normalTextureIndex)
+			bodyAddonOverrideBefore = NiOverride.HasOverride(playerRef, isFemale, cotrSkinArmor, cotrBodyAddon, bodyNodeName, stringOverrideKey, normalTextureIndex)
+			bodyAddonNamedOverrideBefore = NiOverride.HasOverride(playerRef, isFemale, cotrSkinArmor, cotrBodyAddon, bodyNamedNodeName, stringOverrideKey, normalTextureIndex)
 			usingCotrBodyAddonPath = True
 		Else
 			TraceVerbose(prefix + "Body path falling back to skin override because COtR body addon path is unavailable (skin=" + cotrSkinArmor + ", addon=" + cotrBodyAddon + ", hasSkin=" + hasCotrSkin + ", source=" + applySource + ")")
@@ -103,39 +120,39 @@ Function ApplySelectedNormalPaths(String bodyNormalTexturePath, String handNorma
 			; Armor-addon overrides match by geometry name; for single-geometry addons the key is the empty string.
 			handAddonNode3p = NiOverride.HasArmorAddonNode(playerRef, False, cotrSkinArmor, cotrHandAddon, handNodeName, True)
 			handAddonNode1p = NiOverride.HasArmorAddonNode(playerRef, True, cotrSkinArmor, cotrHandAddon, handNodeName, True)
-			handAddonOverrideBefore = NiOverride.HasOverride(playerRef, True, cotrSkinArmor, cotrHandAddon, handNodeName, stringOverrideKey, normalTextureIndex)
+			handAddonOverrideBefore = NiOverride.HasOverride(playerRef, isFemale, cotrSkinArmor, cotrHandAddon, handNodeName, stringOverrideKey, normalTextureIndex)
 		EndIf
 	EndIf
 
 	If bodyNormalTexturePath != ""
-		bodyThirdPersonOverrideBefore = NiOverride.HasSkinOverride(playerRef, True, False, bodySlotMask, stringOverrideKey, normalTextureIndex)
-		bodyFirstPersonOverrideBefore = NiOverride.HasSkinOverride(playerRef, True, True, bodySlotMask, stringOverrideKey, normalTextureIndex)
+		bodyThirdPersonOverrideBefore = NiOverride.HasSkinOverride(playerRef, isFemale, False, bodySlotMask, stringOverrideKey, normalTextureIndex)
+		bodyFirstPersonOverrideBefore = NiOverride.HasSkinOverride(playerRef, isFemale, True, bodySlotMask, stringOverrideKey, normalTextureIndex)
 
 		; Clear old slot-based body state before selecting the exact runtime path.
-		NiOverride.RemoveSkinOverride(playerRef, True, False, bodySlotMask, textureSetOverrideKey, textureSetIndex)
-		NiOverride.RemoveSkinOverride(playerRef, True, True, bodySlotMask, textureSetOverrideKey, textureSetIndex)
-		NiOverride.RemoveSkinOverride(playerRef, True, False, bodySlotMask, stringOverrideKey, normalTextureIndex)
-		NiOverride.RemoveSkinOverride(playerRef, True, True, bodySlotMask, stringOverrideKey, normalTextureIndex)
+		NiOverride.RemoveSkinOverride(playerRef, isFemale, False, bodySlotMask, textureSetOverrideKey, textureSetIndex)
+		NiOverride.RemoveSkinOverride(playerRef, isFemale, True, bodySlotMask, textureSetOverrideKey, textureSetIndex)
+		NiOverride.RemoveSkinOverride(playerRef, isFemale, False, bodySlotMask, stringOverrideKey, normalTextureIndex)
+		NiOverride.RemoveSkinOverride(playerRef, isFemale, True, bodySlotMask, stringOverrideKey, normalTextureIndex)
 
 		If usingCotrBodyAddonPath
-			NiOverride.RemoveNodeOverride(playerRef, True, legacyBodyNodeName, textureSetOverrideKey, textureSetIndex)
-			NiOverride.RemoveNodeOverride(playerRef, True, legacyBodyNodeName, stringOverrideKey, normalTextureIndex)
-			NiOverride.RemoveNodeOverride(playerRef, True, bodyNodeName, textureSetOverrideKey, textureSetIndex)
-			NiOverride.RemoveNodeOverride(playerRef, True, bodyNodeName, stringOverrideKey, normalTextureIndex)
-			NiOverride.RemoveNodeOverride(playerRef, True, bodyNamedNodeName, textureSetOverrideKey, textureSetIndex)
-			NiOverride.RemoveNodeOverride(playerRef, True, bodyNamedNodeName, stringOverrideKey, normalTextureIndex)
+			NiOverride.RemoveNodeOverride(playerRef, isFemale, legacyBodyNodeName, textureSetOverrideKey, textureSetIndex)
+			NiOverride.RemoveNodeOverride(playerRef, isFemale, legacyBodyNodeName, stringOverrideKey, normalTextureIndex)
+			NiOverride.RemoveNodeOverride(playerRef, isFemale, bodyNodeName, textureSetOverrideKey, textureSetIndex)
+			NiOverride.RemoveNodeOverride(playerRef, isFemale, bodyNodeName, stringOverrideKey, normalTextureIndex)
+			NiOverride.RemoveNodeOverride(playerRef, isFemale, bodyNamedNodeName, textureSetOverrideKey, textureSetIndex)
+			NiOverride.RemoveNodeOverride(playerRef, isFemale, bodyNamedNodeName, stringOverrideKey, normalTextureIndex)
 			If persist
-				NiOverride.RemoveOverride(playerRef, True, cotrSkinArmor, cotrBodyAddon, legacyBodyNodeName, stringOverrideKey, normalTextureIndex)
-				NiOverride.RemoveOverride(playerRef, True, cotrSkinArmor, cotrBodyAddon, bodyNodeName, stringOverrideKey, normalTextureIndex)
-				NiOverride.RemoveOverride(playerRef, True, cotrSkinArmor, cotrBodyAddon, bodyNamedNodeName, stringOverrideKey, normalTextureIndex)
+				NiOverride.RemoveOverride(playerRef, isFemale, cotrSkinArmor, cotrBodyAddon, legacyBodyNodeName, stringOverrideKey, normalTextureIndex)
+				NiOverride.RemoveOverride(playerRef, isFemale, cotrSkinArmor, cotrBodyAddon, bodyNodeName, stringOverrideKey, normalTextureIndex)
+				NiOverride.RemoveOverride(playerRef, isFemale, cotrSkinArmor, cotrBodyAddon, bodyNamedNodeName, stringOverrideKey, normalTextureIndex)
 			EndIf
-			NiOverride.AddOverrideString(playerRef, True, cotrSkinArmor, cotrBodyAddon, bodyNodeName, stringOverrideKey, normalTextureIndex, bodyNormalTexturePath, persist)
-			NiOverride.AddOverrideString(playerRef, True, cotrSkinArmor, cotrBodyAddon, bodyNamedNodeName, stringOverrideKey, normalTextureIndex, bodyNormalTexturePath, persist)
-			bodyAddonOverride = NiOverride.HasOverride(playerRef, True, cotrSkinArmor, cotrBodyAddon, bodyNodeName, stringOverrideKey, normalTextureIndex)
-			bodyAddonNamedOverride = NiOverride.HasOverride(playerRef, True, cotrSkinArmor, cotrBodyAddon, bodyNamedNodeName, stringOverrideKey, normalTextureIndex)
+			NiOverride.AddOverrideString(playerRef, isFemale, cotrSkinArmor, cotrBodyAddon, bodyNodeName, stringOverrideKey, normalTextureIndex, bodyNormalTexturePath, persist)
+			NiOverride.AddOverrideString(playerRef, isFemale, cotrSkinArmor, cotrBodyAddon, bodyNamedNodeName, stringOverrideKey, normalTextureIndex, bodyNormalTexturePath, persist)
+			bodyAddonOverride = NiOverride.HasOverride(playerRef, isFemale, cotrSkinArmor, cotrBodyAddon, bodyNodeName, stringOverrideKey, normalTextureIndex)
+			bodyAddonNamedOverride = NiOverride.HasOverride(playerRef, isFemale, cotrSkinArmor, cotrBodyAddon, bodyNamedNodeName, stringOverrideKey, normalTextureIndex)
 		Else
-			NiOverride.AddSkinOverrideString(playerRef, True, False, bodySlotMask, stringOverrideKey, normalTextureIndex, bodyNormalTexturePath, persist)
-			NiOverride.AddSkinOverrideString(playerRef, True, True, bodySlotMask, stringOverrideKey, normalTextureIndex, bodyNormalTexturePath, persist)
+			NiOverride.AddSkinOverrideString(playerRef, isFemale, False, bodySlotMask, stringOverrideKey, normalTextureIndex, bodyNormalTexturePath, persist)
+			NiOverride.AddSkinOverrideString(playerRef, isFemale, True, bodySlotMask, stringOverrideKey, normalTextureIndex, bodyNormalTexturePath, persist)
 		EndIf
 	EndIf
 
@@ -144,21 +161,21 @@ Function ApplySelectedNormalPaths(String bodyNormalTexturePath, String handNorma
 		handMode = "custom_selected_path"
 
 		; Migrate away from the legacy hand experiments before applying the exact COtR hand addon target.
-		NiOverride.RemoveSkinOverride(playerRef, True, False, handSlotMask, textureSetOverrideKey, textureSetIndex)
-		NiOverride.RemoveSkinOverride(playerRef, True, True, handSlotMask, textureSetOverrideKey, textureSetIndex)
-		NiOverride.RemoveSkinOverride(playerRef, True, False, handSlotMask, stringOverrideKey, normalTextureIndex)
-		NiOverride.RemoveSkinOverride(playerRef, True, True, handSlotMask, stringOverrideKey, normalTextureIndex)
-		NiOverride.RemoveNodeOverride(playerRef, True, legacyHandNodeName, textureSetOverrideKey, textureSetIndex)
-		NiOverride.RemoveNodeOverride(playerRef, True, legacyHandNodeName, stringOverrideKey, normalTextureIndex)
-		NiOverride.RemoveNodeOverride(playerRef, True, handNodeName, textureSetOverrideKey, textureSetIndex)
-		NiOverride.RemoveNodeOverride(playerRef, True, handNodeName, stringOverrideKey, normalTextureIndex)
+		NiOverride.RemoveSkinOverride(playerRef, isFemale, False, handSlotMask, textureSetOverrideKey, textureSetIndex)
+		NiOverride.RemoveSkinOverride(playerRef, isFemale, True, handSlotMask, textureSetOverrideKey, textureSetIndex)
+		NiOverride.RemoveSkinOverride(playerRef, isFemale, False, handSlotMask, stringOverrideKey, normalTextureIndex)
+		NiOverride.RemoveSkinOverride(playerRef, isFemale, True, handSlotMask, stringOverrideKey, normalTextureIndex)
+		NiOverride.RemoveNodeOverride(playerRef, isFemale, legacyHandNodeName, textureSetOverrideKey, textureSetIndex)
+		NiOverride.RemoveNodeOverride(playerRef, isFemale, legacyHandNodeName, stringOverrideKey, normalTextureIndex)
+		NiOverride.RemoveNodeOverride(playerRef, isFemale, handNodeName, textureSetOverrideKey, textureSetIndex)
+		NiOverride.RemoveNodeOverride(playerRef, isFemale, handNodeName, stringOverrideKey, normalTextureIndex)
 		If persist
-			NiOverride.RemoveOverride(playerRef, True, cotrSkinArmor, cotrHandAddon, legacyHandNodeName, stringOverrideKey, normalTextureIndex)
-			NiOverride.RemoveOverride(playerRef, True, cotrSkinArmor, cotrHandAddon, handNodeName, stringOverrideKey, normalTextureIndex)
+			NiOverride.RemoveOverride(playerRef, isFemale, cotrSkinArmor, cotrHandAddon, legacyHandNodeName, stringOverrideKey, normalTextureIndex)
+			NiOverride.RemoveOverride(playerRef, isFemale, cotrSkinArmor, cotrHandAddon, handNodeName, stringOverrideKey, normalTextureIndex)
 		EndIf
 
-		NiOverride.AddOverrideString(playerRef, True, cotrSkinArmor, cotrHandAddon, handNodeName, stringOverrideKey, normalTextureIndex, resolvedHandNormalTexturePath, persist)
-		handAddonOverride = NiOverride.HasOverride(playerRef, True, cotrSkinArmor, cotrHandAddon, handNodeName, stringOverrideKey, normalTextureIndex)
+		NiOverride.AddOverrideString(playerRef, isFemale, cotrSkinArmor, cotrHandAddon, handNodeName, stringOverrideKey, normalTextureIndex, resolvedHandNormalTexturePath, persist)
+		handAddonOverride = NiOverride.HasOverride(playerRef, isFemale, cotrSkinArmor, cotrHandAddon, handNodeName, stringOverrideKey, normalTextureIndex)
 	EndIf
 
 	If bodyNormalTexturePath != ""
@@ -182,8 +199,8 @@ Function ApplySelectedNormalPaths(String bodyNormalTexturePath, String handNorma
 			bodyThirdPersonOverride = bodyAddonOverride || bodyAddonNamedOverride
 			bodyFirstPersonOverride = bodyAddonOverride || bodyAddonNamedOverride
 		Else
-			bodyThirdPersonOverride = NiOverride.HasSkinOverride(playerRef, True, False, bodySlotMask, stringOverrideKey, normalTextureIndex)
-			bodyFirstPersonOverride = NiOverride.HasSkinOverride(playerRef, True, True, bodySlotMask, stringOverrideKey, normalTextureIndex)
+			bodyThirdPersonOverride = NiOverride.HasSkinOverride(playerRef, isFemale, False, bodySlotMask, stringOverrideKey, normalTextureIndex)
+			bodyFirstPersonOverride = NiOverride.HasSkinOverride(playerRef, isFemale, True, bodySlotMask, stringOverrideKey, normalTextureIndex)
 		EndIf
 	EndIf
 
