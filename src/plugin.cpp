@@ -1347,6 +1347,15 @@ class GetWeightSyncHandler : public RE::GFxFunctionHandler
 public:
     void Call(Params& a_params) override
     {
+        // With WeightSyncPoll=0 we deliberately answer nothing. The patched
+        // SetSliders poll does Number(GetWeightSync()) and returns early on
+        // NaN, so it never reaches itemList.requestUpdate(). That isolates the
+        // 50 ms list refresh as a suspect for native face slider corruption
+        // without touching the SWF.
+        if (!FaceMorphDiagnostics::UseWeightSyncPoll()) {
+            return;
+        }
+
         if (a_params.retVal) {
             a_params.retVal->SetNumber(GetWeightSyncValue());
         }

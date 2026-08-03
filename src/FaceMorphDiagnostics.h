@@ -12,6 +12,11 @@ namespace FaceMorphDiagnostics
 	inline constexpr bool kEnableFaceNodeSnapshot = false;
 	inline constexpr bool kEnableRaceMenuEntryDump = false;
 	inline constexpr bool kEnableRaceMenuFacePreview = true;
+	// Drives the patched RaceMenu weight row from the physique wheel on a 50 ms
+	// poll. Set WeightSyncPoll=0 to answer GetWeightSync with nothing, which
+	// makes the ActionScript bail before itemList.requestUpdate(): that isolates
+	// whether the poll's list refresh is what corrupts native face sliders.
+	inline constexpr bool kEnableWeightSyncPoll = true;
 	inline constexpr int kDefaultStableNormalMapHysteresisPercent = 3;
 
 	void LoadConfig();
@@ -20,6 +25,7 @@ namespace FaceMorphDiagnostics
 	[[nodiscard]] bool IsRaceMenuEntryDumpEnabled();
 	[[nodiscard]] bool IsVerboseLoggingEnabled();
 	[[nodiscard]] bool UseRaceMenuFacePreview();
+	[[nodiscard]] bool UseWeightSyncPoll();
 	[[nodiscard]] bool UseStableNormalMapSelection();
 	[[nodiscard]] int GetStableNormalMapHysteresisPercent();
 
