@@ -1573,42 +1573,18 @@ namespace mps
                 std::string_view probeLabel;
                 if ((TryGetStringMember(entry, "text", probeLabel) ||
                      TryGetStringMember(entry, "name", probeLabel)) &&
-                    probeLabel.find("NoseWingWidth") != std::string_view::npos) {
+                    probeLabel.find("NoseWing") != std::string_view::npos) {
                     std::uint32_t probeSliderId = 0;
+                    std::uint32_t probeIndex = 0;
                     (void)TryGetExactUIntMember(entry, "sliderID", probeSliderId);
-
-                    // The extended index and subtype live on the native slider,
-                    // not on the GFx entry. GetSliderData is read-only (verified
-                    // in SKEE's ScaleformCharGenFunctions.cpp).
-                    double probePosition = 0.0;
-                    (void)TryGetEntryPosition(entry, probePosition);
-                    RE::GFxValue probeData;
-                    std::uint32_t probeException = 0;
-                    std::uint32_t nativeType = 0;
-                    std::uint32_t nativeIndex = 0;
-                    std::uint32_t nativeSubType = 0;
-                    const bool probeOk = InvokeGetSliderData(
-                        frame.movie,
-                        charGen,
-                        probeSliderId,
-                        probePosition,
-                        probeData,
-                        probeException);
-                    if (probeOk) {
-                        (void)TryGetExactUIntMember(probeData, "type", nativeType);
-                        (void)TryGetExactUIntMember(probeData, "index", nativeIndex);
-                        (void)TryGetExactUIntMember(probeData, "subType", nativeSubType);
-                    }
+                    (void)TryGetExactUIntMember(entry, "index", probeIndex);
                     spdlog::error(
-                        "FaceRouter NOSEDIAG sex={} label={} sliderId={} pos={:.3f} ok={} type={} ext={} subType={}",
+                        "FaceRouter NOSEDIAG sex={} entry={} label={} sliderId={} ext={}",
                         frame.sex == FaceSex::Male ? "male" : "female",
+                        entryIndex,
                         probeLabel,
                         probeSliderId,
-                        probePosition,
-                        probeOk ? 1 : 0,
-                        nativeType,
-                        nativeIndex,
-                        nativeSubType);
+                        probeIndex);
                 }
             }
 
