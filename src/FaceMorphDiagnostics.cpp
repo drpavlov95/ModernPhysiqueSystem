@@ -22,7 +22,6 @@ namespace
 	std::atomic_bool g_verboseLogging{ false };
 	std::atomic_bool g_raceMenuFacePreview{ FaceMorphDiagnostics::kEnableRaceMenuFacePreview };
 	std::atomic_bool g_weightSyncPoll{ FaceMorphDiagnostics::kEnableWeightSyncPoll };
-	std::atomic_bool g_nativeSliderWatch{ FaceMorphDiagnostics::kEnableNativeSliderWatch };
 	std::atomic_bool g_stableNormalMapSelection{ false };
 	std::atomic_int g_stableNormalMapHysteresisPercent{
 		FaceMorphDiagnostics::kDefaultStableNormalMapHysteresisPercent
@@ -124,7 +123,6 @@ namespace FaceMorphDiagnostics
 		const bool verboseLogging = ReadBool(configPath, "Diagnostics", "VerboseLogging", false);
 		const bool raceMenuFacePreview = ReadBool(configPath, "FaceMorphs", "PreviewRaceMenuFaceSliders", kEnableRaceMenuFacePreview);
 		const bool weightSyncPoll = ReadBool(configPath, "FaceMorphs", "WeightSyncPoll", kEnableWeightSyncPoll);
-		const bool nativeSliderWatch = ReadBool(configPath, "Diagnostics", "NativeSliderWatch", kEnableNativeSliderWatch);
 		const std::string logLevelText = ReadString(configPath, "Logging", "Level", "warn");
 		std::string normalMapSelectionMode = ReadString(configPath, "NormalMaps", "SelectionMode", "legacy");
 		std::ranges::transform(normalMapSelectionMode, normalMapSelectionMode.begin(), [](unsigned char ch) {
@@ -150,7 +148,6 @@ namespace FaceMorphDiagnostics
 		g_verboseLogging.store(verboseLogging);
 		g_raceMenuFacePreview.store(raceMenuFacePreview);
 		g_weightSyncPoll.store(weightSyncPoll);
-		g_nativeSliderWatch.store(nativeSliderWatch);
 		g_stableNormalMapSelection.store(stableNormalMapSelection);
 		g_stableNormalMapHysteresisPercent.store(stableNormalMapHysteresisPercent);
 
@@ -158,7 +155,7 @@ namespace FaceMorphDiagnostics
 		spdlog::flush_on(logLevel <= spdlog::level::debug ? spdlog::level::debug : spdlog::level::warn);
 
 		spdlog::info(
-			"ModernPhysiqueSystem config path={} exists={} logLevel={} FaceCausalTrace={} FaceNodeSnapshot={} RaceMenuEntryDump={} VerboseLogging={} PreviewRaceMenuFaceSliders={} WeightSyncPoll={} NativeSliderWatch={} NormalSelectionMode={} StableHysteresisPercent={}",
+			"ModernPhysiqueSystem config path={} exists={} logLevel={} FaceCausalTrace={} FaceNodeSnapshot={} RaceMenuEntryDump={} VerboseLogging={} PreviewRaceMenuFaceSliders={} WeightSyncPoll={} NormalSelectionMode={} StableHysteresisPercent={}",
 			configPath.string(),
 			configExists ? 1 : 0,
 			logLevelText,
@@ -168,7 +165,6 @@ namespace FaceMorphDiagnostics
 			verboseLogging ? 1 : 0,
 			raceMenuFacePreview ? 1 : 0,
 			weightSyncPoll ? 1 : 0,
-			nativeSliderWatch ? 1 : 0,
 			normalMapSelectionMode,
 			stableNormalMapHysteresisPercent);
 	}
@@ -201,11 +197,6 @@ namespace FaceMorphDiagnostics
 	bool UseWeightSyncPoll()
 	{
 		return g_weightSyncPoll.load();
-	}
-
-	bool IsNativeSliderWatchEnabled()
-	{
-		return g_nativeSliderWatch.load();
 	}
 
 	bool UseStableNormalMapSelection()

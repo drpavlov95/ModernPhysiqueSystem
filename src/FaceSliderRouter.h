@@ -187,19 +187,12 @@ namespace mps
             RE::TESNPC* npc,
             std::array<float, kFaceAxisCount>& outValues,
             std::uint32_t& outExceptionCode);
-
-        // Diagnostic: samples a few native (non-MPS) face sliders every tick and
-        // reports only transitions, so the exact moment a value leaves its valid
-        // range can be correlated with the surrounding rebuild events.
-        void WatchNativeSliders(RE::TESNPC* npc);
         [[nodiscard]] bool TryDispatchPlan(
             RE::GFxMovieView* movie,
             RE::TESNPC* npc,
             const FaceReplayPlan& plan);
 
         FaceRouteController controller_;
-        // Last sampled value of each watched native slider (see WatchNativeSliders).
-        std::array<float, 4> watchedValues_{};
         IFaceMorphInterface* faceMorphInterface_ = nullptr;
         FaceSliderRouterOptions options_;
 

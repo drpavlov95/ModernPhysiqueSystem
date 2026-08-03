@@ -1,6 +1,5 @@
 #include "FaceSliderRouter.h"
 
-#include "FaceMorphDiagnostics.h"
 #include "RaceMenuInterop.h"
 
 #include <Windows.h>
@@ -1048,10 +1047,6 @@ namespace mps
             return FaceRouterTickResult::Closed;
         }
 
-        // Sample before any routing gate: the corrupting write lands during the
-        // rebuild window, which is exactly when this tick refuses to route.
-        WatchNativeSliders(frame.npc);
-
         RouteKey key;
         if (!ValidateFrame(frame, key)) {
             // A previously certified route must not survive loss of the
@@ -2009,62 +2004,6 @@ namespace mps
             }
         }
         return true;
-    }
-
-    void FaceSliderRouter::WatchNativeSliders(RE::TESNPC* npc)
-    {
-        if (!FaceMorphDiagnostics::IsNativeSliderWatchEnabled()) {
-            return;
-        }
-        if (!faceMorphInterface_ || !npc || !PrepareReadbackAbi()) {
-            return;
-        }
-
-        // Native sliders this mod never addresses. Any change here is somebody
-        // else's write, and a magnitude above 1.0 is invalid for a kTypeSlider
-        // entry by construction.
-        static const std::array<SKEEFixedString, 4> kWatched{
-            SKEEFixedString("Nose_NoseWingWidth"),
-            SKEEFixedString("Nose_NoseWingHeight"),
-            SKEEFixedString("Nose_NoseWingArc"),
-            SKEEFixedString("Nose_NoseWingVolume")
-        };
-        static const std::array<const char*, 4> kWatchedNames{
-            "Nose_NoseWingWidth",
-            "Nose_NoseWingHeight",
-            "Nose_NoseWingArc",
-            "Nose_NoseWingVolume"
-        };
-
-        for (std::size_t index = 0; index < kWatched.size(); ++index) {
-            float value = 0.0f;
-            std::uint32_t exceptionCode = 0;
-            if (!ReadFaceMorphSEH(
-                    faceMorphInterface_,
-                    npc,
-                    std::addressof(kWatched[index]),
-                    std::addressof(value),
-                    std::addressof(exceptionCode))) {
-                continue;
-            }
-
-            float& previous = watchedValues_[index];
-            if (std::abs(value - previous) <= 0.0005f) {
-                continue;
-            }
-
-            const float old = previous;
-            previous = value;
-            spdlog::error(
-                "FaceRouter NATIVEWATCH {} {:.3f} -> {:.3f} routeStatus={} routeGen={} preflight={} outOfRange={}",
-                kWatchedNames[index],
-                old,
-                value,
-                static_cast<int>(controller_.Status()),
-                controller_.RouteGeneration(),
-                preflightProofValid_.load(std::memory_order_acquire) ? 1 : 0,
-                std::abs(value) > 1.0f ? 1 : 0);
-        }
     }
 
     bool FaceSliderRouter::TryDispatchPlan(
