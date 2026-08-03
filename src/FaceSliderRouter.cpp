@@ -1048,6 +1048,10 @@ namespace mps
             return FaceRouterTickResult::Closed;
         }
 
+        // Sample before any routing gate: the corrupting write lands during the
+        // rebuild window, which is exactly when this tick refuses to route.
+        WatchNativeSliders(frame.npc);
+
         RouteKey key;
         if (!ValidateFrame(frame, key)) {
             // A previously certified route must not survive loss of the
@@ -1060,12 +1064,6 @@ namespace mps
                 true);
             return FaceRouterTickResult::InvalidFrame;
         }
-
-        // Sample after the frame is structurally valid but before any *routing*
-        // gate: the corrupting write lands during the rebuild window, which is
-        // exactly when this tick declines to route. Reading through an
-        // unvalidated frame crashed the game, so validation must come first.
-        WatchNativeSliders(frame.npc);
 
         if (sessionMovie_ && sessionMovie_ != frame.movie) {
             // A movie replacement is a real list-generation boundary.
@@ -2019,19 +2017,6 @@ namespace mps
             return;
         }
         if (!faceMorphInterface_ || !npc || !PrepareReadbackAbi()) {
-            return;
-        }
-
-        // Defence in depth: this is diagnostic-only code and must never be able
-        // to take the game down. Reject anything that does not look like a live
-        // TESNPC before handing the pointer to skee64.
-        const auto npcAddress = reinterpret_cast<std::uintptr_t>(npc);
-        if (npcAddress < 0x10000 ||
-            npcAddress == std::numeric_limits<std::uintptr_t>::max()) {
-            return;
-        }
-        auto* player = RE::PlayerCharacter::GetSingleton();
-        if (!player || npc != player->GetActorBase()) {
             return;
         }
 
