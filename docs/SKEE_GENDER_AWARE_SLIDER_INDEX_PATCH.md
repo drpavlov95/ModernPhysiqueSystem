@@ -262,8 +262,34 @@ raceData = &menu->sliderData[gender][menu->raceIndex];
 
 That narrows the exposure: corruption requires the current gender's array to hold
 indices assigned under a different sex — i.e. a window in which that array has not
-yet been rebuilt for the sex now in effect. Pinning down that window precisely is
-the remaining work before either an upstream patch or a standalone fix is written.
+yet been rebuilt for the sex now in effect.
+
+### Measurement (2026-08-02) — the settled state is correct
+
+A probe was added to read, at snapshot time, the native `index`/`subType` of
+`Nose_NoseWingWidth` (via the read-only `CharGen.GetSliderData`) together with the
+sex then in effect:
+
+```
+sex=male    sliderId=302  type=2  ext=456  subType=0
+sex=female  sliderId=272  type=2  ext=426  subType=0
+```
+
+Each sex reports an index from **its own** list (the male/female delta of 30 is
+consistent), and both report `subType=0` (Slider). So in the *settled* list there
+is no cross-sex index and no Preset/Slider type confusion.
+
+**This refutes the hypothesis as stated.** The corrupting write is not visible from
+the settled state; it happens inside the rebuild transient, which this vantage
+point (snapshot time, after the list settles) cannot observe.
+
+Note the absolute values also differ by 2 from the indices computed offline from
+the INI (`458`/`428` expected vs `456`/`426` observed), so the offline index model
+is itself slightly wrong — two entries before this slider do not reach the internal
+list. Any future analysis should derive indices from the live list, not from the INI.
+
+**Open.** Characterising the transient requires observing the write itself
+(hooking the DoubleMorph callback or `SetMorphValue`), not the list state around it.
 
 ---
 
