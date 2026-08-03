@@ -225,6 +225,48 @@ SliderInternalPtr sliderInternal = g_morphInterface.GetSliderByIndex(player->rac
 
 ---
 
+## 2.4 IMPORTANT — the assignment side is not yet covered
+
+**Status: this patch is incomplete as written. Do not submit upstream yet.**
+
+Making resolution gender-aware only fixes half of the path. Index *assignment*
+has the same defect (`FaceMorphInterface.cpp:1280`, inside `LoadSliders`):
+
+```cpp
+currentList = CreateSliderList(player->race, CALL_MEMBER_FN(npc, GetSex)());
+...
+UInt32 sliderIndex = morphIndex + i;   // index taken from the CURRENT sex's list
+```
+
+`LoadSliders` is reached from `AddSlider_Hook` (`SKEEHooks.cpp:789`) while
+RaceMenu populates a *particular gender's* slider array
+(`RaceSexMenu::sliderData[gender]`). The index written into each entry is taken
+from the list of whatever sex is current at that moment — not from the list of
+the gender whose array is being filled.
+
+So if the array for gender G is built while the player is gender H (H != G), the
+entries in array G carry H-derived indices. Gender-aware resolution then faithfully
+resolves an index that was wrong at birth.
+
+A complete upstream fix must make both sides agree, e.g. by passing the target
+gender into `LoadSliders` and using `CreateSliderList(race, thatGender)` for index
+assignment, so an entry's index always refers to the list of its own gender.
+
+Note also (from the dispatch hook, `SKEEHooks.cpp:810-816`) that only the
+*current* gender's array is ever consulted at dispatch time:
+
+```cpp
+UInt8 gender = CALL_MEMBER_FN(actorBase, GetSex)();
+raceData = &menu->sliderData[gender][menu->raceIndex];
+```
+
+That narrows the exposure: corruption requires the current gender's array to hold
+indices assigned under a different sex — i.e. a window in which that array has not
+yet been rebuilt for the sex now in effect. Pinning down that window precisely is
+the remaining work before either an upstream patch or a standalone fix is written.
+
+---
+
 ## 3. Why this is a root fix and not a mitigation
 
 It removes the precondition rather than blocking a consequence. After the patch,
