@@ -107,7 +107,7 @@ list: RaceMenu builds its native array *before* calling the ActionScript
 `LoadSliders` → `CreateSliderList(race, currentSex)`. Our repair at that point is
 a redundant no-op with the same gender.
 
-## 5. Remaining hypothesis — not yet tested
+## 5. Disproved cause C — the 50 ms weight-sync poll
 
 The patched ActionScript polls every 50 ms while the Body category is active:
 
@@ -127,10 +127,38 @@ There are suspends for this (`suspendPhysiqueWeightSyncForRebuild` on `SetSlider
 and on the `ChangeSex`/`ChangeRace` internal callbacks, with a 100 ms resume
 gate), so the window, if any, is between the sex flip and the first suspend.
 
-**How to test it without guessing:** temporarily stop starting
-`physiqueWeightSyncInterval` altogether and reproduce M→F→M→F. If the corruption
-disappears, the poll is implicated; if it persists, the poll is cleared and the
-write is RaceMenu's own.
+**Tested 2026-08-03.** A `WeightSyncPoll` INI switch was added: with it at `0`,
+`GetWeightSync` answers nothing, `Number(GetWeightSync())` is `NaN`, and the poll
+returns before `itemList.requestUpdate()`. Reproducing M→F→M→F with the poll
+disabled still produced the corruption, and the run logged no warnings or errors
+at all. **Disproved** — the poll is cleared. The switch was left in place
+(default `1`) as a supported diagnostic.
+
+## 5b. Conclusion of the MPS-side investigation
+
+Every path by which this mod could reach a native face slider has now been either
+audited away (section 2) or disproved by experiment (sections 3, 4, 5). No
+remaining MPS-side hypothesis is open.
+
+The write therefore originates in RaceMenu's own dispatch. What this mod
+contributes is exposure, not the defect: driving repeated sex switches inside one
+menu session exercises RaceMenu's rebuild path far harder than ordinary use, and
+`ApplyMorphs` makes a single bad write permanent by replaying it at full strength
+on every subsequent rebuild.
+
+Options from here, in order of honesty about what they achieve:
+
+1. **Upstream fix.** `GetSliderByIndex(race, index)` is gender-blind while
+   `GetSlider(race, gender, name)` is not, over a race-keyed map. That asymmetry
+   is real regardless of section 3's refutation, and fixing it (plus the matching
+   assignment side, section 2.4) removes the whole class. Requires RaceMenu.
+2. **A guard on the write.** Hooking `SetMorphValue` and rejecting a magnitude
+   above 1.0 for a `kTypeSlider` entry would stop invalid data at the boundary
+   where it enters — a type-invariant check, not a repair after the fact. It does
+   not explain the bad dispatch, and it is version-locked to a verified
+   `skee64.dll` identity.
+3. **Accept and document.** The corruption needs roughly four sex switches in a
+   single menu session; it does not occur in ordinary play.
 
 ## 6. State of the mod
 
