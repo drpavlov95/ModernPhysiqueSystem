@@ -17,6 +17,9 @@ namespace FaceMorphDiagnostics
 	// makes the ActionScript bail before itemList.requestUpdate(): that isolates
 	// whether the poll's list refresh is what corrupts native face sliders.
 	inline constexpr bool kEnableWeightSyncPoll = true;
+	// Samples a few native face sliders each tick and logs only transitions, to
+	// locate the exact moment an out-of-range value is written by someone else.
+	inline constexpr bool kEnableNativeSliderWatch = false;
 	inline constexpr int kDefaultStableNormalMapHysteresisPercent = 3;
 
 	void LoadConfig();
@@ -26,6 +29,7 @@ namespace FaceMorphDiagnostics
 	[[nodiscard]] bool IsVerboseLoggingEnabled();
 	[[nodiscard]] bool UseRaceMenuFacePreview();
 	[[nodiscard]] bool UseWeightSyncPoll();
+	[[nodiscard]] bool IsNativeSliderWatchEnabled();
 	[[nodiscard]] bool UseStableNormalMapSelection();
 	[[nodiscard]] int GetStableNormalMapHysteresisPercent();
 
