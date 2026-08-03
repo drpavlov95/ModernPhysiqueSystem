@@ -23,10 +23,17 @@ namespace mps
 {
     namespace
     {
+        // Index-stable slider keys. SKEE sorts its race-only internal list by
+        // SliderInternal::name, and the male/female lists have different
+        // lengths (295 vs 259 for the supported Trixter set). The "A0_" prefix
+        // sorts these three ahead of every other entry in BOTH lists, so they
+        // occupy internal indices 0/1/2 for either sex. A DoubleMorph callback
+        // that resolves against the wrong-sex internal list therefore still
+        // lands on the intended MPS axis instead of a nose/lip slider.
         constexpr std::array<std::string_view, kFaceAxisCount> kAxisTokens{
-            "FACE_RLYThin",
-            "FACE_RLYMuscular",
-            "FACE_RLYHeavy"
+            "A0_MPS_RLYThin",
+            "A0_MPS_RLYMuscular",
+            "A0_MPS_RLYHeavy"
         };
 
         constexpr std::string_view kDoubleMorphCallback =
@@ -1242,6 +1249,28 @@ namespace mps
                 key,
                 certified->sourceFingerprint,
                 frame.sex);
+
+            // TEMPORARY DIAGNOSTIC (2026-08-02): record the exact route that
+            // was certified for this (race, sex) so repeated visits to the same
+            // sex can be compared for stale visible IDs / extended indices.
+            LogOnce(
+                "routediag_" +
+                    std::to_string(controller_.SessionGeneration()) +
+                    "_" +
+                    std::to_string(controller_.RouteGeneration()),
+                std::format(
+                    "FaceRouter ROUTEDIAG certified sex={} race={:08X} fingerprint={:016X} "
+                    "thin(id={},ext={}) muscular(id={},ext={}) heavy(id={},ext={})",
+                    frame.sex == FaceSex::Male ? "male" : "female",
+                    frame.race ? frame.race->GetFormID() : 0u,
+                    certified->sourceFingerprint,
+                    certified->axes[0].visibleSliderId,
+                    certified->axes[0].extendedIndex,
+                    certified->axes[1].visibleSliderId,
+                    certified->axes[1].extendedIndex,
+                    certified->axes[2].visibleSliderId,
+                    certified->axes[2].extendedIndex),
+                true);
         }
 
         if (!controller_.CanDispatchExactCurrentRoute()) {
@@ -1395,18 +1424,27 @@ namespace mps
         bool bindIfUnset)
     {
         const auto current = std::this_thread::get_id();
+        // TEMPORARY DIAGNOSTIC (2026-08-02): report the real OS thread ids so a
+        // single in-game run shows which thread each router entry point runs on.
+        const unsigned long currentOsThread = ::GetCurrentThreadId();
         if (!gameThread_) {
             if (!bindIfUnset) {
                 if (!wrongThreadLogged_) {
                     spdlog::error(
-                        "FaceRouter {} rejected before game-thread binding",
-                        operation ? operation : "<unknown>");
+                        "FaceRouter {} rejected before game-thread binding osThread={}",
+                        operation ? operation : "<unknown>",
+                        currentOsThread);
                     wrongThreadLogged_ = true;
                 }
                 return false;
             }
             gameThread_ = current;
+            boundOsThread_ = currentOsThread;
             wrongThreadLogged_ = false;
+            spdlog::error(
+                "FaceRouter THREADDIAG bind operation={} osThread={}",
+                operation ? operation : "<unknown>",
+                currentOsThread);
             return true;
         }
 
@@ -1414,12 +1452,21 @@ namespace mps
             return true;
         }
 
-        if (!wrongThreadLogged_) {
+        // Report every distinct (operation, thread) rejection once instead of a
+        // single global latch, which previously hid all but the first mismatch.
+        const auto diagnosticKey =
+            std::format(
+                "{}|{}",
+                operation ? operation : "<unknown>",
+                currentOsThread);
+        if (reportedWrongThreads_.insert(diagnosticKey).second) {
             spdlog::error(
-                "FaceRouter {} rejected off game thread",
-                operation ? operation : "<unknown>");
-            wrongThreadLogged_ = true;
+                "FaceRouter THREADDIAG reject operation={} osThread={} boundOsThread={}",
+                operation ? operation : "<unknown>",
+                currentOsThread,
+                boundOsThread_);
         }
+        wrongThreadLogged_ = true;
         return false;
     }
 
@@ -1516,6 +1563,29 @@ namespace mps
                     std::addressof(entry)) ||
                 !entry.IsObject()) {
                 continue;
+            }
+
+            // TEMPORARY DIAGNOSTIC (2026-08-02): a native slider carries the
+            // extended index it was assigned from LoadSliders. Recording it
+            // together with the sex now in effect shows whether this array was
+            // built under a different sex (index belongs to the other list).
+            {
+                std::string_view probeLabel;
+                if ((TryGetStringMember(entry, "text", probeLabel) ||
+                     TryGetStringMember(entry, "name", probeLabel)) &&
+                    probeLabel.find("NoseWing") != std::string_view::npos) {
+                    std::uint32_t probeSliderId = 0;
+                    std::uint32_t probeIndex = 0;
+                    (void)TryGetExactUIntMember(entry, "sliderID", probeSliderId);
+                    (void)TryGetExactUIntMember(entry, "index", probeIndex);
+                    spdlog::error(
+                        "FaceRouter NOSEDIAG sex={} entry={} label={} sliderId={} ext={}",
+                        frame.sex == FaceSex::Male ? "male" : "female",
+                        entryIndex,
+                        probeLabel,
+                        probeSliderId,
+                        probeIndex);
+                }
             }
 
             std::optional<std::size_t> matchedAxis;
@@ -1963,10 +2033,30 @@ namespace mps
 
         static const std::array<SKEEFixedString, kFaceAxisCount>
             keys{
-                SKEEFixedString("FACE_RLYThin"),
-                SKEEFixedString("FACE_RLYMuscular"),
-                SKEEFixedString("FACE_RLYHeavy")
+                SKEEFixedString("A0_MPS_RLYThin"),
+                SKEEFixedString("A0_MPS_RLYMuscular"),
+                SKEEFixedString("A0_MPS_RLYHeavy")
             };
+
+        // TEMPORARY DIAGNOSTIC (2026-08-02): watch a native slider that is NOT
+        // ours. If it grows a large value we can tell whether the corruption
+        // comes from our dispatch or from RaceMenu's own stale-index writes.
+        {
+            static const SKEEFixedString kWatch("Nose_NoseWingWidth");
+            float watchValue = 0.0f;
+            std::uint32_t watchException = 0;
+            if (ReadFaceMorphSEH(
+                    faceMorphInterface_,
+                    npc,
+                    std::addressof(kWatch),
+                    std::addressof(watchValue),
+                    std::addressof(watchException)) &&
+                std::abs(watchValue) > 0.001f) {
+                spdlog::error(
+                    "FaceRouter WATCHDIAG Nose_NoseWingWidth={:.3f}",
+                    watchValue);
+            }
+        }
 
         for (std::size_t axis = 0;
              axis < kFaceAxisCount;
@@ -2048,6 +2138,16 @@ namespace mps
             if (!needsDispatch[axis]) {
                 continue;
             }
+            // TEMPORARY DIAGNOSTIC (2026-08-02): every value actually sent to
+            // SKEE, with the visible id and the pre-dispatch ValueMap reading.
+            spdlog::debug(
+                "FaceRouter DISPATCHDIAG axis={} value={:.3f} sliderId={} ext={} before={:.3f}",
+                axis,
+                plan.desired.values[axis],
+                plan.exactRoutes[axis].visibleSliderId,
+                plan.exactRoutes[axis].extendedIndex,
+                before[axis]);
+
             if (!plan.exactRoutes[axis].IsValid() ||
                 !DispatchDoubleMorph(
                     movie,
