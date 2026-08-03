@@ -23,10 +23,19 @@ namespace mps
 {
     namespace
     {
+        // Index-stable slider keys. SKEE sorts its race-only internal list by
+        // SliderInternal::name, and the male/female lists have different
+        // lengths (295 vs 259 for the supported Trixter set). The "A0_" prefix
+        // sorts these three ahead of every other entry in BOTH lists, so they
+        // occupy internal indices 0/1/2 for either sex. A DoubleMorph callback
+        // that resolves against the wrong-sex internal list therefore still
+        // lands on the intended MPS axis instead of a nose/lip slider.
+        // Must stay in sync with kFaceSlider*Name in Globals.h and with the
+        // [Male]/[Female] keys in the installed sliders INI.
         constexpr std::array<std::string_view, kFaceAxisCount> kAxisTokens{
-            "FACE_RLYThin",
-            "FACE_RLYMuscular",
-            "FACE_RLYHeavy"
+            "A0_MPS_RLYThin",
+            "A0_MPS_RLYMuscular",
+            "A0_MPS_RLYHeavy"
         };
 
         constexpr std::string_view kDoubleMorphCallback =
@@ -1963,9 +1972,9 @@ namespace mps
 
         static const std::array<SKEEFixedString, kFaceAxisCount>
             keys{
-                SKEEFixedString("FACE_RLYThin"),
-                SKEEFixedString("FACE_RLYMuscular"),
-                SKEEFixedString("FACE_RLYHeavy")
+                SKEEFixedString("A0_MPS_RLYThin"),
+                SKEEFixedString("A0_MPS_RLYMuscular"),
+                SKEEFixedString("A0_MPS_RLYHeavy")
             };
 
         for (std::size_t axis = 0;

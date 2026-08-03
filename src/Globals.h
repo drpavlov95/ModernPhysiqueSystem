@@ -26,12 +26,17 @@ constexpr const char* kMorphFatName = "RM_Heavy";
 // These names must match sliderInternal->name (INI LHS), because RaceMenu's
 // DoubleMorph hook writes face values into ValueSet by slider name.
 //
-// The A0_MPS_RLY* index-stability experiment made the sliders visible but did
-// not apply visual morphs in game. Revert the active saved-state keys to the
-// FACE_RLY* names that are known to reach visible geometry before sex switch.
-constexpr const char* kFaceSliderThinName = "FACE_RLYThin";
-constexpr const char* kFaceSliderMuscularName = "FACE_RLYMuscular";
-constexpr const char* kFaceSliderFatName = "FACE_RLYHeavy";
+// Index-stable keys (2026-08-02). SKEE keys its internal slider list by race
+// only, and sorts it by name; the male and female lists have different lengths
+// (295 vs 259 here), so identical names land on different internal indices per
+// sex. The "A0_" prefix sorts these three ahead of every other entry in BOTH
+// lists, pinning them to internal indices 0/1/2 for either sex, which makes a
+// wrong-sex resolution land on the intended axis instead of a nose/lip slider.
+// Keep these in sync with kAxisTokens in FaceSliderRouter.cpp and with the
+// [Male]/[Female] keys in the installed sliders INI.
+constexpr const char* kFaceSliderThinName = "A0_MPS_RLYThin";
+constexpr const char* kFaceSliderMuscularName = "A0_MPS_RLYMuscular";
+constexpr const char* kFaceSliderFatName = "A0_MPS_RLYHeavy";
 constexpr const char* kMorphKey = "RleyBodyMorphs";
 constexpr const char* kRaceMenuName = "RaceSex Menu";
 constexpr const char* kPhysiqueCategoryKey = "rley_physique";
