@@ -123,6 +123,47 @@ That is a small, well-understood cost for removing the catastrophic case — but
 alters a COtR asset's semantics, so it is a decision to take deliberately rather
 than apply silently.
 
+## 6b. Separate finding — MPS morph strength is strongly asymmetric
+
+While investigating "face morphs never apply" on a COtR character, the deployed
+head TRIs were measured directly (per-vertex delta magnitude × multiplier, in game
+units):
+
+| Morph | Male max | Male p99 | Female max | Female p99 |
+| --- | ---: | ---: | ---: | ---: |
+| `RLY_Heavy` | 2.82 | 2.47 | 3.46 | 3.04 |
+| `RLY_Thin` | **3.30** | 2.66 | **0.72** | 0.44 |
+| `RLY_Muscular` | 0.58 | 0.39 | 0.58 | 0.26 |
+| *strongest native morph* | *1.03* | *0.59* | *0.78* | *0.63* |
+| *median native morph* | *0.34* | *0.27* | *0.35* | *0.33* |
+
+Two consequences:
+
+- `RLY_Heavy` (both sexes) and `RLY_Thin` (male) are roughly **3× stronger than
+  any native morph** — they should be unmistakable on screen.
+- `RLY_Thin` on the **female** head is 4.6× weaker than on the male, and
+  `RLY_Muscular` is weak on both — around the native median. Movement toward
+  those poles is expected to be subtle, and would be effectively invisible on a
+  face already distorted by the 37× nose replay.
+
+This is a plausible contributor to "face morphs never apply" being reported on a
+COtR character, where every configuration layer checks out. It is a content
+asymmetry in the TRI data, not a code defect.
+
+### TRI override integrity — verified clean
+
+MPS replaces exactly two of COtR's 89 TRI files. Comparing morph name sets:
+
+| File | COtR | MPS | Lost | Added |
+| --- | ---: | ---: | ---: | --- |
+| `Genesis/FACE_MaleHead.tri` | 72 entries / 71 unique | 74 / 74 | **0** | the 3 `RLY_*` |
+| `Trixter/FACE_FemaleHead.tri` | 62 / 61 | 64 / 64 | **0** | the 3 `RLY_*` |
+
+Vertex counts match (3127). COtR ships a duplicated morph name
+(`FACE1_CheeksBonesBOutIn` / `FACE_CheeksBonesBOutIn`) which MPS's rebuild
+deduplicated, which accounts for the otherwise puzzling +2 rather than +3 entry
+delta. No native morph is lost, so the override does not break native sliders.
+
 ## 7. Alternatives considered
 
 - **Make both sections have identical membership.** Correct in principle, but the
