@@ -19,6 +19,7 @@ const supportsCapturedPointerEvents =
 
 let activePointerId = null;
 let pointerStartPos = null;
+let pointerStartTime = 0;
 let pointerMoved = false;
 let knob = { x: center.x, y: center.y };
 
@@ -29,7 +30,26 @@ let lastPreviewSendTime = 0;
 const MORPH_PREVIEW_INTERVAL = 48;
 const MORPH_COMMIT_DELAY = 120;
 const MORPH_DELTA_THRESHOLD = 0.01;
-const DRAG_START_DISTANCE = 2;
+
+// A press always jumps the knob to the cursor. It only starts *following* the
+// cursor once the gesture proves itself a drag: either the cursor travelled far
+// enough, or the button was held long enough. A quick click therefore places
+// the knob and stops there, immune to the 1-3 px of hand tremor that a click
+// normally carries.
+const DRAG_START_DISTANCE = 4;
+const DRAG_START_HOLD_MS = 140;
+
+// Snap geometry, in canvas pixels against a 138 px wheel radius.
+// Poles and the centre snap EXACTLY, so the readout lands on 1.00 / 0.00
+// rather than 0.997. Axis rails use hysteresis: easy to enter, harder to leave,
+// which is what stops the knob chattering on and off a line.
+const POLE_SNAP_RADIUS = 14;
+const LINE_SNAP_ENTER = 10;
+const LINE_SNAP_RELEASE = 22;
+
+// Poles own the ends of each rail, so the rail yields there and the exact pole
+// snap wins instead of the two fighting over the same pixels.
+const RAIL_END_MARGIN = POLE_SNAP_RADIUS / radius;
 
 let pendingMorphValues = { thin: 0, muscular: 0, fat: 0 };
 let lastPreviewSentValues = null;
@@ -78,6 +98,17 @@ const slotGrid = [
 
 const TAU = Math.PI * 2;
 const EPS = 0.00001;
+
+// Every ring uses the same segment count, so the per-slot geometry is fixed for
+// the life of the page. It used to be recomputed on every one of the ~144 slot
+// fills per frame.
+const SLOT_SEGMENTS = slotGrid[0].segments;
+const SLOT_ARC = (TAU / SLOT_SEGMENTS) * 1.001;
+const SLOT_HALF_THICKNESS = (guideRingRadii[1] - guideRingRadii[0]) * 0.499;
+const SLOT_ANGLES = Array.from(
+    { length: SLOT_SEGMENTS },
+    (_, i) => (-Math.PI / 2) + (i / SLOT_SEGMENTS) * TAU
+);
 
 const ANGLES = {
     heavy: Math.PI / 6,
@@ -135,45 +166,61 @@ function projectPointOntoSegment(px, py, ax, ay, bx, by) {
     return { x, y, t, distance };
 }
 
-function requestAnimatedRedraw() {
-    if (animationFramePending) return;
+function stepSnapLineAnimation() {
+    const speed = (snapLineState.targetAlpha === 0 && snapLineState.slowFade)
+        ? 0.025
+        : 0.065;
 
-    animationFramePending = true;
-    requestAnimationFrame(() => {
-        animationFramePending = false;
+    snapLineState.alpha += (snapLineState.targetAlpha - snapLineState.alpha) * speed;
 
-        const speed = (snapLineState.targetAlpha === 0 && snapLineState.slowFade)
-            ? 0.025
-            : 0.065;
+    if (Math.abs(snapLineState.targetAlpha - snapLineState.alpha) < 0.01) {
+        snapLineState.alpha = snapLineState.targetAlpha;
 
-        snapLineState.alpha += (snapLineState.targetAlpha - snapLineState.alpha) * speed;
+        if (snapLineState.alpha <= 0.001) {
+            snapLineState.alpha = 0;
+            snapLineState.slowFade = false;
 
-        if (Math.abs(snapLineState.targetAlpha - snapLineState.alpha) < 0.01) {
-            snapLineState.alpha = snapLineState.targetAlpha;
-
-            if (snapLineState.alpha <= 0.001) {
-                snapLineState.alpha = 0;
+            // Only forget which rail was active once we are no longer
+            // snapped to it; an idle fade must preserve the hysteresis.
+            if (!snapLineState.isSnapped) {
                 snapLineState.activeName = null;
-                snapLineState.slowFade = false;
             }
         }
-
-        draw();
-
-        if (Math.abs(snapLineState.targetAlpha - snapLineState.alpha) > 0.001) {
-            requestAnimatedRedraw();
-        }
-    });
+    }
 }
 
-function requestDraw() {
+// One scheduler, one repaint per frame. These were two independent
+// requestAnimationFrame paths, so dragging while the snap line animated queued
+// two full canvas repaints in the same frame.
+function scheduleFrame(animate) {
+    if (animate) animationFramePending = true;
+
     if (drawFramePending) return;
 
     drawFramePending = true;
     requestAnimationFrame(() => {
         drawFramePending = false;
+
+        const animating = animationFramePending;
+        animationFramePending = false;
+
+        if (animating) stepSnapLineAnimation();
+
         draw();
+
+        if (animating &&
+            Math.abs(snapLineState.targetAlpha - snapLineState.alpha) > 0.001) {
+            scheduleFrame(true);
+        }
     });
+}
+
+function requestAnimatedRedraw() {
+    scheduleFrame(true);
+}
+
+function requestDraw() {
+    scheduleFrame(false);
 }
 
 function setSnapLineHighlight(name, mode) {
@@ -202,6 +249,14 @@ function setSnapLineHighlight(name, mode) {
         snapLineState.slowFade = false;
         snapLineState.targetAlpha = 1;
         requestAnimatedRedraw();
+    } else if (mode === "idle") {
+        // Fade the rail out while the knob rests, but stay logically snapped.
+        // Clearing isSnapped here would reset the hysteresis, so pausing on a
+        // rail and then nudging would pop the knob off it.
+        snapLineState.isBlinking = false;
+        snapLineState.slowFade = true;
+        snapLineState.targetAlpha = 0;
+        requestAnimatedRedraw();
     } else {
         snapLineState.isSnapped = false;
         snapLineState.isBlinking = false;
@@ -219,7 +274,7 @@ function markSlidingActivity() {
         stopSlidingTimeout = null;
 
         if (activePointerId !== null) {
-            setSnapLineHighlight(null, "off");
+            setSnapLineHighlight(snapLineState.activeName, "idle");
         }
     }, STOP_SLIDING_DELAY);
 }
@@ -624,11 +679,25 @@ function drawCorePuck() {
 }
 
 function drawSelectionDot() {
+    const dragging = activePointerId !== null;
+
     ctx.save();
+
+    // A halo while snapped tells you the value is locked to a rail or a pole,
+    // which is otherwise only inferable from the readout.
+    if (snapLineState.isSnapped) {
+        ctx.beginPath();
+        ctx.arc(knob.x, knob.y, 9.5, 0, Math.PI * 2);
+        ctx.strokeStyle = "rgba(240,240,240,0.55)";
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
+    }
+
     ctx.beginPath();
-    ctx.arc(knob.x, knob.y, 5.2, 0, Math.PI * 2);
+    ctx.arc(knob.x, knob.y, dragging ? 6.4 : 5.2, 0, Math.PI * 2);
     ctx.fillStyle = "rgba(35,35,35,0.98)";
     ctx.fill();
+
     ctx.restore();
 }
 
@@ -648,17 +717,12 @@ function drawSnapLineHighlight() {
     ctx.restore();
 }
 
-function drawSlotShape(ringRadius, segmentCount, segmentIndex, alpha) {
-    const a = (-Math.PI / 2) + (segmentIndex / segmentCount) * Math.PI * 2;
+function drawSlotShape(ringRadius, segmentIndex, alpha) {
+    const a = SLOT_ANGLES[segmentIndex];
+    const segArc = SLOT_ARC;
 
-    const cellArc = (Math.PI * 2 / segmentCount);
-    const segArc = cellArc * 1.001;
-
-    const gap = guideRingRadii[1] - guideRingRadii[0];
-    const halfThickness = gap * 0.499;
-
-    let inner = ringRadius - halfThickness;
-    let outer = ringRadius + halfThickness;
+    let inner = ringRadius - SLOT_HALF_THICKNESS;
+    let outer = ringRadius + SLOT_HALF_THICKNESS;
 
     outer = Math.min(outer, radius - 1);
     if (inner >= outer) return;
@@ -671,65 +735,66 @@ function drawSlotShape(ringRadius, segmentCount, segmentIndex, alpha) {
     ctx.fill();
 }
 
-function drawBaseSlotGrid() {
-    for (const ring of slotGrid) {
-        for (let i = 0; i < ring.segments; i++) {
-            drawSlotShape(ring.r, ring.segments, i, 0.015);
+const SLOT_BASE_ALPHA = 0.015;
+const SLOT_ANGULAR_SPREAD = 0.20;
+
+// The dim base grid and the bright halo around the knob used to be two passes,
+// so every lit slot was filled twice. One pass fills each slot exactly once at
+// whichever alpha wins, which halves the path count in the worst case.
+function drawSlotGrid() {
+    const dx = knob.x - center.x;
+    const dy = knob.y - center.y;
+    const knobDist = length(dx, dy);
+    const lit = knobDist >= 6;
+
+    const knobAngle = lit ? Math.atan2(dy, dx) : 0;
+    const knobRingPos = lit ? slotRingPosition(knobDist) : 0;
+
+    const spreadDenom = 2 * SLOT_ANGULAR_SPREAD * SLOT_ANGULAR_SPREAD;
+
+    for (let r = 0; r < slotGrid.length; r++) {
+        const ring = slotGrid[r];
+        const radialWeight = lit ? Math.exp(-Math.abs(r - knobRingPos) * 0.95) : 0;
+
+        for (let i = 0; i < SLOT_SEGMENTS; i++) {
+            let alpha = SLOT_BASE_ALPHA;
+
+            if (lit) {
+                const angDelta = angularDifference(SLOT_ANGLES[i], knobAngle);
+                const brightness =
+                    radialWeight * Math.exp(-(angDelta * angDelta) / spreadDenom);
+
+                if (brightness >= 0.05) {
+                    alpha = clamp(
+                        0.14 + Math.pow(brightness, 0.72) * 0.82,
+                        SLOT_BASE_ALPHA,
+                        0.96
+                    );
+                }
+            }
+
+            drawSlotShape(ring.r, i, alpha);
         }
     }
 }
 
-function drawActiveSlotHighlights() {
-    const dx = knob.x - center.x;
-    const dy = knob.y - center.y;
-    const knobDist = length(dx, dy);
+// Where the knob sits on the ring stack, as a fractional ring index.
+function slotRingPosition(knobDist) {
+    const last = slotGrid.length - 1;
 
-    if (knobDist < 6) return;
+    if (knobDist <= slotGrid[0].r) return 0;
+    if (knobDist >= slotGrid[last].r) return last;
 
-    const knobAngle = Math.atan2(dy, dx);
-    const slotRadii = slotGrid.map(r => r.r);
+    for (let i = 0; i < last; i++) {
+        const a = slotGrid[i].r;
+        const b = slotGrid[i + 1].r;
 
-    let knobRingPos = 0;
-    if (knobDist <= slotRadii[0]) {
-        knobRingPos = 0;
-    } else if (knobDist >= slotRadii[slotRadii.length - 1]) {
-        knobRingPos = slotRadii.length - 1;
-    } else {
-        for (let i = 0; i < slotRadii.length - 1; i++) {
-            const a = slotRadii[i];
-            const b = slotRadii[i + 1];
-            if (knobDist >= a && knobDist <= b) {
-                const t = (knobDist - a) / (b - a);
-                knobRingPos = i + t;
-                break;
-            }
+        if (knobDist >= a && knobDist <= b) {
+            return i + (knobDist - a) / (b - a);
         }
     }
 
-    for (let r = 0; r < slotGrid.length; r++) {
-        const ring = slotGrid[r];
-        const radialDelta = Math.abs(r - knobRingPos);
-
-        const radialWeight = Math.exp(-radialDelta * 0.95);
-        const baseSpread = 0.20;
-
-        for (let i = 0; i < ring.segments; i++) {
-            const a = (-Math.PI / 2) + (i / ring.segments) * Math.PI * 2;
-            const angDelta = angularDifference(a, knobAngle);
-
-            const angularWeight = Math.exp(
-                -(angDelta * angDelta) / (2 * baseSpread * baseSpread)
-            );
-
-            let brightness = radialWeight * angularWeight;
-            if (brightness < 0.05) continue;
-
-            brightness = Math.pow(brightness, 0.72);
-
-            const alpha = clamp(0.14 + brightness * 0.82, 0, 0.96);
-            drawSlotShape(ring.r, ring.segments, i, alpha);
-        }
-    }
+    return 0;
 }
 
 function draw() {
@@ -752,8 +817,7 @@ function draw() {
     ctx.fill();
 
     drawSnapLineHighlight();
-    drawBaseSlotGrid();
-    drawActiveSlotHighlights();
+    drawSlotGrid();
 
     drawAnchor(anchors.muscular.x, anchors.muscular.y);
     drawAnchor(anchors.thin.x, anchors.thin.y);
@@ -792,7 +856,9 @@ function setKnobFromPoint(x, y, options = {}) {
     let targetX = center.x + dx;
     let targetY = center.y + dy;
 
-    if (!snapEnabled) {
+    // Shift suspends snapping for as long as it is held, so a value between two
+    // rails stays reachable without toggling the Snap checkbox.
+    if (!snapEnabled || options.freeMove) {
         setSnapLineHighlight(null, "off");
         knob.x = targetX;
         knob.y = targetY;
@@ -802,11 +868,28 @@ function setKnobFromPoint(x, y, options = {}) {
         return;
     }
 
-    const SNAP_DISTANCE = 5;
-    const LINE_SNAP_ENTER = 6;
-    const LINE_SNAP_STICK = 13;
-    const LINE_SNAP_STRONG = 24;
+    const snapped = resolveSnap(targetX, targetY);
 
+    knob.x = snapped.x;
+    knob.y = snapped.y;
+
+    if (snapped.line) {
+        setSnapLineHighlight(snapped.line, snapped.entering ? "blink" : "hold");
+    } else {
+        setSnapLineHighlight(null, "off");
+    }
+
+    markSlidingActivity();
+
+    requestDraw();
+    scheduleMorphUpdate(options);
+}
+
+// Pure geometry: given a candidate position, return where the knob should
+// actually sit. Poles and the centre win outright and land exactly; otherwise
+// the point is projected exactly onto the nearest axis rail if it is within the
+// hysteresis threshold for that rail.
+function resolveSnap(targetX, targetY) {
     const snapPoints = [
         { name: "thin", x: anchors.thin.x, y: anchors.thin.y },
         { name: "muscular", x: anchors.muscular.x, y: anchors.muscular.y },
@@ -826,24 +909,16 @@ function setKnobFromPoint(x, y, options = {}) {
         }
     }
 
-    if (closestPointDist < SNAP_DISTANCE) {
-        targetX = closestPoint.x;
-        targetY = closestPoint.y;
+    if (closestPointDist < POLE_SNAP_RADIUS) {
+        const onPole = closestPoint.name !== "center";
 
-        if (closestPoint.name === "thin" || closestPoint.name === "muscular" || closestPoint.name === "fat") {
-            setSnapLineHighlight(closestPoint.name, "hold");
-        } else {
-            setSnapLineHighlight(null, "off");
-        }
-
-        knob.x = targetX;
-        knob.y = targetY;
-
-        markSlidingActivity();
-
-        requestDraw();
-        scheduleMorphUpdate(options);
-        return;
+        return {
+            x: closestPoint.x,
+            y: closestPoint.y,
+            line: onPole ? closestPoint.name : null,
+            entering: onPole &&
+                !(snapLineState.isSnapped && snapLineState.activeName === closestPoint.name)
+        };
     }
 
     const lineCandidates = [
@@ -862,7 +937,7 @@ function setKnobFromPoint(x, y, options = {}) {
             candidate.anchor.x, candidate.anchor.y
         );
 
-        if (proj.t <= 0.06 || proj.t >= 0.94) continue;
+        if (proj.t <= RAIL_END_MARGIN || proj.t >= 1 - RAIL_END_MARGIN) continue;
 
         if (!bestProjection || proj.distance < bestProjection.distance) {
             bestProjection = proj;
@@ -870,46 +945,25 @@ function setKnobFromPoint(x, y, options = {}) {
         }
     }
 
-    if (bestProjection) {
-        const alreadyOnSameLine =
-            snapLineState.isSnapped &&
-            snapLineState.activeName === bestLine.name;
-
-        let threshold;
-
-        if (alreadyOnSameLine) {
-            threshold = LINE_SNAP_STRONG;
-        } else if (snapLineState.isSnapped) {
-            threshold = LINE_SNAP_STICK;
-        } else {
-            threshold = LINE_SNAP_ENTER;
-        }
-
-        if (bestProjection.distance < threshold) {
-            const strength = alreadyOnSameLine ? 0.985 : 0.42;
-
-            targetX = targetX + (bestProjection.x - targetX) * strength;
-            targetY = targetY + (bestProjection.y - targetY) * strength;
-
-            if (!alreadyOnSameLine) {
-                setSnapLineHighlight(bestLine.name, "blink");
-            } else {
-                setSnapLineHighlight(bestLine.name, "hold");
-            }
-        } else {
-            setSnapLineHighlight(null, "off");
-        }
-    } else {
-        setSnapLineHighlight(null, "off");
+    if (!bestProjection) {
+        return { x: targetX, y: targetY, line: null, entering: false };
     }
 
-    knob.x = targetX;
-    knob.y = targetY;
+    const alreadyOnSameLine =
+        snapLineState.isSnapped && snapLineState.activeName === bestLine.name;
 
-    markSlidingActivity();
+    const threshold = alreadyOnSameLine ? LINE_SNAP_RELEASE : LINE_SNAP_ENTER;
 
-    requestDraw();
-    scheduleMorphUpdate(options);
+    if (bestProjection.distance >= threshold) {
+        return { x: targetX, y: targetY, line: null, entering: false };
+    }
+
+    return {
+        x: bestProjection.x,
+        y: bestProjection.y,
+        line: bestLine.name,
+        entering: !alreadyOnSameLine
+    };
 }
 
 function finishPointerInteraction(event) {
@@ -928,7 +982,10 @@ function finishPointerInteraction(event) {
     // finish path must already be inert when that event arrives.
     activePointerId = null;
     pointerStartPos = null;
+    pointerStartTime = 0;
     pointerMoved = false;
+
+    canvas.classList.remove("dragging");
 
     detachPointerFallbackListeners();
     detachMouseFallbackListeners();
@@ -962,13 +1019,21 @@ function finishPointerInteraction(event) {
 function updatePointerPosition(event, preview) {
     const pos = getCanvasPos(event);
 
-    if (pointerStartPos &&
-        length(pos.x - pointerStartPos.x, pos.y - pointerStartPos.y) >= DRAG_START_DISTANCE) {
-        pointerMoved = true;
+    // A press becomes a drag once it has travelled far enough or been held long
+    // enough. Until then the knob stays where the press put it, so a quick
+    // click cannot be nudged off target by tremor.
+    if (!pointerMoved && pointerStartPos) {
+        const travelled =
+            length(pos.x - pointerStartPos.x, pos.y - pointerStartPos.y) >= DRAG_START_DISTANCE;
+        const held = performance.now() - pointerStartTime >= DRAG_START_HOLD_MS;
+
+        if (travelled || held) {
+            pointerMoved = true;
+        }
     }
 
     if (pointerMoved) {
-        setKnobFromPoint(pos.x, pos.y, { preview });
+        setKnobFromPoint(pos.x, pos.y, { preview, freeMove: !!event.shiftKey });
     }
 }
 
@@ -982,9 +1047,15 @@ function beginPointerInteraction(event, pointerId) {
 
     activePointerId = pointerId;
     pointerStartPos = getCanvasPos(event);
+    pointerStartTime = performance.now();
     pointerMoved = false;
 
-    setKnobFromPoint(pointerStartPos.x, pointerStartPos.y, { preview: false });
+    canvas.classList.add("dragging");
+
+    setKnobFromPoint(pointerStartPos.x, pointerStartPos.y, {
+        preview: false,
+        freeMove: !!event.shiftKey
+    });
 }
 
 function handlePointerDown(event) {
@@ -1092,6 +1163,15 @@ function handleMouseUp(event) {
 
 function handleMouseLeave(event) {
     if (activePointerId !== MOUSE_POINTER_ID) return;
+
+    // Leaving the canvas mid-drag is normal: the pole anchors sit near the rim,
+    // so overshooting them is the common case. The window-level fallback
+    // listeners keep feeding moves, so only treat this as the end of the
+    // gesture when the button is genuinely no longer held.
+    if (typeof event.buttons === "number" && (event.buttons & 1) !== 0) {
+        updatePointerPosition(event, true);
+        return;
+    }
 
     updatePointerPosition(event, false);
     finishPointerInteraction(event);

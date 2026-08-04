@@ -48,6 +48,7 @@ function createHarness({ pointerEvents = true, pointerCapture = "success" } = {}
     const commits = [];
     const previews = [];
     let timerSequence = 0;
+    let clockMs = 1000;
 
     function addListener(registry, type, handler, options) {
         const capture = listenerCapture(options);
@@ -85,9 +86,22 @@ function createHarness({ pointerEvents = true, pointerCapture = "success" } = {}
         }
     });
 
+    const classes = new Set();
+
     const canvas = {
         width: 400,
         height: 400,
+        classList: {
+            add(name) {
+                classes.add(name);
+            },
+            remove(name) {
+                classes.delete(name);
+            },
+            contains(name) {
+                return classes.has(name);
+            }
+        },
         getContext: () => context2d,
         getBoundingClientRect: () => ({ left: 100, top: 50, width: 200, height: 200 }),
         addEventListener(type, handler, options) {
@@ -146,7 +160,7 @@ function createHarness({ pointerEvents = true, pointerCapture = "success" } = {}
                 return elements[id];
             }
         },
-        performance: { now: () => 1000 },
+        performance: { now: () => clockMs },
         requestAnimationFrame: () => 1,
         setTimeout: () => ++timerSequence,
         clearTimeout() {},
@@ -175,6 +189,9 @@ function createHarness({ pointerEvents = true, pointerCapture = "success" } = {}
         captures,
         commits,
         previews,
+        advanceTime(ms) {
+            clockMs += ms;
+        },
         state(expression) {
             return vm.runInContext(expression, sandbox);
         },
@@ -362,9 +379,11 @@ test("mouse fallback recovers through buttons=0, mouseleave, and blur", async t 
                     makeMouseEvent({ buttons: 0, clientX: 190, clientY: 120 })
                 );
             } else if (ending === "leave") {
+                // buttons=0 is the recovery case: the button was released while
+                // the cursor was outside the canvas, so no mouseup ever arrived.
                 harness.canvas.dispatch(
                     "mouseleave",
-                    makeMouseEvent({ buttons: 1, clientX: 190, clientY: 120 })
+                    makeMouseEvent({ buttons: 0, clientX: 190, clientY: 120 })
                 );
             } else {
                 harness.dispatchWindow("blur");
@@ -376,6 +395,123 @@ test("mouse fallback recovers through buttons=0, mouseleave, and blur", async t 
             assert.equal(harness.commits.length, 1);
         });
     }
+});
+
+// The harness canvas is 400x400 displayed at 200x200, so client coordinates are
+// half of canvas coordinates plus the rect origin.
+function atCanvas(x, y, overrides = {}) {
+    return makeEvent({ clientX: x / 2 + 100, clientY: y / 2 + 50, ...overrides });
+}
+
+test("leaving the canvas with the button held keeps the drag alive", () => {
+    const harness = createHarness({ pointerEvents: false });
+    harness.canvas.dispatch("mousedown", makeMouseEvent(atCanvas(200, 200)));
+
+    // Overshooting the rim is the common case, because the pole anchors sit on
+    // it. The gesture must survive.
+    harness.canvas.dispatch(
+        "mouseleave",
+        makeMouseEvent(atCanvas(200, 40, { buttons: 1 }))
+    );
+
+    assert.equal(harness.state("activePointerId"), -1);
+    assert.equal(harness.commits.length, 0);
+
+    harness.dispatchWindow("mouseup", makeMouseEvent(atCanvas(200, 40, { buttons: 0 })));
+    assert.equal(harness.state("activePointerId"), null);
+    assert.equal(harness.commits.length, 1);
+});
+
+test("a quick click places the knob and does not drag with it", () => {
+    const harness = createHarness();
+    harness.canvas.dispatch("pointerdown", atCanvas(200, 120));
+
+    const placed = harness.state("JSON.stringify(pendingMorphValues)");
+
+    // Three canvas pixels of tremor, inside the same instant: below the travel
+    // threshold and below the hold time, so the knob must not follow.
+    harness.canvas.dispatch("pointermove", atCanvas(203, 120, { buttons: 1 }));
+
+    assert.equal(harness.state("pointerMoved"), false);
+    assert.equal(harness.state("JSON.stringify(pendingMorphValues)"), placed);
+
+    harness.canvas.dispatch("pointerup", atCanvas(203, 120, { buttons: 0 }));
+    assert.equal(harness.commits.length, 1);
+    assert.equal(harness.state("JSON.stringify(pendingMorphValues)"), placed);
+});
+
+test("travelling far enough turns a press into a drag", () => {
+    const harness = createHarness();
+    harness.canvas.dispatch("pointerdown", atCanvas(200, 200));
+
+    // Well clear of the centre's own snap zone, so the move is observable.
+    harness.canvas.dispatch("pointermove", atCanvas(200, 150, { buttons: 1 }));
+
+    assert.equal(harness.state("pointerMoved"), true);
+    assert.equal(harness.state("Math.round(knob.y)"), 150);
+});
+
+test("holding still long enough also turns a press into a drag", () => {
+    const harness = createHarness();
+    harness.canvas.dispatch("pointerdown", atCanvas(200, 200));
+
+    harness.advanceTime(200);
+
+    // Two canvas pixels is under the travel threshold, but the press has now
+    // been held past the hold threshold, so it counts as a drag.
+    harness.canvas.dispatch("pointermove", atCanvas(202, 200, { buttons: 1 }));
+
+    assert.equal(harness.state("pointerMoved"), true);
+});
+
+test("poles snap exactly, so the readout reaches 1.00", () => {
+    const harness = createHarness();
+
+    // 8 canvas px below the muscular anchor: inside the 14 px pole radius.
+    harness.canvas.dispatch("pointerdown", atCanvas(200, 70));
+    harness.canvas.dispatch("pointerup", atCanvas(200, 70, { buttons: 0 }));
+
+    assert.deepEqual(payloadValues(harness.commits[0]), [0, 1, 0]);
+});
+
+test("an axis rail holds through hysteresis and releases past it", () => {
+    const harness = createHarness();
+
+    // Enter the vertical muscular rail from 5 px away.
+    harness.canvas.dispatch("pointerdown", atCanvas(205, 130));
+    assert.equal(harness.state("Math.round(knob.x)"), 200);
+    assert.equal(harness.state("snapLineState.activeName"), "muscular");
+
+    // 15 px away is past the 10 px entry threshold but inside the 22 px release
+    // threshold, so an established rail must keep it.
+    harness.canvas.dispatch("pointermove", atCanvas(215, 130, { buttons: 1 }));
+    assert.equal(harness.state("Math.round(knob.x)"), 200);
+
+    // 28 px away is past the release threshold.
+    harness.canvas.dispatch("pointermove", atCanvas(228, 130, { buttons: 1 }));
+    assert.equal(harness.state("Math.round(knob.x)"), 228);
+    assert.equal(harness.state("snapLineState.isSnapped"), false);
+});
+
+test("shift suspends snapping without touching the snap toggle", () => {
+    const harness = createHarness();
+
+    harness.canvas.dispatch("pointerdown", atCanvas(205, 130, { shiftKey: true }));
+
+    assert.equal(harness.state("Math.round(knob.x)"), 205);
+    assert.equal(harness.state("snapLineState.isSnapped"), false);
+    assert.equal(harness.state("snapEnabled"), true);
+});
+
+test("the dragging class tracks the gesture for the cursor style", () => {
+    const harness = createHarness();
+    assert.equal(harness.canvas.classList.contains("dragging"), false);
+
+    harness.canvas.dispatch("pointerdown", atCanvas(200, 200));
+    assert.equal(harness.canvas.classList.contains("dragging"), true);
+
+    harness.canvas.dispatch("pointerup", atCanvas(200, 200, { buttons: 0 }));
+    assert.equal(harness.canvas.classList.contains("dragging"), false);
 });
 
 test("secondary and non-primary presses are ignored", () => {
