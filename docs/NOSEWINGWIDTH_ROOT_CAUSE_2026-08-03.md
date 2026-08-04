@@ -1,9 +1,11 @@
 # Root cause — `Nose_NoseWingWidth = 37` and the face distortion
 
 **Date:** 2026-08-03
-**Status:** cause identified end to end, including the specific value. A targeted,
-asset-level fix is verified by simulation and described in section 5. Not applied:
-it changes one COtR slider's saved-state key (section 6).
+**Status:** **RESOLVED.** Cause identified end to end, including the specific
+value. The asset-level fix in section 5 was applied on 2026-08-04 (commit
+`7a362bc`) and **confirmed working in game** — repeated M→F→M→F sex switches no
+longer distort the face. Type collisions measured against the installed file:
+3 → 0. The saved-state cost in section 6 is accepted.
 
 ---
 
