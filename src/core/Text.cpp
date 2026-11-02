@@ -1,6 +1,7 @@
 #include "core/Text.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cctype>
 
 namespace mps::text
@@ -76,8 +77,17 @@ namespace mps::text
             }
         }
 
-        outPercent = std::stoi(std::string(token));
-        return outPercent >= 0 && outPercent <= 100;
+        int parsed = 0;
+        const auto [end, error] = std::from_chars(
+            token.data(),
+            token.data() + token.size(),
+            parsed);
+        if (error != std::errc{} || end != token.data() + token.size()) {
+            return false;
+        }
+
+        outPercent = parsed;
+        return parsed >= 0 && parsed <= 100;
     }
 
     bool TryParseHexFormIDToken(std::string_view token, std::uint32_t& outFormID)

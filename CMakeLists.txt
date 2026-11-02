@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 # Set your project name. This will be the name of your SKSE .dll file.
-project(ModernPhysiqueSystem VERSION 0.0.1 LANGUAGES CXX)
+project(ModernPhysiqueSystem VERSION 0.1.0 LANGUAGES CXX)
 
 #
 
@@ -46,6 +46,14 @@ add_commonlibsse_plugin(${PROJECT_NAME} SOURCES ${headers} ${sources}) # <--- sp
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_23) # <--- use C++23 standard
 target_precompile_headers(${PROJECT_NAME} PRIVATE src/PCH.h) # <--- PCH.h is required!
 
+# The runtime DLL must use the Release STL ABI because RaceMenu's public face
+# interface passes SKEEFixedString (which owns std::string) across the DLL
+# boundary. Keep full symbols for crash analysis without deploying a Debug ABI.
+if(MSVC)
+    target_compile_options(${PROJECT_NAME} PRIVATE "$<$<CONFIG:Release>:/Zi>")
+    target_link_options(${PROJECT_NAME} PRIVATE "$<$<CONFIG:Release>:/DEBUG:FULL>")
+endif()
+
 find_package(Git QUIET)
 set(MPS_GIT_COMMIT "unknown")
 if(GIT_FOUND)
@@ -56,6 +64,16 @@ if(GIT_FOUND)
         OUTPUT_STRIP_TRAILING_WHITESPACE
         ERROR_QUIET
     )
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" status --porcelain --untracked-files=normal
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        OUTPUT_VARIABLE MPS_GIT_STATUS
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(MPS_GIT_STATUS)
+        set(MPS_GIT_COMMIT "${MPS_GIT_COMMIT}-dirty")
+    endif()
 endif()
 
 string(TIMESTAMP MPS_BUILD_STAMP "%Y-%m-%d %H:%M:%S")
@@ -120,6 +138,7 @@ if(MPS_BUILD_TESTS)
         src/core/MorphMath.cpp
         src/core/NormalMapCatalog.cpp
         src/core/FaceRouteState.cpp
+        src/core/FaceGeometrySafety.cpp
     )
     set(MPS_TEST_SOURCES
         tests/cpp/test_main.cpp
@@ -128,6 +147,7 @@ if(MPS_BUILD_TESTS)
         tests/cpp/test_morphmath.cpp
         tests/cpp/test_normalmap.cpp
         tests/cpp/test_faceroutestate.cpp
+        tests/cpp/test_facegeometrysafety.cpp
     )
     add_executable(mps_tests ${MPS_CORE_SOURCES} ${MPS_TEST_SOURCES})
     target_compile_features(mps_tests PRIVATE cxx_std_23)
@@ -166,5 +186,21 @@ if(MPS_BUILD_TESTS)
             "-DMPS_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
             -P
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/DeploySafetyStatic.cmake"
+    )
+    add_test(
+        NAME mps_shared_face_morph_static_safety
+        COMMAND
+            "${CMAKE_COMMAND}"
+            "-DMPS_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
+            -P
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/SharedFaceMorphSafety.cmake"
+    )
+    add_test(
+        NAME mps_face_slider_asset_safety
+        COMMAND
+            "${CMAKE_COMMAND}"
+            "-DMPS_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
+            -P
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/FaceSliderAssetSafety.cmake"
     )
 endif()

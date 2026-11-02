@@ -215,6 +215,11 @@ function payloadValues(payload) {
     return payload.split(",").slice(0, 3).map(Number);
 }
 
+test("preview cadence stays ahead of Mu generation without per-event flooding", () => {
+    const harness = createHarness();
+    assert.equal(harness.state("MORPH_PREVIEW_INTERVAL"), 32);
+});
+
 test("captured pointer backend maps scaled coordinates and clicks once", () => {
     const harness = createHarness();
     assert.equal(harness.canvas.listenerCount("pointerdown"), 1);
@@ -300,6 +305,16 @@ test("captured pointer drag previews while held and finalizes idempotently", () 
 test("pointer buttons=0 recovers a missing pointerup", () => {
     const harness = createHarness();
     harness.canvas.dispatch("pointerdown", makeEvent({ clientX: 180, clientY: 130 }));
+
+    // Um move SEGURADO primeiro: e ele que prova que este host mantem a mascara
+    // de botao nos moves. Sem essa prova, buttons=0 e indistinguivel de um host
+    // que simplesmente nao a reporta, e encerrar ali mata todo arrasto.
+    harness.canvas.dispatch(
+        "pointermove",
+        makeEvent({ buttons: 1, clientX: 186, clientY: 126 })
+    );
+    assert.equal(harness.state("activePointerId"), 1);
+
     harness.canvas.dispatch(
         "pointermove",
         makeEvent({ buttons: 0, clientX: 190, clientY: 120 })
@@ -309,6 +324,52 @@ test("pointer buttons=0 recovers a missing pointerup", () => {
     assert.equal(harness.commits.length, 1);
 
     harness.canvas.dispatch("pointerup", makeEvent({ buttons: 0 }));
+    assert.equal(harness.commits.length, 1);
+});
+
+// O HOST REAL. PrismaUI injeta todo mouse-move com button=kButton_None, entao
+// buttons le 0 durante o arrasto inteiro. Estes dois casos sao o que estava
+// quebrado no jogo - e o que a suite antiga afirmava ser o comportamento certo.
+test("a host that never reports held buttons still drags", () => {
+    const harness = createHarness();
+    harness.canvas.dispatch("pointerdown", makeEvent({ clientX: 200, clientY: 150 }));
+
+    harness.canvas.dispatch(
+        "pointermove",
+        makeEvent({ buttons: 0, clientX: 240, clientY: 150 })
+    );
+
+    assert.equal(harness.state("activePointerId"), 1, "o arrasto tem de seguir vivo");
+    assert.ok(harness.previews.length >= 1, "o knob tem de seguir o cursor");
+
+    harness.canvas.dispatch(
+        "pointerup",
+        makeEvent({ buttons: 0, clientX: 240, clientY: 150 })
+    );
+    assert.equal(harness.state("activePointerId"), null);
+    assert.equal(harness.commits.length, 1);
+});
+
+test("a host that never reports held buttons survives leaving the canvas", () => {
+    const harness = createHarness({ pointerEvents: false });
+    harness.canvas.dispatch("mousedown", makeMouseEvent({ clientX: 200, clientY: 150 }));
+
+    harness.dispatchWindow(
+        "mousemove",
+        makeMouseEvent({ buttons: 0, clientX: 250, clientY: 150 })
+    );
+    harness.canvas.dispatch(
+        "mouseleave",
+        makeMouseEvent({ buttons: 0, clientX: 420, clientY: 150 })
+    );
+
+    assert.equal(harness.state("activePointerId"), -1, "sair da tela nao encerra o gesto");
+
+    harness.dispatchWindow(
+        "mouseup",
+        makeMouseEvent({ buttons: 0, clientX: 420, clientY: 150 })
+    );
+    assert.equal(harness.state("activePointerId"), null);
     assert.equal(harness.commits.length, 1);
 });
 
@@ -372,6 +433,16 @@ test("mouse fallback recovers through buttons=0, mouseleave, and blur", async t 
                 "mousedown",
                 makeMouseEvent({ clientX: 180, clientY: 130 })
             );
+
+            // As duas recuperacoes por buttons=0 exigem antes um move SEGURADO,
+            // que e o que prova que este host mantem a mascara. Num host que
+            // nao a mantem, buttons=0 nao autoriza conclusao nenhuma.
+            if (ending === "buttons" || ending === "leave") {
+                harness.dispatchWindow(
+                    "mousemove",
+                    makeMouseEvent({ buttons: 1, clientX: 186, clientY: 126 })
+                );
+            }
 
             if (ending === "buttons") {
                 harness.dispatchWindow(
@@ -471,6 +542,20 @@ test("poles snap exactly, so the readout reaches 1.00", () => {
     harness.canvas.dispatch("pointerdown", atCanvas(200, 70));
     harness.canvas.dispatch("pointerup", atCanvas(200, 70, { buttons: 0 }));
 
+    assert.deepEqual(payloadValues(harness.commits[0]), [0, 1, 0]);
+});
+
+test("sex transition invalidation allows the restored 100 percent state to commit again", () => {
+    const harness = createHarness();
+
+    harness.state('window.restoreMorphs("0,1,0")');
+    harness.state('sendCommitMorphs({ thin: 0, muscular: 1, fat: 0 })');
+    assert.equal(harness.commits.length, 0);
+
+    harness.state("window.invalidateMorphDispatchState()");
+    harness.state('sendCommitMorphs({ thin: 0, muscular: 1, fat: 0 })');
+
+    assert.equal(harness.commits.length, 1);
     assert.deepEqual(payloadValues(harness.commits[0]), [0, 1, 0]);
 });
 

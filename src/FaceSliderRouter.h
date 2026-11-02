@@ -150,9 +150,6 @@ namespace mps
         };
 
         using Clock = std::chrono::steady_clock;
-        using CreateSliderListFn =
-            void* (__fastcall*)(void*, RE::TESRace*, std::uint8_t);
-
         [[nodiscard]] bool CheckThread(
             const char* operation,
             bool bindIfUnset = false);
@@ -178,7 +175,6 @@ namespace mps
             RE::GFxValue& outCharGen) const;
 
         [[nodiscard]] bool PrepareReadbackAbi();
-        [[nodiscard]] bool PrepareExactRepair();
         [[nodiscard]] bool TryExactRepair(
             RE::TESRace* race,
             FaceSex sex);
@@ -213,8 +209,6 @@ namespace mps
         std::string lastSnapshotFailure_;
 
         GateState readbackGateState_ = GateState::Unchecked;
-        GateState repairGateState_ = GateState::Unchecked;
-        CreateSliderListFn createSliderList_ = nullptr;
         void* skeeModuleBase_ = nullptr;
 
         std::string lastDiagnosticKey_;

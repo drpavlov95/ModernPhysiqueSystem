@@ -30,6 +30,10 @@ std::atomic<std::uint64_t> g_morphTraceSequence = 0;
 std::atomic<std::uint64_t> g_faceDiagnosticSequence = 0;
 std::atomic<std::uint64_t> g_previewDispatchSequence = 0;
 std::atomic<std::uint64_t> g_commitDispatchSequence = 0;
+std::atomic<std::uint64_t> g_bodyMorphGeneration = 1;
+std::atomic<std::uint64_t> g_bodyMorphAppliedGeneration = 0;
+std::atomic<std::uintptr_t> g_bodyMorphAppliedRoot = 0;
+std::atomic<bool> g_bodyMorphNeedsApply = true;
 std::atomic<std::uint32_t> g_pluginMainThreadId = 0;
 thread_local std::string g_activeMorphTraceId;
 

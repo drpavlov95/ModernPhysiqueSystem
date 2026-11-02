@@ -1,4 +1,5 @@
 #include <ostream>
+#include <string>
 #include <doctest/doctest.h>
 #include "core/Text.h"
 
@@ -41,6 +42,7 @@ TEST_CASE("TryParsePercentToken accepts 0..100 digits only")
     CHECK_FALSE(TryParsePercentToken("", v));
     CHECK_FALSE(TryParsePercentToken("5a", v));
     CHECK_FALSE(TryParsePercentToken("-5", v));
+    CHECK_FALSE(TryParsePercentToken(std::string(1024, '9'), v));
 }
 
 TEST_CASE("TryParseHexFormIDToken")

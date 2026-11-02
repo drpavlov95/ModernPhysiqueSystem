@@ -17,6 +17,16 @@ namespace FaceMorphDiagnostics
 	// makes the ActionScript bail before itemList.requestUpdate(): that isolates
 	// whether the poll's list refresh is what corrupts native face sliders.
 	inline constexpr bool kEnableWeightSyncPoll = true;
+	inline constexpr bool kEnableWeightMorphLink = false;
+	// The shared backend reads the published MPF/POS TRI+TOML asset library but
+	// remains completely independent from the MPF DLL. RaceMenu stays available
+	// as a fallback when the library is not installed or the backend is set to
+	// "racemenu".
+	inline constexpr bool kUseSharedFaceMorphLibraryByDefault = true;
+	// Mu is an optional integration. Without Mu, MPS must remain fully
+	// functional and simply leave normal-map ownership to the game/other mods.
+	inline constexpr bool kUseMuDynamicNormalMapsByDefault = true;
+	inline constexpr bool kEnableRealtimeNormalMapPreview = true;
 	inline constexpr int kDefaultStableNormalMapHysteresisPercent = 3;
 
 	void LoadConfig();
@@ -26,6 +36,13 @@ namespace FaceMorphDiagnostics
 	[[nodiscard]] bool IsVerboseLoggingEnabled();
 	[[nodiscard]] bool UseRaceMenuFacePreview();
 	[[nodiscard]] bool UseWeightSyncPoll();
+	[[nodiscard]] bool UseWeightMorphLink();
+	[[nodiscard]] bool UseSharedFaceMorphLibrary();
+	[[nodiscard]] bool MuDynamicNormalMapsRequested();
+	[[nodiscard]] bool MuDynamicNormalMapsRequired();
+	[[nodiscard]] bool UseMuDynamicNormalMaps();
+	void SetMuDynamicNormalMapsAvailable(bool available);
+	[[nodiscard]] bool UseRealtimeNormalMapPreview();
 	[[nodiscard]] bool UseStableNormalMapSelection();
 	[[nodiscard]] int GetStableNormalMapHysteresisPercent();
 

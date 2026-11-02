@@ -6,9 +6,19 @@ set(
     MPS_RACEMENU_SOURCE
     "${MPS_SOURCE_DIR}/reference/RaceMenu/patched/RaceMenu.as"
 )
+set(
+    MPS_SLIDER_ENTRY_SOURCE
+    "${MPS_SOURCE_DIR}/reference/RaceMenu/patched/SliderListEntry.as"
+)
 set(MPS_RACEMENU_SWF "${MPS_SOURCE_DIR}/interface/racesex_menu.swf")
 
-foreach(required_path IN ITEMS "${MPS_RACEMENU_SOURCE}" "${MPS_RACEMENU_SWF}")
+foreach(
+    required_path
+    IN ITEMS
+        "${MPS_RACEMENU_SOURCE}"
+        "${MPS_SLIDER_ENTRY_SOURCE}"
+        "${MPS_RACEMENU_SWF}"
+)
     if(NOT EXISTS "${required_path}")
         message(FATAL_ERROR "RaceMenu weight-sync input is missing: ${required_path}")
     endif()
@@ -16,6 +26,14 @@ endforeach()
 
 file(READ "${MPS_RACEMENU_SOURCE}" racemenu_source)
 string(REGEX REPLACE "[ \t\r\n]+" "" compact_source "${racemenu_source}")
+file(READ "${MPS_SLIDER_ENTRY_SOURCE}" slider_entry_source)
+string(
+    REGEX REPLACE
+    "[ \t\r\n]+"
+    ""
+    compact_slider_entry_source
+    "${slider_entry_source}"
+)
 
 set(
     required_fragments
@@ -51,6 +69,83 @@ foreach(required_fragment IN LISTS required_fragments)
         )
     endif()
 endforeach()
+
+# RaceMenu's SliderListEntry invokes native callbacks before its per-entry
+# internalCallback. The target-sex map therefore has to be prepared here,
+# synchronously before native ChangeSex can reuse the opposite-sex array.
+string(
+    FIND
+    "${compact_slider_entry_source}"
+    "slider.changedCallback=function()"
+    slider_changed_callback_offset
+)
+string(
+    FIND
+    "${compact_slider_entry_source}"
+    "slider.addEventListener(\"change\",slider,\"changedCallback\")"
+    slider_changed_callback_end_offset
+)
+if(
+    slider_changed_callback_offset EQUAL -1
+    OR slider_changed_callback_end_offset LESS_EQUAL slider_changed_callback_offset
+)
+    message(FATAL_ERROR "SliderListEntry changedCallback boundary is missing")
+endif()
+math(
+    EXPR slider_changed_callback_length
+    "${slider_changed_callback_end_offset} - ${slider_changed_callback_offset}"
+)
+string(
+    SUBSTRING
+    "${compact_slider_entry_source}"
+    ${slider_changed_callback_offset}
+    ${slider_changed_callback_length}
+    slider_changed_callback_source
+)
+
+foreach(required_pre_change_sex_fragment IN ITEMS
+    "if(this.callbackName==\"ChangeSex\")"
+    "PrepareFaceMapForSex(this.position)"
+    "if(!faceMapReady)"
+    "this.faceMapGuardRestoring=true;this.position=this.entryObject.position;deletethis.faceMapGuardRestoring;"
+    "returnundefined;"
+)
+    string(
+        FIND
+        "${slider_changed_callback_source}"
+        "${required_pre_change_sex_fragment}"
+        pre_change_sex_fragment_offset
+    )
+    if(pre_change_sex_fragment_offset EQUAL -1)
+        message(
+            FATAL_ERROR
+            "SliderListEntry target-sex fail-closed guard is missing: ${required_pre_change_sex_fragment}"
+        )
+    endif()
+endforeach()
+
+string(
+    FIND
+    "${slider_changed_callback_source}"
+    "PrepareFaceMapForSex(this.position)"
+    pre_change_sex_guard_offset
+)
+string(
+    FIND
+    "${slider_changed_callback_source}"
+    "gfx.io.GameDelegate.call(this.callbackName,[this.position,this.sliderID])"
+    native_slider_callback_offset
+)
+if(
+    pre_change_sex_guard_offset EQUAL -1
+    OR native_slider_callback_offset EQUAL -1
+    OR pre_change_sex_guard_offset GREATER_EQUAL native_slider_callback_offset
+)
+    message(
+        FATAL_ERROR
+        "SliderListEntry must prepare the target-sex SKEE map before native ChangeSex"
+    )
+endif()
 
 # SetSliders contains explanatory comments between the function header and the
 # suspension call. Check the function boundary and ordering explicitly so the
@@ -163,6 +258,20 @@ if(NOT face_map_failure_use_count EQUAL 1)
     )
 endif()
 
+# Persisted impossible ordinary slider values (for example the historical
+# Nose_NoseWingWidth=37 corruption) may be repaired only after list settling
+# and a second successful map guard. Preset/head-part callbacks are excluded.
+foreach(required_recovery_fragment IN ITEMS
+    "_loc7_.callbackName==\"ChangeDoubleMorph\""
+    "recoveryPosition<recoveryMin-0.001||recoveryPosition>recoveryMax+0.001"
+    "this.pendingImpossibleFaceSliderRecoveries.push({sliderID:_loc7_.sliderID,oldValue:recoveryPosition})"
+)
+    string(FIND "${set_sliders_source}" "${required_recovery_fragment}" recovery_offset)
+    if(recovery_offset EQUAL -1)
+        message(FATAL_ERROR "RaceMenu impossible-slider detection is missing: ${required_recovery_fragment}")
+    endif()
+endforeach()
+
 string(FIND "${compact_source}" "functionSetMakeup(" set_makeup_offset)
 if(set_makeup_offset EQUAL -1 OR set_makeup_offset LESS_EQUAL initialize_sliders_offset)
     message(FATAL_ERROR "RaceMenu InitializeSliders/SetMakeup boundary is missing")
@@ -187,6 +296,17 @@ if(initialize_sliders_shared_timer_offset GREATER -1)
         "RaceMenu InitializeSliders must not clear the pending-data update timer"
     )
 endif()
+foreach(required_recovery_fragment IN ITEMS
+    "pendingRecoveries=this.pendingImpossibleFaceSliderRecoveries"
+    "Boolean(_global.skse.plugins.ModernPhysiqueSystem.PrepareFaceMapForCurrentSex())"
+    "gfx.io.GameDelegate.call(\"ChangeDoubleMorph\",[0,pendingRecoveries[recoveryIndex].sliderID])"
+    "NotifyFaceCorruptionRecovery(pendingRecoveries[0].oldValue,pendingRecoveries[0].sliderID,pendingRecoveries.length)"
+)
+    string(FIND "${initialize_sliders_source}" "${required_recovery_fragment}" recovery_offset)
+    if(recovery_offset EQUAL -1)
+        message(FATAL_ERROR "RaceMenu settled impossible-slider recovery is missing: ${required_recovery_fragment}")
+    endif()
+endforeach()
 
 # The active 50 ms poll and the delayed 100 ms resume are deliberately separate.
 # If stopPhysiqueWeightSync cancels the delayed resume, leaving or re-entering Body
@@ -312,19 +432,32 @@ require_change_race_transition(
 string(REPLACE "\r\n" "\n" normalized_racemenu_source "${racemenu_source}")
 string(REPLACE "\r" "\n" normalized_racemenu_source "${normalized_racemenu_source}")
 string(SHA256 racemenu_source_sha256 "${normalized_racemenu_source}")
+string(REPLACE "\r\n" "\n" normalized_slider_entry_source "${slider_entry_source}")
+string(REPLACE "\r" "\n" normalized_slider_entry_source "${normalized_slider_entry_source}")
+string(SHA256 slider_entry_source_sha256 "${normalized_slider_entry_source}")
 file(SHA256 "${MPS_RACEMENU_SWF}" racemenu_swf_sha256)
 set(
     expected_racemenu_source_sha256
-    "fc04a0ac1afaa2669902228569c5291cfdd904fe4f3f6bbe15a19c4c94e250f2"
+    "639a080535f01564495f0735f4bc34e4bec2c6b545b237195f06a4c672d242ca"
+)
+set(
+    expected_slider_entry_source_sha256
+    "9d2a20ab6086072955192fecc104063f5b185e1a2c9bc4be28895036f99284ee"
 )
 set(
     expected_racemenu_swf_sha256
-    "fa6de41dbb9fbefcef7f05ceace53c52822a8e1b8b98cf6d5f42b951d1e4f4e8"
+    "c75f1442feba4e1a8573ade0e3437903def7081e421c1655b9dd494b3a961608"
 )
 if(NOT racemenu_source_sha256 STREQUAL expected_racemenu_source_sha256)
     message(
         FATAL_ERROR
         "RaceMenu source does not match the reviewed Weight-sync source: ${racemenu_source_sha256}"
+    )
+endif()
+if(NOT slider_entry_source_sha256 STREQUAL expected_slider_entry_source_sha256)
+    message(
+        FATAL_ERROR
+        "SliderListEntry source does not match the reviewed pre-ChangeSex source: ${slider_entry_source_sha256}"
     )
 endif()
 if(NOT racemenu_swf_sha256 STREQUAL expected_racemenu_swf_sha256)

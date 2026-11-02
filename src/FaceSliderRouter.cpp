@@ -1,23 +1,17 @@
 #include "FaceSliderRouter.h"
 
 #include "RaceMenuInterop.h"
+#include "SkeeFaceMapGuard.h"
 
 #include <Windows.h>
-#include <bcrypt.h>
-#include <winver.h>
 
 #include <algorithm>
 #include <array>
 #include <bit>
 #include <cmath>
-#include <filesystem>
 #include <format>
 #include <limits>
 #include <string_view>
-#include <vector>
-
-#pragma comment(lib, "bcrypt.lib")
-#pragma comment(lib, "version.lib")
 
 namespace mps
 {
@@ -41,43 +35,18 @@ namespace mps
         constexpr std::string_view kDoubleMorphCallback =
             "ChangeDoubleMorph";
 
-        constexpr std::uintptr_t kCreateSliderListRva = 0x5F060;
         constexpr std::uintptr_t kFaceMorphObjectRva = 0x1CAB10;
         constexpr std::uintptr_t kFaceMorphVtableRva = 0x174170;
         constexpr std::uintptr_t kFaceMorphGetRva = 0x59B20;
         constexpr std::uintptr_t kFaceMorphSetRva = 0x59C20;
         constexpr std::size_t kExpectedSkeeImageSize = 0x1E4000;
         constexpr std::uint32_t kExpectedSkeeTimestamp = 0x5F799CB1;
-        // RaceMenu 0.4.16 reports 4.0.0.0 in its StringFileInfo block, but
-        // the exact supported skee64.dll stores 3.4.5.0 in VS_FIXEDFILEINFO.
-        // GetFileVersionInfo/VerQueryValue below reads the latter.
-        constexpr std::uint16_t kExpectedSkeeFixedVersionMajor = 3;
-        constexpr std::uint16_t kExpectedSkeeFixedVersionMinor = 4;
-        constexpr std::uint16_t kExpectedSkeeFixedVersionBuild = 5;
-        constexpr std::uint16_t kExpectedSkeeFixedVersionPrivate = 0;
         constexpr std::uint32_t kNativeDoubleMorphType = 2;
         // The native list can finish its RaceMenu lifecycle around the 500 ms
         // InitializeSliders boundary. Keep the fast 16 ms happy path while
         // allowing a failed route to remain observable beyond that boundary.
         constexpr std::uint8_t kMaxSnapshotAttempts = 40;
         constexpr std::chrono::milliseconds kSnapshotRetryInterval{ 16 };
-
-        constexpr std::array<std::uint8_t, 30>
-            kCreateSliderListSignature{
-                0x48, 0x89, 0x5C, 0x24, 0x20,
-                0x44, 0x88, 0x44, 0x24, 0x18,
-                0x48, 0x89, 0x54, 0x24, 0x10,
-                0x55, 0x56, 0x57,
-                0x48, 0x8D, 0x6C, 0x24, 0xB9,
-                0x48, 0x81, 0xEC, 0x90, 0x00, 0x00, 0x00
-            };
-
-        constexpr std::array<std::uint8_t, 32> kExpectedSkeeSha256{
-            0x25, 0x5C, 0x0D, 0xB0, 0xBA, 0x5F, 0xF1, 0x46,
-            0x40, 0xCC, 0x6D, 0x75, 0xCC, 0xDD, 0xFB, 0x24,
-            0x47, 0x4B, 0x49, 0x8D, 0x35, 0xB7, 0x7F, 0x31,
-            0x40, 0xCC, 0xB0, 0x5E, 0xB8, 0x0E, 0x72, 0x73
-        };
 
         constexpr std::uint64_t kFnvOffsetBasis =
             14695981039346656037ULL;
@@ -548,23 +517,6 @@ namespace mps
             return true;
         }
 
-        [[nodiscard]] bool MemoryMatchesSEH(
-            const std::uint8_t* memory,
-            const std::uint8_t* expected,
-            std::size_t size) noexcept
-        {
-            __try {
-                for (std::size_t index = 0; index < size; ++index) {
-                    if (memory[index] != expected[index]) {
-                        return false;
-                    }
-                }
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
-                return false;
-            }
-            return true;
-        }
-
         [[nodiscard]] bool ReadObjectVtableSEH(
             void* object,
             void** outVtable) noexcept
@@ -597,215 +549,6 @@ namespace mps
             return true;
         }
 
-        using CreateSliderListRawFn =
-            void* (__fastcall*)(void*, RE::TESRace*, std::uint8_t);
-
-        [[nodiscard]] bool InvokeCreateSliderListSEH(
-            CreateSliderListRawFn function,
-            void* faceMorphObject,
-            RE::TESRace* race,
-            std::uint8_t sex,
-            void** outList,
-            std::uint32_t* outExceptionCode) noexcept
-        {
-            *outList = nullptr;
-            *outExceptionCode = 0;
-            __try {
-                *outList = function(
-                    faceMorphObject,
-                    race,
-                    sex);
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
-                *outExceptionCode =
-                    static_cast<std::uint32_t>(GetExceptionCode());
-                return false;
-            }
-            return true;
-        }
-
-        [[nodiscard]] bool GetModulePath(
-            HMODULE module,
-            std::filesystem::path& outPath)
-        {
-            std::wstring buffer(32768, L'\0');
-            const DWORD length = GetModuleFileNameW(
-                module,
-                buffer.data(),
-                static_cast<DWORD>(buffer.size()));
-            if (length == 0 || length >= buffer.size()) {
-                return false;
-            }
-            buffer.resize(length);
-            outPath = std::move(buffer);
-            return true;
-        }
-
-        struct FixedFileVersion
-        {
-            std::uint16_t major = 0;
-            std::uint16_t minor = 0;
-            std::uint16_t build = 0;
-            std::uint16_t privatePart = 0;
-        };
-
-        [[nodiscard]] bool TryReadFixedFileVersion(
-            const std::filesystem::path& path,
-            FixedFileVersion& outVersion)
-        {
-            DWORD ignored = 0;
-            const DWORD size = GetFileVersionInfoSizeW(
-                path.c_str(),
-                std::addressof(ignored));
-            if (size == 0) {
-                return false;
-            }
-
-            std::vector<std::uint8_t> data(size);
-            if (!GetFileVersionInfoW(
-                    path.c_str(),
-                    0,
-                    size,
-                    data.data())) {
-                return false;
-            }
-
-            VS_FIXEDFILEINFO* info = nullptr;
-            UINT infoSize = 0;
-            if (!VerQueryValueW(
-                    data.data(),
-                    L"\\",
-                    reinterpret_cast<void**>(
-                        std::addressof(info)),
-                    std::addressof(infoSize)) ||
-                !info ||
-                infoSize < sizeof(VS_FIXEDFILEINFO) ||
-                info->dwSignature != 0xFEEF04BD) {
-                return false;
-            }
-
-            outVersion.major = HIWORD(info->dwFileVersionMS);
-            outVersion.minor = LOWORD(info->dwFileVersionMS);
-            outVersion.build = HIWORD(info->dwFileVersionLS);
-            outVersion.privatePart = LOWORD(info->dwFileVersionLS);
-            return true;
-        }
-
-        [[nodiscard]] bool MatchesExpectedFixedFileVersion(
-            const FixedFileVersion& version) noexcept
-        {
-            return version.major == kExpectedSkeeFixedVersionMajor &&
-                   version.minor == kExpectedSkeeFixedVersionMinor &&
-                   version.build == kExpectedSkeeFixedVersionBuild &&
-                   version.privatePart ==
-                       kExpectedSkeeFixedVersionPrivate;
-        }
-
-        [[nodiscard]] bool ComputeSha256(
-            const std::filesystem::path& path,
-            std::array<std::uint8_t, 32>& outHash)
-        {
-            BCRYPT_ALG_HANDLE algorithm = nullptr;
-            BCRYPT_HASH_HANDLE hash = nullptr;
-            HANDLE file = INVALID_HANDLE_VALUE;
-            std::vector<std::uint8_t> hashObject;
-            bool success = false;
-
-            do {
-                if (BCryptOpenAlgorithmProvider(
-                        std::addressof(algorithm),
-                        BCRYPT_SHA256_ALGORITHM,
-                        nullptr,
-                        0) != 0) {
-                    break;
-                }
-
-                DWORD objectLength = 0;
-                DWORD copied = 0;
-                if (BCryptGetProperty(
-                        algorithm,
-                        BCRYPT_OBJECT_LENGTH,
-                        reinterpret_cast<PUCHAR>(
-                            std::addressof(objectLength)),
-                        sizeof(objectLength),
-                        std::addressof(copied),
-                        0) != 0 ||
-                    copied != sizeof(objectLength) ||
-                    objectLength == 0) {
-                    break;
-                }
-
-                hashObject.resize(objectLength);
-                if (BCryptCreateHash(
-                        algorithm,
-                        std::addressof(hash),
-                        hashObject.data(),
-                        static_cast<ULONG>(hashObject.size()),
-                        nullptr,
-                        0,
-                        0) != 0) {
-                    break;
-                }
-
-                file = CreateFileW(
-                    path.c_str(),
-                    GENERIC_READ,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE |
-                        FILE_SHARE_DELETE,
-                    nullptr,
-                    OPEN_EXISTING,
-                    FILE_ATTRIBUTE_NORMAL |
-                        FILE_FLAG_SEQUENTIAL_SCAN,
-                    nullptr);
-                if (file == INVALID_HANDLE_VALUE) {
-                    break;
-                }
-
-                std::array<std::uint8_t, 64 * 1024> buffer{};
-                for (;;) {
-                    DWORD bytesRead = 0;
-                    if (!ReadFile(
-                            file,
-                            buffer.data(),
-                            static_cast<DWORD>(buffer.size()),
-                            std::addressof(bytesRead),
-                            nullptr)) {
-                        break;
-                    }
-                    if (bytesRead == 0) {
-                        success = true;
-                        break;
-                    }
-                    if (BCryptHashData(
-                            hash,
-                            buffer.data(),
-                            bytesRead,
-                            0) != 0) {
-                        success = false;
-                        break;
-                    }
-                }
-
-                if (!success ||
-                    BCryptFinishHash(
-                        hash,
-                        outHash.data(),
-                        static_cast<ULONG>(outHash.size()),
-                        0) != 0) {
-                    success = false;
-                }
-            } while (false);
-
-            if (file != INVALID_HANDLE_VALUE) {
-                CloseHandle(file);
-            }
-            if (hash) {
-                BCryptDestroyHash(hash);
-            }
-            if (algorithm) {
-                BCryptCloseAlgorithmProvider(algorithm, 0);
-            }
-            return success;
-        }
     }
 
     FaceSliderRouter::FaceSliderRouter(
@@ -835,10 +578,13 @@ namespace mps
             return false;
         }
 
+        if (!SkeeFaceMapGuard::GetSingleton().SetFaceMorphInterface(
+                faceMorphInterface)) {
+            return false;
+        }
+
         faceMorphInterface_ = faceMorphInterface;
         readbackGateState_ = GateState::Unchecked;
-        repairGateState_ = GateState::Unchecked;
-        createSliderList_ = nullptr;
         skeeModuleBase_ = nullptr;
         preflightProofValid_.store(
             false,
@@ -1832,125 +1578,17 @@ namespace mps
         return true;
     }
 
-    bool FaceSliderRouter::PrepareExactRepair()
-    {
-        if (repairGateState_ != GateState::Unchecked) {
-            return repairGateState_ == GateState::Available;
-        }
-
-        if (!PrepareReadbackAbi() || !skeeModuleBase_) {
-            repairGateState_ = GateState::Unavailable;
-            spdlog::error(
-                "FaceRouter exact repair gate rejected reason=readback_abi_unavailable");
-            return false;
-        }
-
-        auto* base =
-            static_cast<std::uint8_t*>(skeeModuleBase_);
-        HMODULE module = static_cast<HMODULE>(skeeModuleBase_);
-        std::filesystem::path modulePath;
-        if (!GetModulePath(module, modulePath)) {
-            spdlog::error(
-                "FaceRouter exact repair gate rejected reason=module_path_unavailable");
-            return false;
-        }
-
-        FixedFileVersion actualVersion{};
-        if (!TryReadFixedFileVersion(modulePath, actualVersion)) {
-            spdlog::error(
-                "FaceRouter exact repair gate rejected reason=fixed_file_version_unreadable");
-            return false;
-        }
-        if (!MatchesExpectedFixedFileVersion(actualVersion)) {
-            repairGateState_ = GateState::Unavailable;
-            spdlog::error(
-                "FaceRouter exact repair gate rejected reason=fixed_file_version_mismatch actual={}.{}.{}.{} expected={}.{}.{}.{}",
-                actualVersion.major,
-                actualVersion.minor,
-                actualVersion.build,
-                actualVersion.privatePart,
-                kExpectedSkeeFixedVersionMajor,
-                kExpectedSkeeFixedVersionMinor,
-                kExpectedSkeeFixedVersionBuild,
-                kExpectedSkeeFixedVersionPrivate);
-            return false;
-        }
-
-        std::array<std::uint8_t, 32> actualHash{};
-        if (!ComputeSha256(modulePath, actualHash)) {
-            spdlog::error(
-                "FaceRouter exact repair gate rejected reason=sha256_unreadable");
-            return false;
-        }
-        if (actualHash != kExpectedSkeeSha256) {
-            repairGateState_ = GateState::Unavailable;
-            spdlog::error(
-                "FaceRouter exact repair gate rejected reason=sha256_mismatch");
-            return false;
-        }
-        if (!MemoryMatchesSEH(
-                base + kCreateSliderListRva,
-                kCreateSliderListSignature.data(),
-                kCreateSliderListSignature.size())) {
-            repairGateState_ = GateState::Unavailable;
-            spdlog::error(
-                "FaceRouter exact repair gate rejected reason=create_slider_list_signature_mismatch");
-            return false;
-        }
-
-        skeeModuleBase_ = module;
-        createSliderList_ =
-            reinterpret_cast<CreateSliderListFn>(
-                base + kCreateSliderListRva);
-        repairGateState_ = GateState::Available;
-        spdlog::info(
-            "FaceRouter exact SKEE CreateSliderList shim enabled");
-        return true;
-    }
-
     bool FaceSliderRouter::TryExactRepair(
         RE::TESRace* race,
         FaceSex sex)
     {
-        if (!race ||
-            !options_.enableExactSkeeRepair ||
-            !PrepareExactRepair() ||
-            !createSliderList_ ||
-            !skeeModuleBase_) {
+        if (!options_.enableExactSkeeRepair) {
             return false;
         }
-
-        void* result = nullptr;
-        std::uint32_t exceptionCode = 0;
-        if (!InvokeCreateSliderListSEH(
-                createSliderList_,
-                faceMorphInterface_,
-                race,
-                static_cast<std::uint8_t>(sex),
-                std::addressof(result),
-                std::addressof(exceptionCode))) {
-            spdlog::error(
-                "FaceRouter CreateSliderList repair failed exception=0x{:08X}",
-                exceptionCode);
-            repairGateState_ = GateState::Unavailable;
-            createSliderList_ = nullptr;
-            return false;
-        }
-        if (!result) {
-            // A missing SliderSet for one transient race/sex route is not an
-            // ABI failure. Keep the exact-build shim available so a later
-            // SetSliders boundary can retry or prepare a different route.
-            spdlog::warn(
-                "FaceRouter CreateSliderList repair returned no list sex={} race={:08X}",
-                sex == FaceSex::Male ? "male" : "female",
-                race->GetFormID());
-            return false;
-        }
-
-        spdlog::info(
-            "FaceRouter repaired SKEE internal list sex={}",
-            sex == FaceSex::Male ? "male" : "female");
-        return true;
+        return SkeeFaceMapGuard::GetSingleton().AlignMap(
+            race,
+            sex,
+            "face_router");
     }
 
     bool FaceSliderRouter::TryReadAxisValues(

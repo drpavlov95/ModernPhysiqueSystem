@@ -6,9 +6,11 @@ set(
     MPS_FACE_ROUTE_SOURCES
     "${MPS_SOURCE_DIR}/src/plugin.cpp"
     "${MPS_SOURCE_DIR}/src/FaceSliderRouter.cpp"
+    "${MPS_SOURCE_DIR}/src/SkeeFaceMapGuard.cpp"
 )
 set(MPS_FACE_ROUTER_SOURCE "${MPS_SOURCE_DIR}/src/FaceSliderRouter.cpp")
 set(MPS_FACE_ROUTER_HEADER "${MPS_SOURCE_DIR}/src/FaceSliderRouter.h")
+set(MPS_MAP_GUARD_SOURCE "${MPS_SOURCE_DIR}/src/SkeeFaceMapGuard.cpp")
 set(MPS_GLOBALS_HEADER "${MPS_SOURCE_DIR}/src/Globals.h")
 
 set(
@@ -66,10 +68,12 @@ endforeach()
 
 file(READ "${MPS_FACE_ROUTER_SOURCE}" face_router_source)
 file(READ "${MPS_FACE_ROUTER_HEADER}" face_router_header)
+file(READ "${MPS_MAP_GUARD_SOURCE}" map_guard_source)
 file(READ "${MPS_SOURCE_DIR}/src/plugin.cpp" plugin_source)
 file(READ "${MPS_GLOBALS_HEADER}" globals_source)
 string(REGEX REPLACE "[ \t\r\n]+" "" compact_face_router "${face_router_source}")
 string(REGEX REPLACE "[ \t\r\n]+" "" compact_face_router_header "${face_router_header}")
+string(REGEX REPLACE "[ \t\r\n]+" "" compact_map_guard "${map_guard_source}")
 string(REGEX REPLACE "[ \t\r\n]+" "" compact_plugin "${plugin_source}")
 string(REGEX REPLACE "[ \t\r\n]+" "" compact_globals "${globals_source}")
 
@@ -92,180 +96,45 @@ foreach(required_fixed_version_fragment IN ITEMS
 )
     string(
         FIND
-        "${compact_face_router}"
+        "${compact_map_guard}"
         "${required_fixed_version_fragment}"
         fixed_version_offset
     )
     if(fixed_version_offset EQUAL -1)
         message(
             FATAL_ERROR
-            "FaceRouter exact SKEE fixed-version gate fragment is missing: ${required_fixed_version_fragment}"
+            "SkeeFaceMapGuard exact fixed-version fragment is missing: ${required_fixed_version_fragment}"
         )
     endif()
 endforeach()
 
-# A null route-specific CreateSliderList result must not permanently poison
-# the already-certified ABI shim. Only an SEH fault can latch it unavailable.
-string(
-    FIND
-    "${compact_face_router}"
-    "boolFaceSliderRouter::TryExactRepair("
-    try_exact_repair_offset
-)
-string(
-    FIND
-    "${compact_face_router}"
-    "boolFaceSliderRouter::TryReadAxisValues("
-    try_read_axis_offset
-)
-if(
-    try_exact_repair_offset EQUAL -1
-    OR try_read_axis_offset LESS_EQUAL try_exact_repair_offset
-)
-    message(FATAL_ERROR "FaceRouter TryExactRepair boundary is missing")
-endif()
-math(
-    EXPR
-    try_exact_repair_length
-    "${try_read_axis_offset} - ${try_exact_repair_offset}"
-)
-string(
-    SUBSTRING
-    "${compact_face_router}"
-    ${try_exact_repair_offset}
-    ${try_exact_repair_length}
-    try_exact_repair_source
-)
-string(FIND "${try_exact_repair_source}" "if(!result){" null_result_offset)
-string(
-    REGEX MATCHALL
-    "repairGateState_=GateState::Unavailable"
-    repair_poison_matches
-    "${try_exact_repair_source}"
-)
-string(
-    REGEX MATCHALL
-    "createSliderList_=nullptr"
-    function_poison_matches
-    "${try_exact_repair_source}"
-)
-list(LENGTH repair_poison_matches repair_poison_count)
-list(LENGTH function_poison_matches function_poison_count)
-if(
-    null_result_offset EQUAL -1
-    OR NOT repair_poison_count EQUAL 1
-    OR NOT function_poison_count EQUAL 1
-)
-    message(
-        FATAL_ERROR
-        "Only the CreateSliderList SEH-fault branch may disable the ABI shim"
-    )
-endif()
-
-# File metadata/path reads can fail transiently under a virtualized MO2 path.
-# They must leave the gate Unchecked so another SetSliders boundary can retry;
-# exact identity mismatches remain permanently unavailable.
-string(
-    FIND
-    "${compact_face_router}"
-    "boolFaceSliderRouter::PrepareExactRepair()"
-    prepare_exact_repair_offset
-)
-if(
-    prepare_exact_repair_offset EQUAL -1
-    OR try_exact_repair_offset LESS_EQUAL prepare_exact_repair_offset
-)
-    message(FATAL_ERROR "FaceRouter PrepareExactRepair boundary is missing")
-endif()
-math(
-    EXPR
-    prepare_exact_repair_length
-    "${try_exact_repair_offset} - ${prepare_exact_repair_offset}"
-)
-string(
-    SUBSTRING
-    "${compact_face_router}"
-    ${prepare_exact_repair_offset}
-    ${prepare_exact_repair_length}
-    prepare_exact_repair_source
-)
-string(
-    FIND
-    "${prepare_exact_repair_source}"
-    "TryReadFixedFileVersion(modulePath,actualVersion)"
-    fixed_version_read_offset
-)
-string(
-    FIND
-    "${prepare_exact_repair_source}"
-    "!MatchesExpectedFixedFileVersion(actualVersion)"
-    fixed_version_match_offset
-)
-string(
-    FIND
-    "${prepare_exact_repair_source}"
-    "ComputeSha256(modulePath,actualHash)"
-    fixed_version_hash_offset
-)
-string(
-    FIND
-    "${prepare_exact_repair_source}"
-    "repairGateState_=GateState::Available"
-    repair_available_offset
-)
-if(
-    fixed_version_read_offset EQUAL -1
-    OR fixed_version_match_offset LESS_EQUAL fixed_version_read_offset
-    OR fixed_version_hash_offset LESS_EQUAL fixed_version_match_offset
-    OR repair_available_offset LESS_EQUAL fixed_version_hash_offset
-)
-    message(
-        FATAL_ERROR
-        "FaceRouter must validate the fixed file version before hashing and enabling the shim"
-    )
-endif()
-foreach(transient_reason IN ITEMS
+# The guard owns the private SKEE shim independently of PW's face-application
+# backend. Null route results and virtualized file-read failures remain
+# retryable; only exact identity/ABI failures or an SEH fault poison the shim.
+foreach(required_guard_fragment IN ITEMS
+    "boolSkeeFaceMapGuard::AlignMap("
+    "boolSkeeFaceMapGuard::PrepareExactGate()"
+    "if(!result){"
+    "gateState_=GateState::Unavailable;createSliderList_=nullptr;returnfalse;"
     "reason=module_path_unavailable"
     "reason=fixed_file_version_unreadable"
     "reason=sha256_unreadable"
+    "gateState_=GateState::Available"
 )
-    string(
-        FIND
-        "${prepare_exact_repair_source}"
-        "${transient_reason}"
-        transient_reason_offset
-    )
-    if(transient_reason_offset EQUAL -1)
-        message(
-            FATAL_ERROR
-            "FaceRouter transient exact-gate reason is missing: ${transient_reason}"
-        )
+    string(FIND "${compact_map_guard}" "${required_guard_fragment}" guard_offset)
+    if(guard_offset EQUAL -1)
+        message(FATAL_ERROR "SkeeFaceMapGuard safety fragment is missing: ${required_guard_fragment}")
     endif()
 endforeach()
-string(
-    FIND
-    "${prepare_exact_repair_source}"
-    "repairGateState_=GateState::Unavailable;if(!PrepareReadbackAbi()"
-    eager_repair_poison_offset
-)
-if(NOT eager_repair_poison_offset EQUAL -1)
-    message(
-        FATAL_ERROR
-        "FaceRouter must not eagerly latch transient exact-gate failures unavailable"
-    )
+string(REGEX MATCHALL "createSliderList_=nullptr" guard_function_poison_matches "${compact_map_guard}")
+list(LENGTH guard_function_poison_matches guard_function_poison_count)
+if(NOT guard_function_poison_count EQUAL 2)
+    message(FATAL_ERROR "SkeeFaceMapGuard may clear its shim only after SEH or explicit interface reset")
 endif()
-string(
-    REGEX MATCHALL
-    "repairGateState_=GateState::Unavailable"
-    permanent_repair_poison_matches
-    "${prepare_exact_repair_source}"
-)
-list(LENGTH permanent_repair_poison_matches permanent_repair_poison_count)
-if(NOT permanent_repair_poison_count EQUAL 4)
-    message(
-        FATAL_ERROR
-        "FaceRouter exact repair gate must latch only its four permanent ABI/identity failures"
-    )
+
+string(FIND "${compact_face_router}" "SkeeFaceMapGuard::GetSingleton().AlignMap(race,sex,\"face_router\")" router_guard_delegate_offset)
+if(router_guard_delegate_offset EQUAL -1)
+    message(FATAL_ERROR "FaceRouter must delegate current-sex alignment to SkeeFaceMapGuard")
 endif()
 
 # The current route is discovered from the UI descriptors produced after the
@@ -374,6 +243,9 @@ set(
     "a_params.retVal->SetBoolean(ready);"
     "newPrepareFaceMapForCurrentSexHandler()"
     "a_root->SetMember(kScaleformPrepareFaceMapFunction,prepareFaceMapCallback)"
+    "classPrepareFaceMapForSexHandlerfinal:publicRE::GFxFunctionHandler"
+    "newPrepareFaceMapForSexHandler()"
+    "a_root->SetMember(kScaleformPrepareFaceMapForSexFunction,prepareFaceMapForSexCallback)"
 )
 foreach(required_fragment IN LISTS required_prepare_bridge_fragments)
     string(FIND "${compact_plugin}" "${required_fragment}" bridge_fragment_offset)
@@ -394,16 +266,23 @@ string(
 string(
     FIND
     "${compact_plugin}"
-    "classSetWeightSyncHandler"
-    set_weight_handler_offset
+    "classPrepareFaceMapForSexHandler"
+    prepare_target_handler_offset
+)
+string(
+    FIND
+    "${compact_plugin}"
+    "classNotifyFaceCorruptionRecoveryHandler"
+    recovery_handler_offset
 )
 if(
     prepare_handler_offset EQUAL -1
-    OR set_weight_handler_offset LESS_EQUAL prepare_handler_offset
+    OR prepare_target_handler_offset LESS_EQUAL prepare_handler_offset
+    OR recovery_handler_offset LESS_EQUAL prepare_target_handler_offset
 )
-    message(FATAL_ERROR "PrepareFaceMapForCurrentSex handler boundary is missing")
+    message(FATAL_ERROR "Face-map Scaleform handler boundary is missing")
 endif()
-math(EXPR prepare_handler_length "${set_weight_handler_offset} - ${prepare_handler_offset}")
+math(EXPR prepare_handler_length "${prepare_target_handler_offset} - ${prepare_handler_offset}")
 string(
     SUBSTRING
     "${compact_plugin}"
@@ -421,6 +300,18 @@ if(NOT synchronous_exchange_offset EQUAL -1)
     message(
         FATAL_ERROR
         "SetSliders preflight must not perform synchronous RaceMenu interface exchange"
+    )
+endif()
+string(
+    FIND
+    "${prepare_handler_source}"
+    "UseSharedFaceMorphBackend()"
+    backend_specific_bypass_offset
+)
+if(NOT backend_specific_bypass_offset EQUAL -1)
+    message(
+        FATAL_ERROR
+        "SetSliders map alignment must never be bypassed for the shared MPF/POS backend"
     )
 endif()
 foreach(required_handler_fragment IN ITEMS
@@ -441,6 +332,41 @@ foreach(required_handler_fragment IN ITEMS
         )
     endif()
 endforeach()
+
+math(
+    EXPR prepare_target_handler_length
+    "${recovery_handler_offset} - ${prepare_target_handler_offset}"
+)
+string(
+    SUBSTRING
+    "${compact_plugin}"
+    ${prepare_target_handler_offset}
+    ${prepare_target_handler_length}
+    prepare_target_handler_source
+)
+foreach(required_target_handler_fragment IN ITEMS
+    "requestedSex=a_params.args[0].GetNumber();"
+    "currentSex<=static_cast<std::uint8_t>(mps::FaceSex::Female)"
+    "ready=mps::SkeeFaceMapGuard::GetSingleton().AlignMap(race,targetSex,\"pre_change_sex\");"
+    "InvalidateBodyMorphApplication(\"pre_change_sex\");"
+    "BeginFaceMorphTransition(\"pre_change_sex\",true);"
+    "g_faceSliderRouter.InvalidateRoute();"
+    "AlignMap(race,static_cast<mps::FaceSex>(currentSex),\"pre_change_sex_failure_restore\")"
+    "a_params.retVal->SetBoolean(ready);"
+)
+    string(
+        FIND
+        "${prepare_target_handler_source}"
+        "${required_target_handler_fragment}"
+        target_handler_fragment_offset
+    )
+    if(target_handler_fragment_offset EQUAL -1)
+        message(
+            FATAL_ERROR
+            "Pre-ChangeSex target-map handler fragment is missing: ${required_target_handler_fragment}"
+        )
+    endif()
+endforeach()
 string(
     FIND
     "${compact_globals}"
@@ -449,6 +375,15 @@ string(
 )
 if(prepare_bridge_name_offset EQUAL -1)
     message(FATAL_ERROR "PrepareFaceMapForCurrentSex Scaleform bridge name is missing")
+endif()
+string(
+    FIND
+    "${compact_globals}"
+    "kScaleformPrepareFaceMapForSexFunction=\"PrepareFaceMapForSex\";"
+    prepare_target_bridge_name_offset
+)
+if(prepare_target_bridge_name_offset EQUAL -1)
+    message(FATAL_ERROR "PrepareFaceMapForSex Scaleform bridge name is missing")
 endif()
 
 # BuildSnapshot may discover dynamic extended indices, but it must not consult

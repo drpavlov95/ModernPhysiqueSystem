@@ -22,6 +22,18 @@ namespace
 	std::atomic_bool g_verboseLogging{ false };
 	std::atomic_bool g_raceMenuFacePreview{ FaceMorphDiagnostics::kEnableRaceMenuFacePreview };
 	std::atomic_bool g_weightSyncPoll{ FaceMorphDiagnostics::kEnableWeightSyncPoll };
+	std::atomic_bool g_weightMorphLink{ FaceMorphDiagnostics::kEnableWeightMorphLink };
+	std::atomic_bool g_useSharedFaceMorphLibrary{
+		FaceMorphDiagnostics::kUseSharedFaceMorphLibraryByDefault
+	};
+	std::atomic_bool g_useMuDynamicNormalMaps{
+		FaceMorphDiagnostics::kUseMuDynamicNormalMapsByDefault
+	};
+	std::atomic_bool g_muDynamicNormalMapsAvailable{ false };
+	std::atomic_bool g_muDynamicNormalMapsRequired{ false };
+	std::atomic_bool g_realtimeNormalMapPreview{
+		FaceMorphDiagnostics::kEnableRealtimeNormalMapPreview
+	};
 	std::atomic_bool g_stableNormalMapSelection{ false };
 	std::atomic_int g_stableNormalMapHysteresisPercent{
 		FaceMorphDiagnostics::kDefaultStableNormalMapHysteresisPercent
@@ -123,23 +135,39 @@ namespace FaceMorphDiagnostics
 		const bool verboseLogging = ReadBool(configPath, "Diagnostics", "VerboseLogging", false);
 		const bool raceMenuFacePreview = ReadBool(configPath, "FaceMorphs", "PreviewRaceMenuFaceSliders", kEnableRaceMenuFacePreview);
 		const bool weightSyncPoll = ReadBool(configPath, "FaceMorphs", "WeightSyncPoll", kEnableWeightSyncPoll);
-		const std::string logLevelText = ReadString(configPath, "Logging", "Level", "warn");
-		std::string normalMapSelectionMode = ReadString(configPath, "NormalMaps", "SelectionMode", "legacy");
-		std::ranges::transform(normalMapSelectionMode, normalMapSelectionMode.begin(), [](unsigned char ch) {
+		const bool weightMorphLink = ReadBool(configPath, "FaceMorphs", "WeightMorphLink", kEnableWeightMorphLink);
+		std::string faceMorphBackend = ReadString(
+			configPath,
+			"FaceMorphs",
+			"Backend",
+			"shared");
+		std::ranges::transform(faceMorphBackend, faceMorphBackend.begin(), [](unsigned char ch) {
 			return static_cast<char>(std::tolower(ch));
 		});
-		const bool stableNormalMapSelection = normalMapSelectionMode == "stable";
-		if (!stableNormalMapSelection && normalMapSelectionMode != "legacy") {
-			normalMapSelectionMode = "legacy";
+		if (faceMorphBackend != "shared" && faceMorphBackend != "racemenu") {
+			spdlog::warn(
+				"Unsupported FaceMorphs.Backend={}; falling back to shared",
+				faceMorphBackend);
+			faceMorphBackend = "shared";
 		}
-		const int stableNormalMapHysteresisPercent = std::clamp(
-			static_cast<int>(GetPrivateProfileIntA(
-				"NormalMaps",
-				"StableHysteresisPercent",
-				kDefaultStableNormalMapHysteresisPercent,
-				configPath.string().c_str())),
-			0,
-			20);
+		const std::string logLevelText = ReadString(configPath, "Logging", "Level", "warn");
+		std::string normalMapBackend = ReadString(configPath, "NormalMaps", "Backend", "auto");
+		std::ranges::transform(normalMapBackend, normalMapBackend.begin(), [](unsigned char ch) {
+			return static_cast<char>(std::tolower(ch));
+		});
+		if (normalMapBackend != "auto" && normalMapBackend != "mu" && normalMapBackend != "none") {
+			spdlog::warn(
+				"Unsupported NormalMaps.Backend={}; falling back to auto",
+				normalMapBackend);
+			normalMapBackend = "auto";
+		}
+		const bool useMuDynamicNormalMaps = normalMapBackend != "none";
+		const bool requireMuDynamicNormalMaps = normalMapBackend == "mu";
+		const bool realtimeNormalMapPreview = ReadBool(
+			configPath,
+			"NormalMaps",
+			"RealtimePreview",
+			kEnableRealtimeNormalMapPreview);
 		const auto logLevel = ParseLogLevel(logLevelText);
 
 		g_causalTrace.store(causalTrace);
@@ -148,14 +176,17 @@ namespace FaceMorphDiagnostics
 		g_verboseLogging.store(verboseLogging);
 		g_raceMenuFacePreview.store(raceMenuFacePreview);
 		g_weightSyncPoll.store(weightSyncPoll);
-		g_stableNormalMapSelection.store(stableNormalMapSelection);
-		g_stableNormalMapHysteresisPercent.store(stableNormalMapHysteresisPercent);
+		g_weightMorphLink.store(weightMorphLink);
+		g_useSharedFaceMorphLibrary.store(faceMorphBackend == "shared");
+		g_useMuDynamicNormalMaps.store(useMuDynamicNormalMaps);
+		g_muDynamicNormalMapsRequired.store(requireMuDynamicNormalMaps);
+		g_realtimeNormalMapPreview.store(realtimeNormalMapPreview);
 
 		spdlog::set_level(logLevel);
 		spdlog::flush_on(logLevel <= spdlog::level::debug ? spdlog::level::debug : spdlog::level::warn);
 
 		spdlog::info(
-			"ModernPhysiqueSystem config path={} exists={} logLevel={} FaceCausalTrace={} FaceNodeSnapshot={} RaceMenuEntryDump={} VerboseLogging={} PreviewRaceMenuFaceSliders={} WeightSyncPoll={} NormalSelectionMode={} StableHysteresisPercent={}",
+			"ModernPhysiqueSystem config path={} exists={} logLevel={} FaceCausalTrace={} FaceNodeSnapshot={} RaceMenuEntryDump={} VerboseLogging={} PreviewRaceMenuFaceSliders={} WeightSyncPoll={} WeightMorphLink={} FaceBackend={} NormalBackend={} RealtimePreview={}",
 			configPath.string(),
 			configExists ? 1 : 0,
 			logLevelText,
@@ -165,8 +196,10 @@ namespace FaceMorphDiagnostics
 			verboseLogging ? 1 : 0,
 			raceMenuFacePreview ? 1 : 0,
 			weightSyncPoll ? 1 : 0,
-			normalMapSelectionMode,
-			stableNormalMapHysteresisPercent);
+			weightMorphLink ? 1 : 0,
+			faceMorphBackend,
+			normalMapBackend,
+			realtimeNormalMapPreview ? 1 : 0);
 	}
 
 	bool IsCausalTraceEnabled()
@@ -197,6 +230,42 @@ namespace FaceMorphDiagnostics
 	bool UseWeightSyncPoll()
 	{
 		return g_weightSyncPoll.load();
+	}
+
+	bool UseWeightMorphLink()
+	{
+		return g_weightMorphLink.load();
+	}
+
+	bool UseSharedFaceMorphLibrary()
+	{
+		return g_useSharedFaceMorphLibrary.load();
+	}
+
+	bool MuDynamicNormalMapsRequested()
+	{
+		return g_useMuDynamicNormalMaps.load();
+	}
+
+	bool MuDynamicNormalMapsRequired()
+	{
+		return g_muDynamicNormalMapsRequired.load();
+	}
+
+	bool UseMuDynamicNormalMaps()
+	{
+		return g_useMuDynamicNormalMaps.load() &&
+			g_muDynamicNormalMapsAvailable.load();
+	}
+
+	void SetMuDynamicNormalMapsAvailable(bool available)
+	{
+		g_muDynamicNormalMapsAvailable.store(available);
+	}
+
+	bool UseRealtimeNormalMapPreview()
+	{
+		return g_realtimeNormalMapPreview.load();
 	}
 
 	bool UseStableNormalMapSelection()

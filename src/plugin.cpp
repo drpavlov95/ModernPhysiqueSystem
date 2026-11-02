@@ -1,6 +1,9 @@
 #include "log.h"
 #include "FaceMorphDiagnostics.h"
 #include "FaceSliderRouter.h"
+#include "SkeeFaceMapGuard.h"
+#include "SharedFaceMorphLibrary.h"
+#include "MuDynamicNormalMapAPI.h"
 #include "PrismaUI_API.h"
 #include "RaceMenuInterop.h"
 #include "core/Text.h"
@@ -48,6 +51,31 @@ using mps::QuantizeMorphValue;
 namespace
 {
     constexpr std::uint64_t kFaceRouterRebuildEventTimeoutMs = 1500;
+    constexpr int kMuRetryTicks = 4;
+    constexpr int kMuGeometryStableTicksRequired = 2;
+    constexpr std::size_t kFaceGeometryStableSamplesRequired = 8;
+    constexpr std::uint64_t kFaceGeometryQuietWindowMs = 500;
+
+    struct MuNormalLifecycle
+    {
+        int retryTicks = 0;
+        bool reconcilePending = false;
+        std::string source;
+        bool geometryPrepared = false;
+        std::uint8_t stableSex = SelectedNormalMapCandidate::kInvalidSex;
+        std::uintptr_t stableThirdPersonRoot = 0;
+        int stableGeometryTicks = 0;
+        int geometryRetryTicks = 0;
+    };
+
+    struct FaceMorphLifecycle
+    {
+        bool pending = false;
+        std::uint64_t generation = 0;
+        std::uint64_t quietUntilMs = 0;
+        std::uint8_t expectedSex = SelectedNormalMapCandidate::kInvalidSex;
+        std::string source;
+    };
 
     mps::FaceSliderRouter g_faceSliderRouter{
         nullptr,
@@ -60,9 +88,16 @@ namespace
             .readbackEpsilon = 0.001F
         }
     };
+    mps::SharedFaceMorphLibrary g_sharedFaceMorphLibrary;
     bool g_faceRouterAwaitingRsmRebuild = false;
     std::uint64_t g_faceRouterRebuildGateDeadlineMs = 0;
     std::atomic<std::uint64_t> g_normalMapEpoch{ 0 };
+    std::atomic_bool g_f7Held{ false };
+    std::atomic<bool> g_muLifecycleNeedsFastTick{ false };
+    MuNormalLifecycle g_muNormalLifecycle;
+    FaceMorphLifecycle g_faceMorphLifecycle;
+    bool g_muSexTransitionPending = false;
+    mps::mu::DynamicNormalMapInterface* g_muNativeInterface = nullptr;
 }
 
 void OnMorphsPreview(const char* argument);
@@ -81,6 +116,17 @@ bool ApplyMorphsNative(float thin, float muscular, float fat, bool isCommit);
 bool ApplyBodyMorphTargetsOnly(float thin, float muscular, float fat, std::string_view reason);
 bool RefreshCachedMorphStateFromNative();
 void TryAcquireOptionalRaceMenuInterfaces();
+bool UseSharedFaceMorphBackend();
+bool ApplySharedFaceMorphTarget(
+    RE::PlayerCharacter* player,
+    float thin,
+    float muscular,
+    float heavy,
+    std::string_view reason);
+void BeginFaceMorphTransition(std::string_view source, bool restoreCurrentOutput = false);
+void NotifyFaceMorphRebuild(std::string_view source);
+void TickFaceMorphLifecycle();
+void ResetFaceMorphLifecycle();
 FaceMorphTriplet ReadFaceMorphValues(
     RE::TESNPC* actorBase,
     std::string_view reason = "ReadFaceMorphValues",
@@ -88,7 +134,7 @@ FaceMorphTriplet ReadFaceMorphValues(
 void ResetRaceMenuSexTracking();
 void PrimeRaceMenuSexTracking();
 bool DidRaceMenuSexChange();
-void ResetRaceMenuBridgeState();
+void ResetRaceMenuBridgeState(bool preserveMuOperation = false);
 [[nodiscard]] mps::FaceRouterTickResult TickFaceSliderRouter(
     bool force = false);
 bool RegisterScaleform(RE::GFxMovieView* a_view, RE::GFxValue* a_root);
@@ -100,10 +146,20 @@ bool LoadHandNormalMapCatalog(std::string_view dataFolder, std::string_view rela
 void UpdateSelectedNormalMapCandidate(float thin, float muscular, float fat);
 std::string BuildTextureSetEditorID(std::string_view variantKey);
 void LogNormalMapTextureSetPlan();
-bool ApplySelectedNormalMapTextureSet(bool persist = true, std::string_view applySource = "unspecified");
+bool ApplyCurrentNormalMapBackend(bool persistOrForce = true, std::string_view applySource = "unspecified");
+void ApplyPreviewNormalMapBackend(std::string_view applySource);
+std::string BuildMuNormalMapDispatchKey(std::uint8_t sex, std::uint32_t slotBits);
+bool TryReconcileMuNormalMap();
+void TickMuNormalLifecycle();
+void MarkMuSexTransitionGeometryReady(std::string_view source);
+bool TryPrepareMuSexTransitionGeometry(std::string_view source);
+void TickRaceMenuRebuildGate();
+void ResetMuNormalLifecycle(std::string_view source);
+void CompleteMuSexTransition(std::string_view source);
+bool ApplyLegacySelectedNormalMapTextureSet(bool persist, std::string_view applySource);
 void ScheduleDeferredBodyTextureApply(int ticks, int repeats = 1);
 void QueueDeferredBodyTextureApplyTask();
-void SchedulePreviewNormalApply(int ticks = kPreviewNormalDebounceTicks);
+void SchedulePreviewNormalApply(int ticks = kPreviewNormalThrottleTicks);
 void CancelPreviewNormalApply();
 void LogFaceDiag(
     std::string_view eventName,
@@ -129,6 +185,16 @@ void CacheMorphState(
     float fat,
     std::string_view reason = "CacheMorphState",
     std::source_location location = std::source_location::current());
+void InvalidateBodyMorphApplication(std::string_view reason);
+void MarkBodyMorphApplicationApplied(RE::PlayerCharacter* player, std::string_view reason);
+bool IsBodyMorphApplicationCurrent(RE::PlayerCharacter* player);
+bool ApplyOwnedBodyMorphs(
+    RE::PlayerCharacter* player,
+    float thin,
+    float muscular,
+    float fat,
+    bool includeFirstPerson,
+    std::string_view reason);
 
 std::string BuildGeneratedMorphTraceId(std::string_view source)
 {
@@ -463,6 +529,166 @@ std::string BuildTextureSetEditorID(std::string_view variantKey)
     return std::string("RBM_TX_") + std::string(variantKey);
 }
 
+mps::mu::DynamicNormalMapInterface* AcquireMuNativeInterface()
+{
+    if (g_muNativeInterface) {
+        return g_muNativeInterface;
+    }
+    if (!GetModuleHandleW(kMuDynamicNormalMapDllName)) {
+        return nullptr;
+    }
+
+    auto* messaging = SKSE::GetMessagingInterface();
+    if (!messaging) {
+        return nullptr;
+    }
+
+    mps::mu::InterfaceExchangeMessage exchange{};
+    const bool dispatched = messaging->Dispatch(
+        mps::mu::InterfaceExchangeMessage::kType,
+        std::addressof(exchange),
+        0,
+        "MuDynamicNormalMap");
+    if (!dispatched || !exchange.api) {
+        spdlog::debug("Mu native interface exchange is not ready yet");
+        return nullptr;
+    }
+
+    g_muNativeInterface = reinterpret_cast<mps::mu::DynamicNormalMapInterface*>(
+        exchange.api);
+    spdlog::info(
+        "Acquired Mu native interface version={}",
+        g_muNativeInterface->GetVersion());
+    return g_muNativeInterface;
+}
+
+bool DispatchMuNormalUpdateStatic(
+    std::uint32_t slotBits,
+    std::string_view applySource)
+{
+    if (!GetModuleHandleW(kMuDynamicNormalMapDllName)) {
+        spdlog::error(
+            "Mu normal update cannot run because {} is not loaded (source={})",
+            "MuDynamicNormalMap.dll",
+            applySource);
+        return false;
+    }
+
+    auto* player = RE::PlayerCharacter::GetSingleton();
+    if (!player) {
+        spdlog::error(
+            "Mu normal update cannot run because the player is unavailable (source={})",
+            applySource);
+        return false;
+    }
+
+    if (auto* api = AcquireMuNativeInterface()) {
+        api->QUpdateNormalmap(player, slotBits);
+        spdlog::debug(
+            "Queued Mu normal update through native API slots={} source={}",
+            slotBits,
+            applySource);
+        return true;
+    }
+
+    spdlog::debug(
+        "Mu native interface is not ready; normal update will retry source={}",
+        applySource);
+    return false;
+}
+
+bool TryReconcileMuNormalMap()
+{
+    if (!FaceMorphDiagnostics::UseMuDynamicNormalMaps()) {
+        return true;
+    }
+    auto& lifecycle = g_muNormalLifecycle;
+    if (g_muSexTransitionPending || lifecycle.retryTicks > 0) {
+        return true;
+    }
+
+    auto* player = RE::PlayerCharacter::GetSingleton();
+    auto* actorBase = player ? player->GetActorBase() : nullptr;
+    const auto sex = actorBase ?
+        static_cast<std::uint8_t>(actorBase->GetSex()) :
+        SelectedNormalMapCandidate::kInvalidSex;
+    const auto stateKey = BuildMuNormalMapDispatchKey(sex, kMuSkinSlotBits);
+    if (stateKey.empty()) {
+        spdlog::warn(
+            "MuReconcile deferred because the current actor/morph state is unavailable source={}",
+            lifecycle.source);
+        lifecycle.retryTicks = std::max(lifecycle.retryTicks, kMuRetryTicks);
+        return false;
+    }
+
+    if (stateKey == g_appliedNormalMapDispatchKey) {
+        lifecycle.reconcilePending = false;
+        spdlog::debug(
+            "MuBaseQueue skipped duplicate state={} source={}",
+            stateKey,
+            lifecycle.source);
+        return true;
+    }
+
+    const auto slotBits = kMuSkinSlotBits;
+    const bool dispatched = DispatchMuNormalUpdateStatic(slotBits, lifecycle.source);
+    lifecycle.reconcilePending = !dispatched;
+    if (!dispatched) {
+        lifecycle.retryTicks = std::max(lifecycle.retryTicks, kMuRetryTicks);
+    } else {
+        g_appliedNormalMapDispatchKey = stateKey;
+    }
+    spdlog::debug(
+        "MuBaseQueueDispatch state={} slots={} source={}",
+        stateKey,
+        slotBits,
+        lifecycle.source);
+    return dispatched;
+}
+
+std::string BuildMuNormalMapDispatchKey(
+    std::uint8_t sex,
+    std::uint32_t slotBits)
+{
+    if (sex > 1 || slotBits == 0 || !g_hasSavedState.load()) {
+        return {};
+    }
+
+    const auto quantize = [](float value) {
+        return static_cast<int>(std::lround(
+            std::clamp(value, 0.0F, 1.0F) * 1000.0F));
+    };
+    return std::format(
+        "mu|{}|{}|{}|{}|{}",
+        static_cast<unsigned>(sex),
+        quantize(g_lastThin.load()),
+        quantize(g_lastMuscular.load()),
+        quantize(g_lastFat.load()),
+        slotBits);
+}
+
+bool ApplyMuDynamicNormalMap(
+    bool force,
+    std::string_view applySource)
+{
+    if (!FaceMorphDiagnostics::UseMuDynamicNormalMaps()) {
+        return false;
+    }
+
+    auto& lifecycle = g_muNormalLifecycle;
+    if (force) {
+        g_appliedNormalMapDispatchKey.clear();
+    }
+    lifecycle.source = std::string(applySource);
+    lifecycle.reconcilePending = true;
+    g_muLifecycleNeedsFastTick.store(true);
+    spdlog::debug(
+        "MuBaseQueue requested force={} source={}",
+        force ? 1 : 0,
+        applySource);
+    return TryReconcileMuNormalMap();
+}
+
 bool DispatchSelectedNormalPathsStatic(
     std::string_view bodyNormalPath,
     std::string_view handNormalPath,
@@ -521,7 +747,7 @@ bool DispatchSelectedNormalPathsStatic(
     return dispatched;
 }
 
-bool ApplySelectedNormalMapTextureSet(bool persist, std::string_view applySource)
+bool ApplyLegacySelectedNormalMapTextureSet(bool persist, std::string_view applySource)
 {
     // All fields come from one game-thread snapshot so a sex/profile change
     // cannot mix a new body path with an old hand path or editor ID.
@@ -632,6 +858,35 @@ bool ApplySelectedNormalMapTextureSet(bool persist, std::string_view applySource
     return false;
 }
 
+bool ApplyCurrentNormalMapBackend(
+    bool persistOrForce,
+    std::string_view applySource)
+{
+    if (FaceMorphDiagnostics::UseMuDynamicNormalMaps()) {
+        return ApplyMuDynamicNormalMap(
+            persistOrForce,
+            applySource);
+    }
+
+    // Normal-map ownership is optional. With Mu absent or explicitly
+    // disabled, leave the game's/current texture setup untouched.
+    return true;
+}
+
+void ApplyPreviewNormalMapBackend(std::string_view applySource)
+{
+    if (FaceMorphDiagnostics::UseMuDynamicNormalMaps()) {
+        if (FaceMorphDiagnostics::UseRealtimeNormalMapPreview() &&
+            !g_muSexTransitionPending) {
+            (void)ApplyCurrentNormalMapBackend(false, applySource);
+        }
+        return;
+    }
+
+    // There is no pre-generated normal-map backend anymore. If Mu is not
+    // active, preview morphing must remain a normal no-op here.
+}
+
 void ScheduleDeferredBodyTextureApply(int ticks, int repeats)
 {
     if (ticks <= 0) {
@@ -680,7 +935,7 @@ void QueueDeferredBodyTextureApplyTask()
             return;
         }
         g_appliedNormalMapDispatchKey.clear();
-        ApplySelectedNormalMapTextureSet(true, "deferred_racemenu_close");
+        ApplyCurrentNormalMapBackend(true, "deferred_racemenu_close");
     });
 }
 
@@ -690,8 +945,10 @@ void SchedulePreviewNormalApply(int ticks)
         ticks = 1;
     }
 
-    g_previewNormalApplyTicks.store(ticks);
-    spdlog::debug("Scheduled preview normal apply in {} ticks", ticks);
+    int expected = 0;
+    if (g_previewNormalApplyTicks.compare_exchange_strong(expected, ticks)) {
+        spdlog::debug("Scheduled throttled preview normal apply in {} ticks", ticks);
+    }
 }
 
 void CancelPreviewNormalApply()
@@ -1299,6 +1556,9 @@ public:
         // Interface exchange is intentionally kept out of this synchronous
         // SetSliders callback. Normal plugin/menu lifecycle points acquire and
         // cache FaceMorph before RaceMenu begins constructing descriptors.
+        // SKEE's race-keyed internal list is shared by every facial backend,
+        // so this guard must run even when PW applies its own morphs through
+        // the standalone MPF/POS TRI library.
         // Always enter the router, even with invalid inputs: it atomically
         // revokes any older proof before it validates this boundary.
         auto* player = RE::PlayerCharacter::GetSingleton();
@@ -1323,6 +1583,129 @@ public:
 
         if (a_params.retVal) {
             a_params.retVal->SetBoolean(ready);
+        }
+    }
+};
+
+class PrepareFaceMapForSexHandler final : public RE::GFxFunctionHandler
+{
+public:
+    void Call(Params& a_params) override
+    {
+        bool ready = false;
+        bool restoredCurrentMap = false;
+        double requestedSex = std::numeric_limits<double>::quiet_NaN();
+
+        if (a_params.argCount >= 1 && a_params.args[0].IsNumber()) {
+            requestedSex = a_params.args[0].GetNumber();
+        }
+
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        auto* actorBase = player ? player->GetActorBase() : nullptr;
+        auto* race = actorBase ? actorBase->GetRace() : nullptr;
+        const auto currentSex = actorBase ?
+            static_cast<std::uint8_t>(actorBase->GetSex()) :
+            std::numeric_limits<std::uint8_t>::max();
+
+        constexpr double kSexValueEpsilon = 0.001;
+        const bool requestsMale =
+            std::isfinite(requestedSex) &&
+            std::abs(requestedSex) <= kSexValueEpsilon;
+        const bool requestsFemale =
+            std::isfinite(requestedSex) &&
+            std::abs(requestedSex - 1.0) <= kSexValueEpsilon;
+
+        if (race && race->GetFormID() != 0 &&
+            currentSex <= static_cast<std::uint8_t>(mps::FaceSex::Female) &&
+            (requestsMale || requestsFemale)) {
+            const auto targetSex = requestsFemale ?
+                mps::FaceSex::Female :
+                mps::FaceSex::Male;
+            ready = mps::SkeeFaceMapGuard::GetSingleton().AlignMap(
+                race,
+                targetSex,
+                "pre_change_sex");
+
+            if (ready) {
+                const auto targetSexValue =
+                    static_cast<std::uint8_t>(targetSex);
+                if (currentSex != targetSexValue) {
+                    // SliderListEntry invokes this synchronously before the
+                    // native ChangeSex callback. This is the last safe point
+                    // to restore PW-owned FOD output and revoke old routes.
+                    // The native 1.5.97 handler changes the actor's sex before
+                    // rebuilding either cached slider array.
+                    InvalidateBodyMorphApplication("pre_change_sex");
+                    BeginFaceMorphTransition("pre_change_sex", true);
+                    (void)g_faceSliderRouter.InvalidateRoute();
+                }
+                spdlog::info(
+                    "Prepared SKEE face map before ChangeSex currentSex={} targetSex={} race={:08X}",
+                    static_cast<unsigned>(currentSex),
+                    static_cast<unsigned>(targetSexValue),
+                    race->GetFormID());
+            } else {
+                // CreateSliderList clears the race-keyed list before filling
+                // it. If target preparation found no list, restore the map
+                // for the still-current sex before ActionScript fails closed.
+                restoredCurrentMap =
+                    mps::SkeeFaceMapGuard::GetSingleton().AlignMap(
+                        race,
+                        static_cast<mps::FaceSex>(currentSex),
+                        "pre_change_sex_failure_restore");
+            }
+        }
+
+        if (!ready) {
+            spdlog::error(
+                "PrepareFaceMapForSex blocked ChangeSex requestedSex={} currentSex={} race={:08X} restoredCurrentMap={}",
+                requestedSex,
+                static_cast<unsigned>(currentSex),
+                race ? race->GetFormID() : 0,
+                restoredCurrentMap ? 1 : 0);
+        }
+
+        if (a_params.retVal) {
+            a_params.retVal->SetBoolean(ready);
+        }
+    }
+};
+
+class NotifyFaceCorruptionRecoveryHandler : public RE::GFxFunctionHandler
+{
+public:
+    void Call(Params& a_params) override
+    {
+        double oldValue = std::numeric_limits<double>::quiet_NaN();
+        double sliderId = -1.0;
+        double recoveredCount = 1.0;
+        if (a_params.argCount > 0 && a_params.args[0].IsNumber()) {
+            oldValue = a_params.args[0].GetNumber();
+        }
+        if (a_params.argCount > 1 && a_params.args[1].IsNumber()) {
+            sliderId = a_params.args[1].GetNumber();
+        }
+        if (a_params.argCount > 2 && a_params.args[2].IsNumber()) {
+            recoveredCount = a_params.args[2].GetNumber();
+        }
+
+        if (UseSharedFaceMorphBackend()) {
+            // The corrected geometry and prior output snapshots may still
+            // contain the bad native morph. Re-learn only after the normal
+            // quiet/stability gate observes the repaired scene.
+            g_sharedFaceMorphLibrary.ForgetHistory();
+            BeginFaceMorphTransition(
+                "impossible_native_slider_recovery",
+                false);
+        }
+        spdlog::warn(
+            "Recovered impossible native face slider values count={} firstOldValue={} firstSliderId={}",
+            recoveredCount,
+            oldValue,
+            sliderId);
+
+        if (a_params.retVal) {
+            a_params.retVal->SetBoolean(true);
         }
     }
 };
@@ -1380,6 +1763,12 @@ public:
 
         g_raceMenuOpen.store(a_event->opening);
         if (a_event->opening) {
+            if (UseSharedFaceMorphBackend()) {
+                // Leave RaceMenu a clean FOD.  The shared backend will
+                // recapture the post-RaceMenu geometry after close instead of
+                // treating a transitional gender/race buffer as its base.
+                BeginFaceMorphTransition("racemenu_open", true);
+            }
             const auto normalMapEpoch =
                 g_normalMapEpoch.fetch_add(1) + 1;
             g_deferredTextureApplyTicks.store(0);
@@ -1391,7 +1780,18 @@ public:
             g_faceRouterRebuildGateDeadlineMs = 0;
             (void)TryAcquireRaceMenuBodyMorphInterface();
             (void)RefreshCachedMorphStateFromNative();
-            if (!g_faceMorphInterface) {
+            if (UseSharedFaceMorphBackend()) {
+                // The shared MPF/POS backend writes the live face buffers
+                // directly.  Never open the legacy RaceMenu slider route in
+                // parallel: it can submit a stale/mis-sexed slider frame and
+                // corrupt the same face geometry even when its preview is
+                // disabled.
+                if (g_faceSliderRouter.IsSessionOpen()) {
+                    (void)g_faceSliderRouter.CloseSession();
+                }
+                spdlog::info(
+                    "FaceRouter session skipped because shared face backend is active");
+            } else if (!g_faceMorphInterface) {
                 spdlog::warn(
                     "FaceRouter session not opened because FaceMorph is unavailable");
             } else if (!g_faceSliderRouter.OpenSession()) {
@@ -1436,7 +1836,7 @@ public:
                 LogPlayerHeadPartSnapshot("racemenu_close_before_reset");
             }
             CancelPreviewNormalApply();
-            ResetRaceMenuBridgeState();
+            ResetRaceMenuBridgeState(true);
             SetPhysiqueDesiredVisible(false);
             CloseMenu();
             ScheduleDeferredBodyTextureApply(24, 1);
@@ -1518,6 +1918,369 @@ bool DidRaceMenuSexChange()
     return true;
 }
 
+void BeginFaceMorphTransition(std::string_view source, bool restoreCurrentOutput)
+{
+    if (!UseSharedFaceMorphBackend()) {
+        return;
+    }
+
+    const bool wasPending = g_faceMorphLifecycle.pending;
+    if (!wasPending && restoreCurrentOutput) {
+        // This is safe only before RaceMenu has replaced the live scene. Reset
+        // already validates the FOD/data pointer and output fingerprint before
+        // restoring anything. Later rebuild notifications use Discard instead.
+        g_sharedFaceMorphLibrary.Reset();
+    } else {
+        g_sharedFaceMorphLibrary.Discard();
+    }
+    g_sharedFaceMorphLibrary.BeginFaceTransition();
+
+    g_faceMorphLifecycle.pending = true;
+    ++g_faceMorphLifecycle.generation;
+    g_faceMorphLifecycle.quietUntilMs =
+        GetTickCount64() + kFaceGeometryQuietWindowMs;
+    g_faceMorphLifecycle.source = std::string(source);
+    g_faceMorphLifecycle.expectedSex = SelectedNormalMapCandidate::kInvalidSex;
+    if (auto* player = RE::PlayerCharacter::GetSingleton()) {
+        if (auto* actorBase = player->GetActorBase()) {
+            const auto sex = static_cast<std::uint8_t>(actorBase->GetSex());
+            if (sex <= 1) {
+                g_faceMorphLifecycle.expectedSex = sex;
+            }
+        }
+    }
+    spdlog::info(
+        "PW face transition started generation={} source={} expectedSex={} quietUntilMs={}",
+        g_faceMorphLifecycle.generation,
+        source,
+        static_cast<unsigned>(g_faceMorphLifecycle.expectedSex),
+        g_faceMorphLifecycle.quietUntilMs);
+}
+
+void NotifyFaceMorphRebuild(std::string_view source)
+{
+    if (!UseSharedFaceMorphBackend()) {
+        return;
+    }
+    BeginFaceMorphTransition(source, false);
+}
+
+void ResetFaceMorphLifecycle()
+{
+    g_faceMorphLifecycle = {};
+    if (UseSharedFaceMorphBackend()) {
+        g_sharedFaceMorphLibrary.Discard();
+    }
+}
+
+void TickFaceMorphLifecycle()
+{
+    if (!UseSharedFaceMorphBackend() || !g_faceMorphLifecycle.pending) {
+        return;
+    }
+
+    if (!g_raceMenuOpen.load() || g_faceRouterAwaitingRsmRebuild) {
+        return;
+    }
+
+    const auto nowMs = GetTickCount64();
+    if (nowMs < g_faceMorphLifecycle.quietUntilMs) {
+        return;
+    }
+
+    auto* player = RE::PlayerCharacter::GetSingleton();
+    if (!player || g_faceMorphLifecycle.expectedSex > 1) {
+        return;
+    }
+
+    if (!g_sharedFaceMorphLibrary.ObserveStableFaceScene(
+            player,
+            g_faceMorphLifecycle.expectedSex,
+            kFaceGeometryStableSamplesRequired)) {
+        return;
+    }
+
+    const auto generation = g_faceMorphLifecycle.generation;
+    g_faceMorphLifecycle.pending = false;
+    const bool applied = ApplySharedFaceMorphTarget(
+        player,
+        g_lastThin.load(),
+        g_lastMuscular.load(),
+        g_lastFat.load(),
+        "face_transition_stable");
+    if (!applied) {
+        g_faceMorphLifecycle.pending = true;
+        g_faceMorphLifecycle.quietUntilMs = nowMs + kFaceGeometryQuietWindowMs;
+        g_sharedFaceMorphLibrary.BeginFaceTransition();
+        spdlog::debug(
+            "PW face transition generation={} remained pending because stable scene could not be applied",
+            generation);
+        return;
+    }
+
+    spdlog::info(
+        "PW face transition completed generation={} sex={} source={}",
+        generation,
+        static_cast<unsigned>(g_faceMorphLifecycle.expectedSex),
+        g_faceMorphLifecycle.source);
+}
+
+void ResetMuSexTransitionGeometryProof()
+{
+    auto& lifecycle = g_muNormalLifecycle;
+    lifecycle.geometryPrepared = false;
+    lifecycle.stableSex = SelectedNormalMapCandidate::kInvalidSex;
+    lifecycle.stableThirdPersonRoot = 0;
+    lifecycle.stableGeometryTicks = 0;
+}
+
+void InvalidateMuDispatchForGeometryChange()
+{
+    auto& lifecycle = g_muNormalLifecycle;
+    lifecycle.reconcilePending = true;
+    g_muLifecycleNeedsFastTick.store(true);
+}
+
+void BeginMuSexTransition(std::string_view source)
+{
+    if (UseSharedFaceMorphBackend() && !g_faceMorphLifecycle.pending) {
+        BeginFaceMorphTransition(source, true);
+    }
+
+    if (!FaceMorphDiagnostics::UseMuDynamicNormalMaps()) {
+        return;
+    }
+
+    if (g_muSexTransitionPending) {
+        if (g_faceRouterAwaitingRsmRebuild) {
+            ResetMuSexTransitionGeometryProof();
+            g_muNormalLifecycle.geometryRetryTicks = 0;
+        }
+        spdlog::info(
+            "MuTransition coalesced source={} geometryReady={} stableTicks={}",
+            source,
+            g_muNormalLifecycle.geometryPrepared ? 1 : 0,
+            g_muNormalLifecycle.stableGeometryTicks);
+        return;
+    }
+
+    ++g_previewDispatchSequence;
+    ++g_commitDispatchSequence;
+    CancelPreviewNormalApply();
+    ++g_normalMapEpoch;
+    g_appliedNormalMapDispatchKey.clear();
+    g_muNormalLifecycle.reconcilePending = true;
+    ResetMuSexTransitionGeometryProof();
+    g_muNormalLifecycle.geometryRetryTicks = 0;
+    g_muNormalLifecycle.source = std::string(source);
+    g_muSexTransitionPending = true;
+    g_muLifecycleNeedsFastTick.store(true);
+
+    if (g_prisma && g_view && g_prisma->IsValid(g_view)) {
+        g_prisma->InteropCall(g_view, "invalidateMorphDispatchState", "");
+    }
+    spdlog::info(
+        "MuTransition started source={}; waiting for rebuilt geometry",
+        source);
+}
+
+void MarkMuSexTransitionGeometryReady(std::string_view source)
+{
+    if (!g_muSexTransitionPending || !FaceMorphDiagnostics::UseMuDynamicNormalMaps()) {
+        return;
+    }
+
+    auto* player = RE::PlayerCharacter::GetSingleton();
+    auto* actorBase = player ? player->GetActorBase() : nullptr;
+    auto* thirdPersonRoot = player ? player->Get3D() : nullptr;
+    const std::uint8_t sex = actorBase ?
+        static_cast<std::uint8_t>(actorBase->GetSex()) :
+        SelectedNormalMapCandidate::kInvalidSex;
+    if (sex > 1 || !thirdPersonRoot) {
+        ResetMuSexTransitionGeometryProof();
+        g_muNormalLifecycle.geometryRetryTicks = kMuRetryTicks;
+        spdlog::warn(
+            "MuTransition could not capture rebuilt geometry sex={} root={} source={}; retrying",
+            static_cast<unsigned>(sex),
+            static_cast<const void*>(thirdPersonRoot),
+            source);
+        return;
+    }
+
+    g_muNormalLifecycle.geometryPrepared = true;
+    g_muNormalLifecycle.stableSex = sex;
+    g_muNormalLifecycle.stableThirdPersonRoot =
+        reinterpret_cast<std::uintptr_t>(thirdPersonRoot);
+    g_muNormalLifecycle.stableGeometryTicks = 0;
+    g_muNormalLifecycle.geometryRetryTicks = 0;
+    g_muNormalLifecycle.reconcilePending = true;
+    g_muNormalLifecycle.source = std::string(source);
+    spdlog::info(
+        "MuTransition geometry prepared sex={} root={} source={}; verifying stability",
+        static_cast<unsigned>(sex),
+        static_cast<const void*>(thirdPersonRoot),
+        source);
+}
+
+bool TryPrepareMuSexTransitionGeometry(std::string_view source)
+{
+    if (!g_muSexTransitionPending ||
+        !FaceMorphDiagnostics::UseMuDynamicNormalMaps() ||
+        g_faceRouterAwaitingRsmRebuild) {
+        return false;
+    }
+
+    if (g_hasSavedState.load() &&
+        !ApplyBodyMorphTargetsOnly(
+            std::clamp(g_lastThin.load(), 0.0F, 1.0F),
+            std::clamp(g_lastMuscular.load(), 0.0F, 1.0F),
+            std::clamp(g_lastFat.load(), 0.0F, 1.0F),
+            source)) {
+        ResetMuSexTransitionGeometryProof();
+        g_muNormalLifecycle.geometryRetryTicks = kMuRetryTicks;
+        spdlog::warn(
+            "MuTransition body restore failed source={}; keeping transition pending",
+            source);
+        return false;
+    }
+
+    MarkMuSexTransitionGeometryReady(source);
+    return g_muNormalLifecycle.geometryPrepared;
+}
+
+void TickRaceMenuRebuildGate()
+{
+    if (!g_faceRouterAwaitingRsmRebuild) {
+        return;
+    }
+
+    const std::uint64_t nowMs = GetTickCount64();
+    if (g_faceRouterRebuildGateDeadlineMs != 0 &&
+        nowMs < g_faceRouterRebuildGateDeadlineMs) {
+        return;
+    }
+
+    g_faceRouterAwaitingRsmRebuild = false;
+    g_faceRouterRebuildGateDeadlineMs = 0;
+    (void)g_faceSliderRouter.InvalidateRoute();
+    spdlog::warn(
+        "RaceMenu rebuild event timeout elapsed; releasing the gate independently of FaceRouter session state");
+
+    g_muNormalLifecycle.geometryRetryTicks = 0;
+    (void)TryPrepareMuSexTransitionGeometry("racemenu_rebuild_gate_timeout");
+}
+
+void CompleteMuSexTransition(std::string_view source)
+{
+    if (!g_muSexTransitionPending || !FaceMorphDiagnostics::UseMuDynamicNormalMaps()) {
+        return;
+    }
+
+    auto* player = RE::PlayerCharacter::GetSingleton();
+    auto* actorBase = player ? player->GetActorBase() : nullptr;
+    const std::uint8_t sex = actorBase ?
+        static_cast<std::uint8_t>(actorBase->GetSex()) :
+        SelectedNormalMapCandidate::kInvalidSex;
+    if (sex > 1) {
+        return;
+    }
+    g_muSexTransitionPending = false;
+    ResetMuSexTransitionGeometryProof();
+    g_muNormalLifecycle.geometryRetryTicks = 0;
+
+    if (!g_hasSavedState.load()) {
+        g_muLifecycleNeedsFastTick.store(false);
+        return;
+    }
+    const bool normalApplied = ApplyCurrentNormalMapBackend(
+        true,
+        std::format("{}:mu_sex_transition", source));
+    if (g_prisma && g_view && g_prisma->IsValid(g_view)) {
+        g_prisma->InteropCall(g_view, "invalidateMorphDispatchState", "");
+    }
+    spdlog::info(
+        "Completed Mu sex transition sex={} normalApplied={} source={}",
+        static_cast<unsigned>(sex),
+        normalApplied ? 1 : 0,
+        source);
+    g_muLifecycleNeedsFastTick.store(g_muNormalLifecycle.reconcilePending);
+}
+
+void ResetMuNormalLifecycle(std::string_view source)
+{
+    auto& lifecycle = g_muNormalLifecycle;
+    lifecycle.retryTicks = 0;
+    lifecycle.reconcilePending = false;
+    ResetMuSexTransitionGeometryProof();
+    lifecycle.geometryRetryTicks = 0;
+    g_muNormalLifecycle.source = std::string(source);
+    g_muSexTransitionPending = false;
+    g_muLifecycleNeedsFastTick.store(false);
+    spdlog::info("MuLifecycle reset source={}", source);
+}
+
+void TickMuNormalLifecycle()
+{
+    if (!FaceMorphDiagnostics::UseMuDynamicNormalMaps()) {
+        return;
+    }
+
+    auto& lifecycle = g_muNormalLifecycle;
+    if (lifecycle.retryTicks > 0) {
+        --lifecycle.retryTicks;
+    }
+    if (g_muSexTransitionPending && lifecycle.geometryRetryTicks > 0) {
+        --lifecycle.geometryRetryTicks;
+    }
+
+    if (g_muSexTransitionPending) {
+        if (!lifecycle.geometryPrepared &&
+            !g_faceRouterAwaitingRsmRebuild &&
+            lifecycle.geometryRetryTicks == 0) {
+            (void)TryPrepareMuSexTransitionGeometry("mu_transition_geometry_retry");
+        }
+
+        if (lifecycle.geometryPrepared && !g_faceRouterAwaitingRsmRebuild) {
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            auto* actorBase = player ? player->GetActorBase() : nullptr;
+            auto* thirdPersonRoot = player ? player->Get3D() : nullptr;
+            const std::uint8_t currentSex = actorBase ?
+                static_cast<std::uint8_t>(actorBase->GetSex()) :
+                SelectedNormalMapCandidate::kInvalidSex;
+            const auto currentRoot = reinterpret_cast<std::uintptr_t>(thirdPersonRoot);
+            if (currentSex > 1 || currentRoot == 0 ||
+                currentSex != lifecycle.stableSex ||
+                currentRoot != lifecycle.stableThirdPersonRoot) {
+                spdlog::warn(
+                    "MuTransition geometry changed during stability check oldSex={} newSex={} oldRoot={} newRoot={}; restoring morphs on the new geometry",
+                    static_cast<unsigned>(lifecycle.stableSex),
+                    static_cast<unsigned>(currentSex),
+                    reinterpret_cast<const void*>(lifecycle.stableThirdPersonRoot),
+                    static_cast<const void*>(thirdPersonRoot));
+                InvalidateMuDispatchForGeometryChange();
+                ResetMuSexTransitionGeometryProof();
+                lifecycle.geometryRetryTicks = 0;
+                (void)TryPrepareMuSexTransitionGeometry("mu_transition_geometry_changed");
+            } else {
+                ++lifecycle.stableGeometryTicks;
+                if (lifecycle.stableGeometryTicks >= kMuGeometryStableTicksRequired) {
+                    CompleteMuSexTransition("stable_rebuilt_geometry");
+                }
+            }
+        }
+    }
+
+    if (lifecycle.reconcilePending &&
+        lifecycle.retryTicks == 0) {
+        (void)TryReconcileMuNormalMap();
+    }
+    const bool lifecycleActive =
+        lifecycle.reconcilePending ||
+        lifecycle.retryTicks > 0 ||
+        g_muSexTransitionPending;
+    g_muLifecycleNeedsFastTick.store(lifecycleActive);
+}
+
 void CacheMorphState(float thin, float muscular, float fat, std::string_view reason, std::source_location location)
 {
     const bool traceEnabled =
@@ -1546,8 +2309,6 @@ void CacheMorphState(float thin, float muscular, float fat, std::string_view rea
     g_lastMuscular.store(muscular);
     g_lastFat.store(fat);
     g_hasSavedState.store(true);
-    UpdateSelectedNormalMapCandidate(thin, muscular, fat);
-
     const float total = std::clamp(thin + muscular + fat, 0.0f, 1.0f);
     g_weightSyncValue.store(total);
 
@@ -1600,7 +2361,8 @@ bool IsSameAsCached(
         g_hasSavedState.load() &&
         NearlyEqual(thin, g_lastThin.load()) &&
         NearlyEqual(muscular, g_lastMuscular.load()) &&
-        NearlyEqual(fat, g_lastFat.load());
+        NearlyEqual(fat, g_lastFat.load()) &&
+        IsBodyMorphApplicationCurrent(RE::PlayerCharacter::GetSingleton());
     if (FaceMorphDiagnostics::IsCausalTraceEnabled()) {
         LogFaceDiag(
             "FACE_CACHE_DECISION",
@@ -1619,18 +2381,89 @@ bool IsSameAsCached(
     return same;
 }
 
-void SetOrClearMorph(RE::TESObjectREFR* actor, const char* morphName, float value)
+void InvalidateBodyMorphApplication(std::string_view reason)
 {
-    if (!g_bodyMorphInterface || !actor) {
-        return;
+    const auto generation = g_bodyMorphGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
+    g_bodyMorphAppliedGeneration.store(0, std::memory_order_release);
+    g_bodyMorphAppliedRoot.store(0, std::memory_order_release);
+    g_bodyMorphNeedsApply.store(true, std::memory_order_release);
+    spdlog::debug(
+        "Invalidated PhysiqueWheel body application generation={} reason={}",
+        generation,
+        reason.empty() ? "<none>" : std::string(reason));
+}
+
+void MarkBodyMorphApplicationApplied(RE::PlayerCharacter* player, std::string_view reason)
+{
+    const auto root = player ? reinterpret_cast<std::uintptr_t>(player->Get3D(false)) : 0;
+    g_bodyMorphAppliedRoot.store(root, std::memory_order_release);
+    g_bodyMorphAppliedGeneration.store(
+        g_bodyMorphGeneration.load(std::memory_order_acquire),
+        std::memory_order_release);
+    g_bodyMorphNeedsApply.store(false, std::memory_order_release);
+    spdlog::debug(
+        "Marked PhysiqueWheel body application current generation={} root={} reason={}",
+        g_bodyMorphAppliedGeneration.load(std::memory_order_acquire),
+        reinterpret_cast<const void*>(root),
+        reason.empty() ? "<none>" : std::string(reason));
+}
+
+bool IsBodyMorphApplicationCurrent(RE::PlayerCharacter* player)
+{
+    if (!player || g_bodyMorphNeedsApply.load(std::memory_order_acquire)) {
+        return false;
     }
 
-    if (std::fabs(value) <= kMorphClearThreshold) {
-        g_bodyMorphInterface->ClearMorph(actor, morphName, kMorphKey);
+    const auto root = reinterpret_cast<std::uintptr_t>(player->Get3D(false));
+    return root != 0 &&
+        root == g_bodyMorphAppliedRoot.load(std::memory_order_acquire) &&
+        g_bodyMorphAppliedGeneration.load(std::memory_order_acquire) ==
+            g_bodyMorphGeneration.load(std::memory_order_acquire);
+}
+
+bool ApplyOwnedBodyMorphs(
+    RE::PlayerCharacter* player,
+    float thin,
+    float muscular,
+    float fat,
+    bool includeFirstPerson,
+    std::string_view reason)
+{
+    if (!g_bodyMorphInterface || !player || !player->Get3D(false)) {
+        return false;
     }
-    else {
-        g_bodyMorphInterface->SetMorph(actor, morphName, kMorphKey, value);
+
+    struct BodyTarget
+    {
+        const char* name;
+        float value;
+    };
+
+    std::array targets{
+        BodyTarget{ kMorphThinName, std::clamp(thin, 0.0F, 1.0F) },
+        BodyTarget{ kMorphMuscularName, std::clamp(muscular, 0.0F, 1.0F) },
+        BodyTarget{ kMorphFatName, std::clamp(fat, 0.0F, 1.0F) }};
+
+    // The key is owned exclusively by PhysiqueWheel. Clearing it before every
+    // target change makes the operation idempotent and prevents two old/new
+    // targets from remaining active at once. Other mods' keys are untouched.
+    g_bodyMorphInterface->ClearBodyMorphKeys(player, kMorphKey);
+
+    for (const auto& target : targets) {
+        if (target.value <= kMorphClearThreshold) {
+            continue;
+        }
+        g_bodyMorphInterface->SetMorph(player, target.name, kMorphKey, target.value);
     }
+
+    // This rebuilds the live shapes from SKEE's base data and the active body
+    // morph keys. It deliberately does not call UpdateModelWeight: the PW
+    // morph target must not mutate Skyrim's native Weight value.
+    g_bodyMorphInterface->ApplyBodyMorphs(player, false);
+    ApplyVertexDiffs(player, includeFirstPerson);
+
+    MarkBodyMorphApplicationApplied(player, reason);
+    return true;
 }
 
 FaceMorphTriplet ReadFaceMorphValues(RE::TESNPC* actorBase, std::string_view reason, std::source_location location)
@@ -1737,6 +2570,13 @@ bool TryGetRaceMenuItemList(RE::GFxMovieView*& outMovie, RE::GFxValue& outItemLi
 
 mps::FaceRouterTickResult TickFaceSliderRouter(bool force)
 {
+    if (UseSharedFaceMorphBackend()) {
+        if (g_faceSliderRouter.IsSessionOpen()) {
+            (void)g_faceSliderRouter.CloseSession();
+        }
+        return mps::FaceRouterTickResult::Closed;
+    }
+
     if (!g_raceMenuOpen.load() ||
         !g_faceSliderRouter.IsSessionOpen()) {
         return mps::FaceRouterTickResult::Closed;
@@ -1746,28 +2586,7 @@ mps::FaceRouterTickResult TickFaceSliderRouter(bool force)
     // roughly 500 ms before RaceMenu emits its rebuild event. Never certify or
     // dispatch that transitional list.
     if (g_faceRouterAwaitingRsmRebuild) {
-        const std::uint64_t nowMs = GetTickCount64();
-        if (g_faceRouterRebuildGateDeadlineMs == 0 ||
-            nowMs < g_faceRouterRebuildGateDeadlineMs) {
-            return mps::FaceRouterTickResult::AwaitingSnapshot;
-        }
-
-        // RSM_Reinitialized is the normal release signal, but another mod or
-        // a malformed SWF must not leave the face route frozen forever. The
-        // router's exact double-snapshot, dynamic native-index and prepared-
-        // map validation checks remain mandatory after this bounded fallback.
-        g_faceRouterAwaitingRsmRebuild = false;
-        g_faceRouterRebuildGateDeadlineMs = 0;
-        spdlog::warn(
-            "FaceRouter rebuild event timeout elapsed; resuming fail-closed route certification");
-
-        if (g_hasSavedState.load()) {
-            (void)ApplyBodyMorphTargetsOnly(
-                std::clamp(g_lastThin.load(), 0.0f, 1.0f),
-                std::clamp(g_lastMuscular.load(), 0.0f, 1.0f),
-                std::clamp(g_lastFat.load(), 0.0f, 1.0f),
-                "face_router_rebuild_timeout");
-        }
+        return mps::FaceRouterTickResult::AwaitingSnapshot;
     }
 
     if (!g_bodyCategoryActive.load()) {
@@ -2227,6 +3046,41 @@ void TryAcquireOptionalRaceMenuInterfaces()
 
 }
 
+bool UseSharedFaceMorphBackend()
+{
+    return FaceMorphDiagnostics::UseSharedFaceMorphLibrary() &&
+           g_sharedFaceMorphLibrary.IsLoaded();
+}
+
+bool ApplySharedFaceMorphTarget(
+    RE::PlayerCharacter* player,
+    float thin,
+    float muscular,
+    float heavy,
+    std::string_view reason)
+{
+    if (!UseSharedFaceMorphBackend() ||
+        !player ||
+        g_faceRouterAwaitingRsmRebuild ||
+        g_faceMorphLifecycle.pending) {
+        return false;
+    }
+
+    const bool applied = g_sharedFaceMorphLibrary.Apply(
+        player,
+        mps::SharedFaceMorphTarget{
+            .thin = std::clamp(thin, 0.0F, 1.0F),
+            .muscular = std::clamp(muscular, 0.0F, 1.0F),
+            .heavy = std::clamp(heavy, 0.0F, 1.0F)
+        });
+    if (!applied) {
+        spdlog::debug(
+            "PW shared face morph deferred: player face node unavailable reason={}",
+            reason.empty() ? "<none>" : std::string(reason));
+    }
+    return applied;
+}
+
 class RleyModCallbackHandler : public RE::BSTEventSink<SKSE::ModCallbackEvent>
 {
 public:
@@ -2264,6 +3118,17 @@ public:
             LogRaceMenuSliderChangeDiagnostic(*a_event);
         }
 
+        if (a_event->eventName == "RSM_SliderChange" &&
+            a_event->strArg != "ChangeSex" &&
+            a_event->strArg != "ChangeRace" &&
+            UseSharedFaceMorphBackend() &&
+            g_raceMenuOpen.load()) {
+            // Native RaceMenu face sliders can rebuild/mutate the FOD without
+            // emitting RSM_Reinitialized. Treat them as a new face scene so
+            // the PW target is reapplied only after that rebuild settles.
+            NotifyFaceMorphRebuild("RSM_SliderChange");
+        }
+
         if (a_event->eventName == "Rley_OpenPhysique") {
             SetPhysiqueDesiredVisible(true);
         }
@@ -2271,16 +3136,25 @@ public:
             SetPhysiqueDesiredVisible(false);
         }
         else if (a_event->eventName == "RSM_SliderChange" &&
-                 (a_event->strArg == "ChangeSex" ||
-                  a_event->strArg == "ChangeRace")) {
+             (a_event->strArg == "ChangeSex" ||
+                   a_event->strArg == "ChangeRace")) {
+            InvalidateBodyMorphApplication(a_event->strArg.c_str());
+            if (UseSharedFaceMorphBackend()) {
+                BeginFaceMorphTransition(a_event->strArg.c_str(), true);
+            }
+            if (a_event->strArg == "ChangeRace") {
+                // A different race can reuse the same TRI topology and FOD
+                // addresses while having an unrelated facial base. Keep sex
+                // history only for ChangeSex round-trips.
+                g_sharedFaceMorphLibrary.ForgetHistory();
+            }
             if (!g_faceRouterAwaitingRsmRebuild) {
                 g_faceRouterRebuildGateDeadlineMs =
                     GetTickCount64() +
                     kFaceRouterRebuildEventTimeoutMs;
             }
             g_faceRouterAwaitingRsmRebuild = true;
-            ++g_previewDispatchSequence;
-            ++g_commitDispatchSequence;
+            BeginMuSexTransition(a_event->strArg.c_str());
             (void)g_faceSliderRouter.InvalidateRoute();
 
             if (FaceMorphDiagnostics::IsCausalTraceEnabled()) {
@@ -2300,23 +3174,28 @@ public:
             }
         }
         else if (a_event->eventName == "RSM_RaceChanged") {
+            InvalidateBodyMorphApplication("RSM_RaceChanged");
+            NotifyFaceMorphRebuild("RSM_RaceChanged");
             // HideLoadingIcon can send this on either side of Reinitialized.
             // Revoke a ready route, but never latch or clear the rebuild gate.
             (void)g_faceSliderRouter.InvalidateRoute();
         }
         else if (a_event->eventName == "RSM_Initialized" ||
                  a_event->eventName == "RSM_Reinitialized") {
+            InvalidateBodyMorphApplication(a_event->eventName.c_str());
+            NotifyFaceMorphRebuild(a_event->eventName.c_str());
             const bool wasAwaiting = g_faceRouterAwaitingRsmRebuild;
-            g_faceRouterAwaitingRsmRebuild = false;
-            g_faceRouterRebuildGateDeadlineMs = 0;
+            const bool rebuildCompleted =
+                a_event->eventName == "RSM_Reinitialized";
+            if (!wasAwaiting || rebuildCompleted) {
+                g_faceRouterAwaitingRsmRebuild = false;
+                g_faceRouterRebuildGateDeadlineMs = 0;
+            }
             (void)g_faceSliderRouter.InvalidateRoute();
 
-            if (wasAwaiting && g_hasSavedState.load()) {
-                (void)ApplyBodyMorphTargetsOnly(
-                    std::clamp(g_lastThin.load(), 0.0f, 1.0f),
-                    std::clamp(g_lastMuscular.load(), 0.0f, 1.0f),
-                    std::clamp(g_lastFat.load(), 0.0f, 1.0f),
-                    a_event->eventName.c_str());
+            if (wasAwaiting && rebuildCompleted) {
+                g_muNormalLifecycle.geometryRetryTicks = 0;
+                (void)TryPrepareMuSexTransitionGeometry(a_event->eventName.c_str());
             }
 
             if (FaceMorphDiagnostics::IsCausalTraceEnabled()) {
@@ -2350,11 +3229,18 @@ public:
 
         for (auto* event = *a_events; event; event = event->next) {
             const auto* button = event->AsButtonEvent();
-            if (!button || !button->IsDown() || button->GetDevice() != RE::INPUT_DEVICE::kKeyboard) {
+            if (!button || button->GetDevice() != RE::INPUT_DEVICE::kKeyboard) {
                 continue;
             }
 
             if (button->GetIDCode() == 65) {  // DIK_F7 (scan code 0x41)
+                if (!button->IsDown()) {
+                    g_f7Held.store(false, std::memory_order_release);
+                    continue;
+                }
+                if (g_f7Held.exchange(true, std::memory_order_acq_rel)) {
+                    continue;
+                }
                 if (auto* taskInterface = SKSE::GetTaskInterface()) {
                     taskInterface->AddTask([]() { ToggleMenu(); });
                 }
@@ -2406,7 +3292,19 @@ bool TryAcquireRaceMenuBodyMorphInterface()
         return false;
     }
 
-    spdlog::info("Acquired RaceMenu BodyMorph interface");
+    const auto bodyInterfaceVersion = g_bodyMorphInterface->GetVersion();
+    if (bodyInterfaceVersion < IBodyMorphInterface::kCurrentPluginVersion) {
+        spdlog::error(
+            "RaceMenu BodyMorph interface is too old version={} requiredAtLeast={}",
+            bodyInterfaceVersion,
+            static_cast<skee_u32>(IBodyMorphInterface::kCurrentPluginVersion));
+        g_bodyMorphInterface = nullptr;
+        return false;
+    }
+
+    spdlog::info(
+        "Acquired RaceMenu BodyMorph interface version={}",
+        bodyInterfaceVersion);
     return true;
 }
 
@@ -2481,22 +3379,35 @@ bool ApplyBodyMorphTargetsOnly(float thin, float muscular, float fat, std::strin
     const float targetMuscular = std::clamp(muscular, 0.0f, 1.0f);
     const float targetFat = std::clamp(fat, 0.0f, 1.0f);
 
-    SetOrClearMorph(player, kMorphThinName, targetThin);
-    SetOrClearMorph(player, kMorphMuscularName, targetMuscular);
-    SetOrClearMorph(player, kMorphFatName, targetFat);
-    g_bodyMorphInterface->UpdateModelWeight(player, false);
-    ApplyVertexDiffs(player, false);
+    if (!ApplyOwnedBodyMorphs(
+            player,
+            targetThin,
+            targetMuscular,
+            targetFat,
+            false,
+            reason.empty() ? "restore_body_target_after_racemenu_reinit" : reason)) {
+        LogFaceDiag(
+            "FACE_RACEMENU_HARD_RELOAD",
+            std::format(
+                "action=restore_body_target_failed reason={} values=({:.3f},{:.3f},{:.3f}) route={} note=body_morph_asset_incompatible",
+                reason.empty() ? "<none>" : std::string(reason),
+                targetThin,
+                targetMuscular,
+                targetFat,
+                g_faceSliderRouter.RouteGeneration()));
+        return false;
+    }
+    ApplySharedFaceMorphTarget(
+        player,
+        targetThin,
+        targetMuscular,
+        targetFat,
+        reason.empty() ? "restore_face_target_after_racemenu_reinit" : reason);
     CacheMorphState(
         targetThin,
         targetMuscular,
         targetFat,
         reason.empty() ? "restore_body_target_after_racemenu_reinit" : reason);
-    ApplySelectedNormalMapTextureSet(
-        true,
-        reason.empty() ?
-            "post_racemenu_reinit_restore_target" :
-            reason);
-
     LogFaceDiag(
         "FACE_RACEMENU_HARD_RELOAD",
         std::format(
@@ -2533,7 +3444,9 @@ bool ApplyMorphsNative(float thin, float muscular, float fat, bool isCommit)
         std::clamp(muscular, 0.0f, 1.0f);
     const float targetFat = std::clamp(fat, 0.0f, 1.0f);
 
+    const bool sharedFaceBackend = UseSharedFaceMorphBackend();
     const bool submitFaceTarget =
+        !sharedFaceBackend &&
         g_raceMenuOpen.load() &&
         g_faceSliderRouter.IsSessionOpen() &&
         (isCommit ||
@@ -2554,13 +3467,26 @@ bool ApplyMorphsNative(float thin, float muscular, float fat, bool isCommit)
 
     // Body never waits for the face route. During a RaceMenu rebuild the
     // router retains only the latest desired face target while these morphs
-    // continue to update immediately.
-    SetOrClearMorph(player, kMorphThinName, targetThin);
-    SetOrClearMorph(player, kMorphMuscularName, targetMuscular);
-    SetOrClearMorph(player, kMorphFatName, targetFat);
+    // continue to update immediately. The body adapter owns only the PW key
+    // and deliberately leaves Skyrim's native Weight untouched.
+    if (!ApplyOwnedBodyMorphs(
+            player,
+            targetThin,
+            targetMuscular,
+            targetFat,
+            isCommit,
+            isCommit ? "body_commit" : "body_preview")) {
+        return false;
+    }
 
-    g_bodyMorphInterface->UpdateModelWeight(player, isCommit);
-    ApplyVertexDiffs(player, isCommit);
+    if (sharedFaceBackend) {
+        ApplySharedFaceMorphTarget(
+            player,
+            targetThin,
+            targetMuscular,
+            targetFat,
+            isCommit ? "shared_face_commit" : "shared_face_preview");
+    }
 
     if (submitFaceTarget) {
         (void)TickFaceSliderRouter(true);
@@ -2596,6 +3522,13 @@ bool ApplyWeightToCurrentDirection(float weight)
     const float clampedWeight = std::clamp(weight, 0.0f, 1.0f);
     SetWeightSyncValue(clampedWeight);
 
+    if (!FaceMorphDiagnostics::UseWeightMorphLink()) {
+        spdlog::debug(
+            "Ignoring native RaceMenu Weight={} for PhysiqueWheel morphs because WeightMorphLink=0",
+            clampedWeight);
+        return true;
+    }
+
     if (g_raceMenuOpen.load()) {
         if (!g_bodyCategoryActive.load()) {
             spdlog::debug(
@@ -2628,6 +3561,9 @@ bool ApplyWeightToCurrentDirection(float weight)
     const float fat = dirFat * clampedWeight;
 
     const bool sexChanged = DidRaceMenuSexChange();
+    if (sexChanged) {
+        BeginMuSexTransition("weight_observed_actor_sex");
+    }
     const bool unchanged = !sexChanged && IsSameAsCached(thin, muscular, fat);
 
     if (!unchanged) {
@@ -2636,11 +3572,10 @@ bool ApplyWeightToCurrentDirection(float weight)
         }
 
         CacheMorphState(thin, muscular, fat);
-        // Native Weight can emit many callbacks while dragging. Reuse the
-        // same trailing-edge normal-map debounce as wheel previews so only
-        // the final selection dispatches Papyrus/NiOverride. RaceMenu close
-        // performs the persistent apply.
-        SchedulePreviewNormalApply();
+        if (sexChanged && !g_faceRouterAwaitingRsmRebuild) {
+            MarkMuSexTransitionGeometryReady("weight_observed_actor_sex");
+        }
+        ApplyPreviewNormalMapBackend("weight_slider_live");
     }
 
     if (g_prisma && g_view && g_prisma->IsValid(g_view) && g_menuOpen.load()) {
@@ -2745,6 +3680,32 @@ bool RegisterScaleform(RE::GFxMovieView* a_view, RE::GFxValue* a_root)
         return false;
     }
 
+    RE::GFxValue prepareFaceMapForSexCallback;
+    a_view->CreateFunction(
+        std::addressof(prepareFaceMapForSexCallback),
+        new PrepareFaceMapForSexHandler());
+    if (!a_root->SetMember(
+            kScaleformPrepareFaceMapForSexFunction,
+            prepareFaceMapForSexCallback)) {
+        spdlog::error(
+            "Failed to register Scaleform function {}",
+            kScaleformPrepareFaceMapForSexFunction);
+        return false;
+    }
+
+    RE::GFxValue notifyFaceRecoveryCallback;
+    a_view->CreateFunction(
+        std::addressof(notifyFaceRecoveryCallback),
+        new NotifyFaceCorruptionRecoveryHandler());
+    if (!a_root->SetMember(
+            kScaleformNotifyFaceRecoveryFunction,
+            notifyFaceRecoveryCallback)) {
+        spdlog::error(
+            "Failed to register Scaleform function {}",
+            kScaleformNotifyFaceRecoveryFunction);
+        return false;
+    }
+
     RE::GFxValue categoryCallback;
     a_view->CreateFunction(std::addressof(categoryCallback), new SetActiveCategoryHandler());
     if (!a_root->SetMember(kScaleformSetCategoryFunction, categoryCallback)) {
@@ -2767,22 +3728,37 @@ bool RegisterScaleform(RE::GFxMovieView* a_view, RE::GFxValue* a_root)
     }
 
     spdlog::info(
-        "Registered Scaleform bridge {}.{} / {} / {} / {}",
+        "Registered Scaleform bridge {}.{} / {} / {} / {} / {} / {}",
         kScaleformPluginName,
         kScaleformPrepareFaceMapFunction,
+        kScaleformPrepareFaceMapForSexFunction,
+        kScaleformNotifyFaceRecoveryFunction,
         kScaleformSetCategoryFunction,
         kScaleformSetWeightFunction,
         kScaleformGetWeightFunction);
     return true;
 }
 
-void ResetRaceMenuBridgeState()
+void ResetRaceMenuBridgeState(bool preserveMuOperation)
 {
+    InvalidateBodyMorphApplication("racemenu_bridge_reset");
+    ResetFaceMorphLifecycle();
     if (g_faceSliderRouter.IsSessionOpen()) {
         (void)g_faceSliderRouter.CloseSession();
     }
     g_faceRouterAwaitingRsmRebuild = false;
     g_faceRouterRebuildGateDeadlineMs = 0;
+    g_appliedNormalMapDispatchKey.clear();
+    g_muSexTransitionPending = false;
+    ResetMuSexTransitionGeometryProof();
+    g_muNormalLifecycle.geometryRetryTicks = 0;
+    if (preserveMuOperation && FaceMorphDiagnostics::UseMuDynamicNormalMaps()) {
+        g_muNormalLifecycle.reconcilePending = true;
+        g_muLifecycleNeedsFastTick.store(true);
+    } else {
+        g_muNormalLifecycle.reconcilePending = false;
+        g_muLifecycleNeedsFastTick.store(false);
+    }
     ++g_previewDispatchSequence;
     ++g_commitDispatchSequence;
     g_raceMenuOpen.store(false);
@@ -2819,6 +3795,9 @@ void ExecuteMorphPreviewOnMainThread(
     ScopedMorphTrace traceScope(std::move(traceId));
 
     const bool sexChanged = DidRaceMenuSexChange();
+    if (sexChanged) {
+        BeginMuSexTransition("preview_observed_actor_sex");
+    }
     const bool unchanged = !sexChanged && IsSameAsCached(thin, muscular, fat);
     if (unchanged) {
         return;
@@ -2826,7 +3805,9 @@ void ExecuteMorphPreviewOnMainThread(
 
     const std::uint64_t nowMs = GetTickCount64();
     const std::uint64_t previousApplyMs = g_lastPreviewApplyTimeMs.load();
-    if (nowMs > previousApplyMs && (nowMs - previousApplyMs) < kPreviewApplyMinIntervalMs) {
+    if (!sexChanged &&
+        nowMs > previousApplyMs &&
+        (nowMs - previousApplyMs) < kPreviewApplyMinIntervalMs) {
         return;
     }
     g_lastPreviewApplyTimeMs.store(nowMs);
@@ -2836,7 +3817,10 @@ void ExecuteMorphPreviewOnMainThread(
     }
 
     CacheMorphState(thin, muscular, fat);
-    SchedulePreviewNormalApply();
+    if (sexChanged && !g_faceRouterAwaitingRsmRebuild) {
+        MarkMuSexTransitionGeometryReady("preview_observed_actor_sex");
+    }
+    ApplyPreviewNormalMapBackend("preview_slider_live");
 }
 
 void ExecuteMorphCommitOnMainThread(
@@ -2858,13 +3842,23 @@ void ExecuteMorphCommitOnMainThread(
 
     ScopedMorphTrace traceScope(std::move(traceId));
 
+    const bool sexChanged = DidRaceMenuSexChange();
+    if (sexChanged) {
+        BeginMuSexTransition("commit_observed_actor_sex");
+    }
+
     if (!ApplyMorphsNative(thin, muscular, fat, true)) {
         return;
     }
 
     CacheMorphState(thin, muscular, fat);
+    if (sexChanged && !g_faceRouterAwaitingRsmRebuild) {
+        MarkMuSexTransitionGeometryReady("commit_observed_actor_sex");
+    }
     CancelPreviewNormalApply();
-    ApplySelectedNormalMapTextureSet(true, "commit_slider");
+    if (!g_muSexTransitionPending) {
+        ApplyCurrentNormalMapBackend(true, "commit_slider");
+    }
 }
 
 void QueueMorphPreviewApply(float thin, float muscular, float fat, std::string traceId)
@@ -2966,8 +3960,48 @@ void OnMorphsCommit(const char* argument)
     QueueMorphCommitApply(thin, muscular, fat, std::move(payload.traceId));
 }
 
+void RefreshMuDynamicNormalMapAvailability(std::string_view source)
+{
+    if (!FaceMorphDiagnostics::MuDynamicNormalMapsRequested()) {
+        FaceMorphDiagnostics::SetMuDynamicNormalMapsAvailable(false);
+        spdlog::info("Mu normal-map integration disabled by configuration source={}", source);
+        return;
+    }
+
+    const bool available = GetModuleHandleW(kMuDynamicNormalMapDllName) != nullptr;
+    FaceMorphDiagnostics::SetMuDynamicNormalMapsAvailable(available);
+    if (available) {
+        spdlog::info(
+            "Mu normal-map integration available skinSlots={} source={}",
+            kMuSkinSlotBits,
+            source);
+    } else {
+        if (FaceMorphDiagnostics::MuDynamicNormalMapsRequired()) {
+            spdlog::warn(
+                "Mu Dynamic NormalMap was explicitly requested but is not installed; normal-map integration is disabled source={}",
+                source);
+        } else {
+            spdlog::info(
+                "Mu Dynamic NormalMap is not installed; normal-map integration is disabled source={}",
+                source);
+        }
+    }
+}
+
 void OnDataLoaded()
 {
+    if (FaceMorphDiagnostics::UseSharedFaceMorphLibrary()) {
+        if (!g_sharedFaceMorphLibrary.Load()) {
+            spdlog::warn(
+                "PW shared face morph backend selected but no usable MPF/POS morph library was found; RaceMenu fallback remains active");
+        }
+    }
+
+    RefreshMuDynamicNormalMapAvailability("data_loaded");
+    if (FaceMorphDiagnostics::UseMuDynamicNormalMaps()) {
+        (void)AcquireMuNativeInterface();
+    }
+
     g_prisma = PRISMA_UI_API::RequestPluginAPI<PRISMA_UI_API::IVPrismaUI1>();
 
     if (!g_prisma) {
@@ -2997,6 +4031,12 @@ void MessageHandler(SKSE::MessagingInterface::Message* a_msg)
     case SKSE::MessagingInterface::kPostLoad:
         TryAcquireRaceMenuBodyMorphInterface();
         break;
+    case SKSE::MessagingInterface::kPostPostLoad:
+        RefreshMuDynamicNormalMapAvailability("post_post_load");
+        if (FaceMorphDiagnostics::UseMuDynamicNormalMaps()) {
+            (void)AcquireMuNativeInterface();
+        }
+        break;
     case SKSE::MessagingInterface::kDataLoaded:
         OnDataLoaded();
         if (auto* inputManager = RE::BSInputDeviceManager::GetSingleton()) {
@@ -3006,16 +4046,26 @@ void MessageHandler(SKSE::MessagingInterface::Message* a_msg)
         }
         break;
     case SKSE::MessagingInterface::kPreLoadGame:
+        InvalidateBodyMorphApplication("pre_load_game");
+        g_sharedFaceMorphLibrary.ForgetHistory();
+        ResetMuNormalLifecycle("pre_load_game");
+        g_appliedNormalMapDispatchKey.clear();
         break;
     case SKSE::MessagingInterface::kPostLoadGame:
+        InvalidateBodyMorphApplication("post_load_game");
+        g_sharedFaceMorphLibrary.ForgetHistory();
         TryAcquireRaceMenuBodyMorphInterface();
         RefreshCachedMorphStateFromNative();
-        ApplySelectedNormalMapTextureSet(true, "post_load_game");
+        ApplyCurrentNormalMapBackend(true, "post_load_game");
         break;
     case SKSE::MessagingInterface::kNewGame:
+        InvalidateBodyMorphApplication("new_game");
+        g_sharedFaceMorphLibrary.ForgetHistory();
+        ResetMuNormalLifecycle("new_game");
+        g_appliedNormalMapDispatchKey.clear();
         TryAcquireRaceMenuBodyMorphInterface();
         RefreshCachedMorphStateFromNative();
-        ApplySelectedNormalMapTextureSet(true, "new_game");
+        ApplyCurrentNormalMapBackend(true, "new_game");
         break;
     }
 }
@@ -3051,7 +4101,8 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
     }
     
     auto messaging = SKSE::GetMessagingInterface();
-    if (!messaging->RegisterListener("SKSE", MessageHandler)) {
+    if (!messaging || !messaging->RegisterListener("SKSE", MessageHandler)) {
+        spdlog::error("Failed to get or register SKSE messaging interface");
         return false;
     }
 
@@ -3080,7 +4131,38 @@ void RunMainThreadTick()
         CloseMenu();
     }
 
-    (void)TickFaceSliderRouter();
+    // This timeout must advance even when FaceMorph is unavailable or its
+    // router session is closed, otherwise a missed RSM_Reinitialized event can
+    // freeze both the face route and Mu reconciliation indefinitely.
+    TickRaceMenuRebuildGate();
+
+    if (g_raceMenuOpen.load() && DidRaceMenuSexChange()) {
+        BeginMuSexTransition("main_tick_observed_actor_sex");
+        if (FaceMorphDiagnostics::UseMuDynamicNormalMaps() &&
+            !g_faceRouterAwaitingRsmRebuild) {
+            g_muNormalLifecycle.geometryRetryTicks = 0;
+            (void)TryPrepareMuSexTransitionGeometry("main_tick_observed_actor_sex");
+        }
+    }
+
+    if (!UseSharedFaceMorphBackend()) {
+        (void)TickFaceSliderRouter();
+    }
+    if (UseSharedFaceMorphBackend()) {
+        TickFaceMorphLifecycle();
+        if (auto* player = RE::PlayerCharacter::GetSingleton()) {
+            // Revisit the live FOD buffers every tick cheaply. The shared
+            // backend skips the actual write when target and scene fingerprint
+            // are unchanged, but catches a delayed head/hair rebuild.
+            ApplySharedFaceMorphTarget(
+                player,
+                g_lastThin.load(),
+                g_lastMuscular.load(),
+                g_lastFat.load(),
+                "main_tick");
+        }
+    }
+    TickMuNormalLifecycle();
 
     if (FaceMorphDiagnostics::IsCausalTraceEnabled()) {
         UpdateFaceDiagnosticDelayedReads();
@@ -3092,7 +4174,7 @@ void RunMainThreadTick()
                 remainingPreviewNormalApplyTicks,
                 remainingPreviewNormalApplyTicks - 1)) {
             if (remainingPreviewNormalApplyTicks == 1) {
-                ApplySelectedNormalMapTextureSet(false, "preview_slider_debounced");
+                ApplyCurrentNormalMapBackend(false, "preview_slider_throttled");
             }
         }
     }
@@ -3152,6 +4234,7 @@ void UpdateLoop()
             g_raceMenuOpen.load() ||
             g_menuOpen.load() ||
             g_shouldPhysiqueBeVisible.load() ||
+            g_muLifecycleNeedsFastTick.load() ||
             g_previewNormalApplyTicks.load() > 0 ||
             g_deferredTextureApplyTicks.load() > 0;
         Sleep(needsFastTick ? 16 : 50);

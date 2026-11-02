@@ -47,12 +47,26 @@ constexpr const char* kHandNormalMapRelativeFolder = "Textures\\RleyBodyMorphs\\
 constexpr const char* kTextureBridgeScriptName = "RleyTextureBridge";
 constexpr const char* kTextureBridgeApplySelectedNormalPathsForSexFunction =
     "ApplySelectedNormalPathsForSex";
+constexpr const char* kTextureBridgeQueueMuNormalUpdateFunction =
+    "QueueMuNormalUpdate";
+constexpr const char* kTextureBridgePrepareMuBackendFunction =
+    "PrepareMuBackend";
+constexpr const wchar_t* kMuDynamicNormalMapDllName =
+    L"MuDynamicNormalMap.dll";
+// The active meshes do not share one body slot: HIMBO uses slot 2, while the
+// female COTR/CBBE geometry uses slots 7 and 8. Include the remaining skin
+// boundaries so Mu can keep neck, wrist, and ankle normals coherent.
+constexpr std::uint32_t kMuSkinSlotBits = 0x0000018D;
 constexpr const char* kScaleformPluginName = "ModernPhysiqueSystem";
 constexpr const char* kScaleformSetCategoryFunction = "SetActiveCategory";
 constexpr const char* kScaleformSetWeightFunction = "SetWeightSync";
 constexpr const char* kScaleformGetWeightFunction = "GetWeightSync";
 constexpr const char* kScaleformPrepareFaceMapFunction =
     "PrepareFaceMapForCurrentSex";
+constexpr const char* kScaleformPrepareFaceMapForSexFunction =
+    "PrepareFaceMapForSex";
+constexpr const char* kScaleformNotifyFaceRecoveryFunction =
+    "NotifyFaceCorruptionRecovery";
 constexpr std::uint32_t kBodyCategoryFlag = 4;
 
 constexpr float kMorphApplyDeltaThreshold = 0.001f;
@@ -60,8 +74,10 @@ constexpr float kMorphClearThreshold = 0.0005f;
 constexpr float kWeightSyncThreshold = 0.0005f;
 constexpr float kPreviewMorphQuantizeStep = 0.01f;
 constexpr int kThinSoftThresholdPercent = 20;
-constexpr int kPreviewNormalDebounceTicks = 18;
-constexpr std::uint64_t kPreviewApplyMinIntervalMs = 33;
+// The UI and native bridge both run at display-frame cadence. Mu coalesces an
+// update received while the previous generation is still in flight.
+constexpr int kPreviewNormalThrottleTicks = 1;
+constexpr std::uint64_t kPreviewApplyMinIntervalMs = 16;
 
 // ---------------------------------------------------------------------------
 // Shared POD structs
@@ -141,6 +157,10 @@ extern std::atomic<std::uint64_t> g_morphTraceSequence;
 extern std::atomic<std::uint64_t> g_faceDiagnosticSequence;
 extern std::atomic<std::uint64_t> g_previewDispatchSequence;
 extern std::atomic<std::uint64_t> g_commitDispatchSequence;
+extern std::atomic<std::uint64_t> g_bodyMorphGeneration;
+extern std::atomic<std::uint64_t> g_bodyMorphAppliedGeneration;
+extern std::atomic<std::uintptr_t> g_bodyMorphAppliedRoot;
+extern std::atomic<bool> g_bodyMorphNeedsApply;
 extern std::atomic<std::uint32_t> g_pluginMainThreadId;
 extern thread_local std::string g_activeMorphTraceId;
 
