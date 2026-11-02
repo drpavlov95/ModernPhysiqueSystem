@@ -35,3 +35,7 @@ interface/racesex_menu.swf
 
 # Local audit output
 docs/tri-audit-local-test/
+
+# Agent/editor local state
+.claude/
+.claude-octopus/
