@@ -7,6 +7,24 @@ cmake-build*
 .fake
 _tmp_*
 build_capture_*.txt
+
+# Generated tooling state
+**/.gradle/
+**/__pycache__/
+ReverseEngineering/projects/*/user/
+ReverseEngineering/projects/*/~journal.dat
+ReverseEngineering/projects/*/projectState
+tmp/
 build_err.txt
 build_out.txt
 backups/
+
+# Game assets. These are large binaries that belong in the mod package,
+# not in source control -- Textures/ alone is over 1 GB.
+Textures/
+Meshes/!COR/
+reference/DetailsOverlays/
+
+# Other mods' runtime config, picked up from the live MO2 deployment
+SKSE/Plugins/MuDynamicNormalMap.ini
+SKSE/Plugins/MuSkeletonEditor/
