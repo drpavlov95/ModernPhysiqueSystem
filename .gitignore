@@ -28,3 +28,10 @@ reference/DetailsOverlays/
 # Other mods' runtime config, picked up from the live MO2 deployment
 SKSE/Plugins/MuDynamicNormalMap.ini
 SKSE/Plugins/MuSkeletonEditor/
+
+# Built by tools/BuildRaceMenuSwf.ps1 from RaceMenu's own compiled SWF.
+# Not redistributable -- see THIRD_PARTY_NOTICES.md. Regenerate it locally.
+interface/racesex_menu.swf
+
+# Local audit output
+docs/tri-audit-local-test/
