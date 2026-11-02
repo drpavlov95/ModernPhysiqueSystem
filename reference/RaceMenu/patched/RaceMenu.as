@@ -74,6 +74,7 @@ class RaceMenu extends MovieClip
    var physiqueTitle = null;
    var physiqueWeightSyncInterval = null;
    var physiqueWeightSyncResumeInterval = null;
+   var pendingImpossibleFaceSliderRecoveries = new Array();
    var statusText = "";
    function RaceMenu()
    {
@@ -673,6 +674,7 @@ class RaceMenu extends MovieClip
          }
       }
       this.customSliders.splice(0,this.customSliders.length);
+      this.pendingImpossibleFaceSliderRecoveries = new Array();
       var _loc5_ = 0;
       var _loc6_ = 0;
       var _loc7_;
@@ -715,6 +717,20 @@ class RaceMenu extends MovieClip
          if(!faceMapReady && _loc7_.callbackName == "ChangeDoubleMorph")
          {
             _loc7_.enabled = false;
+         }
+         if(faceMapReady && _loc7_.callbackName == "ChangeDoubleMorph" && _loc7_.sliderID != undefined && _loc7_.sliderMin != undefined && _loc7_.sliderMax != undefined && _loc7_.position != undefined)
+         {
+            var recoveryPosition = Number(_loc7_.position);
+            var recoveryMin = Number(_loc7_.sliderMin);
+            var recoveryMax = Number(_loc7_.sliderMax);
+            if(isNaN(recoveryPosition) || recoveryPosition < recoveryMin - 0.001 || recoveryPosition > recoveryMax + 0.001)
+            {
+               // Defer until RaceMenu has finished installing this rebuilt
+               // list. A second map guard prevents the recovery itself from
+               // becoming another scrambled write after a sex switch.
+               this.pendingImpossibleFaceSliderRecoveries.push({sliderID:_loc7_.sliderID,oldValue:recoveryPosition});
+               _loc7_.position = 0;
+            }
          }
          if(_global.skse.plugins.CharGen.GetSliderData)
          {
@@ -808,6 +824,21 @@ class RaceMenu extends MovieClip
          skse.SendModEvent(_global.eventPrefix + "Reinitialized");
       }
       this.itemList.requestInvalidate();
+      var pendingRecoveries = this.pendingImpossibleFaceSliderRecoveries;
+      this.pendingImpossibleFaceSliderRecoveries = new Array();
+      if(pendingRecoveries.length > 0 && _global.skse && _global.skse.plugins && _global.skse.plugins.ModernPhysiqueSystem && _global.skse.plugins.ModernPhysiqueSystem.PrepareFaceMapForCurrentSex && Boolean(_global.skse.plugins.ModernPhysiqueSystem.PrepareFaceMapForCurrentSex()))
+      {
+         var recoveryIndex = 0;
+         while(recoveryIndex < pendingRecoveries.length)
+         {
+            gfx.io.GameDelegate.call("ChangeDoubleMorph",[0,pendingRecoveries[recoveryIndex].sliderID]);
+            recoveryIndex += 1;
+         }
+         if(_global.skse.plugins.ModernPhysiqueSystem.NotifyFaceCorruptionRecovery)
+         {
+            _global.skse.plugins.ModernPhysiqueSystem.NotifyFaceCorruptionRecovery(pendingRecoveries[0].oldValue,pendingRecoveries[0].sliderID,pendingRecoveries.length);
+         }
+      }
       this.schedulePhysiqueWeightSyncAfterRebuild();
       clearInterval(this._sliderInitializeInterval);
       delete this._sliderInitializeInterval;

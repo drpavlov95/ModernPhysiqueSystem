@@ -27,7 +27,7 @@ let morphPreviewTimeout = null;
 let morphCommitTimeout = null;
 let lastPreviewSendTime = 0;
 
-const MORPH_PREVIEW_INTERVAL = 48;
+const MORPH_PREVIEW_INTERVAL = 32;
 const MORPH_COMMIT_DELAY = 120;
 const MORPH_DELTA_THRESHOLD = 0.01;
 
@@ -572,6 +572,12 @@ window.restoreMorphs = function(payload) {
     updateReadout(restored);
 };
 
+window.invalidateMorphDispatchState = function() {
+    lastPreviewSentValues = null;
+    lastCommitSentValues = null;
+};
+
+
 function scheduleMorphCommit() {
     if (morphCommitTimeout !== null) {
         clearTimeout(morphCommitTimeout);
@@ -1016,6 +1022,29 @@ function finishPointerInteraction(event) {
     setSnapLineHighlight(null, "off");
 }
 
+// Um move que reporta buttons=0 so significa "soltou" se ESTE host mantiver a
+// mascara de botao nos moves. O PrismaUI injeta todo mouse-move com
+// button=kButton_None (InputHandler.cpp, os dois unicos kType_MouseMoved), sem
+// consultar o g_mouseButtonStates que ele mesmo mantem para down/up - entao
+// buttons le 0 durante o arrasto inteiro, e tratar isso como release encerrava
+// o gesto no primeiro movimento. Clique funcionava, arrasto nao.
+//
+// A capacidade se aprende SO DOS MOVES. Aprender do press seria aprender a
+// resposta errada: o press carrega um botao de verdade mesmo nos hosts que o
+// descartam depois.
+let hostReportsHeldButtons = false;
+
+function movingWithButtonReleased(event) {
+    if (typeof event.buttons !== "number") return false;
+
+    if ((event.buttons & 1) !== 0) {
+        hostReportsHeldButtons = true;
+        return false;
+    }
+
+    return hostReportsHeldButtons;
+}
+
 function updatePointerPosition(event, preview) {
     const pos = getCanvasPos(event);
 
@@ -1080,7 +1109,7 @@ function handlePointerMove(event) {
     event.preventDefault();
     event.stopPropagation();
 
-    if (typeof event.buttons === "number" && (event.buttons & 1) === 0) {
+    if (movingWithButtonReleased(event)) {
         updatePointerPosition(event, false);
         finishPointerInteraction(event);
         return;
@@ -1140,7 +1169,7 @@ function handleMouseMove(event) {
     event.preventDefault();
     event.stopPropagation();
 
-    if (typeof event.buttons === "number" && (event.buttons & 1) === 0) {
+    if (movingWithButtonReleased(event)) {
         updatePointerPosition(event, false);
         finishPointerInteraction(event);
         return;
@@ -1167,8 +1196,9 @@ function handleMouseLeave(event) {
     // Leaving the canvas mid-drag is normal: the pole anchors sit near the rim,
     // so overshooting them is the common case. The window-level fallback
     // listeners keep feeding moves, so only treat this as the end of the
-    // gesture when the button is genuinely no longer held.
-    if (typeof event.buttons === "number" && (event.buttons & 1) !== 0) {
+    // gesture when the button is genuinely no longer held - e num host que nao
+    // reporta a mascara, "genuinamente" nunca pode ser deduzido de buttons=0.
+    if (!movingWithButtonReleased(event)) {
         updatePointerPosition(event, true);
         return;
     }
