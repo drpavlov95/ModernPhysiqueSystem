@@ -1,5 +1,7 @@
 Scriptname RleyTextureBridge Hidden
 
+Function ReportMuLegacyCleanupResult(Int cleanupGeneration, Bool succeeded) Native Global
+
 Bool Function IsVerboseLoggingEnabled() global
 	Return False
 EndFunction
@@ -8,6 +10,120 @@ Function TraceVerbose(String logText) global
 	If IsVerboseLoggingEnabled()
 		Debug.Trace(logText)
 	EndIf
+EndFunction
+
+Function ClearMpsLegacyNormalOverrides(Actor playerRef, Bool isFemale) global
+	Int bodySlotMask = 4
+	Int handSlotMask = 8
+	Int textureSetOverrideKey = 6
+	Int stringOverrideKey = 9
+	Int textureSetIndex = -1
+	Int normalTextureIndex = 1
+
+	NiOverride.RemoveSkinOverride(playerRef, isFemale, False, bodySlotMask, textureSetOverrideKey, textureSetIndex)
+	NiOverride.RemoveSkinOverride(playerRef, isFemale, True, bodySlotMask, textureSetOverrideKey, textureSetIndex)
+	NiOverride.RemoveSkinOverride(playerRef, isFemale, False, bodySlotMask, stringOverrideKey, normalTextureIndex)
+	NiOverride.RemoveSkinOverride(playerRef, isFemale, True, bodySlotMask, stringOverrideKey, normalTextureIndex)
+	NiOverride.RemoveSkinOverride(playerRef, isFemale, False, handSlotMask, textureSetOverrideKey, textureSetIndex)
+	NiOverride.RemoveSkinOverride(playerRef, isFemale, True, handSlotMask, textureSetOverrideKey, textureSetIndex)
+	NiOverride.RemoveSkinOverride(playerRef, isFemale, False, handSlotMask, stringOverrideKey, normalTextureIndex)
+	NiOverride.RemoveSkinOverride(playerRef, isFemale, True, handSlotMask, stringOverrideKey, normalTextureIndex)
+
+	NiOverride.RemoveNodeOverride(playerRef, isFemale, "Body", textureSetOverrideKey, textureSetIndex)
+	NiOverride.RemoveNodeOverride(playerRef, isFemale, "Body", stringOverrideKey, normalTextureIndex)
+	NiOverride.RemoveNodeOverride(playerRef, isFemale, "CBBE", textureSetOverrideKey, textureSetIndex)
+	NiOverride.RemoveNodeOverride(playerRef, isFemale, "CBBE", stringOverrideKey, normalTextureIndex)
+	NiOverride.RemoveNodeOverride(playerRef, isFemale, "Hands", textureSetOverrideKey, textureSetIndex)
+	NiOverride.RemoveNodeOverride(playerRef, isFemale, "Hands", stringOverrideKey, normalTextureIndex)
+
+	Armor cotrSkinArmor = PO3_SKSEFunctions.GetFormFromEditorID("00DZB_SkinNaked") as Armor
+	If cotrSkinArmor == None
+		cotrSkinArmor = PO3_SKSEFunctions.GetFormFromEditorID("DZB_SkinNaked") as Armor
+	EndIf
+	ArmorAddon cotrBodyAddon = PO3_SKSEFunctions.GetFormFromEditorID("00DZB_NakedTorso") as ArmorAddon
+	If cotrBodyAddon == None
+		cotrBodyAddon = PO3_SKSEFunctions.GetFormFromEditorID("DZB_NakedTorso") as ArmorAddon
+	EndIf
+	ArmorAddon cotrHandAddon = PO3_SKSEFunctions.GetFormFromEditorID("00DZB_NakedHands") as ArmorAddon
+	If cotrHandAddon == None
+		cotrHandAddon = PO3_SKSEFunctions.GetFormFromEditorID("DZB_NakedHands") as ArmorAddon
+	EndIf
+
+	If cotrSkinArmor != None && cotrBodyAddon != None
+		NiOverride.RemoveOverride(playerRef, isFemale, cotrSkinArmor, cotrBodyAddon, "", stringOverrideKey, normalTextureIndex)
+		NiOverride.RemoveOverride(playerRef, isFemale, cotrSkinArmor, cotrBodyAddon, "Body", stringOverrideKey, normalTextureIndex)
+		NiOverride.RemoveOverride(playerRef, isFemale, cotrSkinArmor, cotrBodyAddon, "CBBE", stringOverrideKey, normalTextureIndex)
+	EndIf
+	If cotrSkinArmor != None && cotrHandAddon != None
+		NiOverride.RemoveOverride(playerRef, isFemale, cotrSkinArmor, cotrHandAddon, "", stringOverrideKey, normalTextureIndex)
+		NiOverride.RemoveOverride(playerRef, isFemale, cotrSkinArmor, cotrHandAddon, "Hands", stringOverrideKey, normalTextureIndex)
+	EndIf
+
+EndFunction
+
+Function ApplyMpsLegacyNormalCleanup(Actor playerRef) global
+	NiOverride.ApplySkinOverrides(playerRef)
+	NiOverride.ApplyNodeOverrides(playerRef)
+	NiOverride.ApplyOverrides(playerRef)
+	playerRef.QueueNiNodeUpdate()
+EndFunction
+
+Function PrepareMuBackend(Int cleanupGeneration, String applySource = "unspecified") global
+	String prefix = "[ModernPhysiqueSystem] [RleyTextureBridge] "
+	Actor playerRef = Game.GetPlayer()
+	If playerRef == None
+		ReportMuLegacyCleanupResult(cleanupGeneration, False)
+		TraceVerbose(prefix + "Mu cleanup aborted: player is None (source=" + applySource + ")")
+		Return
+	EndIf
+
+	If MuDynamicNormalMap.GetVersion() <= 0
+		ReportMuLegacyCleanupResult(cleanupGeneration, False)
+		TraceVerbose(prefix + "Mu cleanup aborted: native API is unavailable (source=" + applySource + ")")
+		Return
+	EndIf
+
+	ClearMpsLegacyNormalOverrides(playerRef, False)
+	ClearMpsLegacyNormalOverrides(playerRef, True)
+	ApplyMpsLegacyNormalCleanup(playerRef)
+	ReportMuLegacyCleanupResult(cleanupGeneration, True)
+	TraceVerbose(prefix + "Queued one consolidated NiNode rebuild after clearing both legacy sex keys (source=" + applySource + ")")
+EndFunction
+
+Function QueueMuNormalUpdate(Int slotBits = 0x0000018D, Bool clearLegacyOverrides = False, String applySource = "unspecified") global
+	String prefix = "[ModernPhysiqueSystem] [RleyTextureBridge] "
+	Actor playerRef = Game.GetPlayer()
+	If playerRef == None
+		TraceVerbose(prefix + "Mu update aborted: player is None (source=" + applySource + ")")
+		Return
+	EndIf
+
+	If slotBits <= 0
+		TraceVerbose(prefix + "Mu update aborted: slot bits are empty (source=" + applySource + ")")
+		Return
+	EndIf
+
+	If clearLegacyOverrides
+		ActorBase playerBase = playerRef.GetLeveledActorBase()
+		If playerBase == None
+			TraceVerbose(prefix + "Mu update aborted: player base is None (source=" + applySource + ")")
+			Return
+		EndIf
+		ClearMpsLegacyNormalOverrides(playerRef, False)
+		ClearMpsLegacyNormalOverrides(playerRef, True)
+		ApplyMpsLegacyNormalCleanup(playerRef)
+		TraceVerbose(prefix + "Legacy compatibility cleanup queued a NiNode rebuild; Mu update deferred (source=" + applySource + ")")
+		Return
+	EndIf
+
+	Int muVersion = MuDynamicNormalMap.GetVersion()
+	If muVersion <= 0
+		TraceVerbose(prefix + "Mu update aborted: native API is unavailable (source=" + applySource + ")")
+		Return
+	EndIf
+
+	MuDynamicNormalMap.QUpdateNormalmap(playerRef, slotBits)
+	TraceVerbose(prefix + "Queued Mu normal-map update slots=" + slotBits + " version=" + muVersion + " source=" + applySource)
 EndFunction
 
 Function ApplySelectedNormalPaths(String bodyNormalTexturePath, String handNormalTexturePath, Bool persist, String applySource = "unspecified") global
@@ -48,9 +164,12 @@ Function ApplySelectedNormalPathsForSex(String bodyNormalTexturePath, String han
 	Int stringOverrideKey = 9
 	Int textureSetIndex = -1
 	Int normalTextureIndex = 1
-	String bodyNodeName = ""
+	; Keep the legacy body override scoped to the explicit body geometry node.
+	; An empty node name is a wildcard in NiOverride and can bleed into hands.
+	String bodyNodeName = "CBBE"
 	String bodyNamedNodeName = "CBBE"
-	String handNodeName = ""
+	; Likewise, never apply body/detail paths through the empty hand node.
+	String handNodeName = "Hands"
 	String legacyBodyNodeName = "Body"
 	String legacyHandNodeName = "Hands"
 	String resolvedHandNormalTexturePath = handNormalTexturePath
