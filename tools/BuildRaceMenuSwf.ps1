@@ -13,10 +13,12 @@ if ([string]::IsNullOrWhiteSpace($FfdecCli)) {
 
 $inputSwf = Join-Path $repoRoot "interface\racesex_menu.swf"
 $sourceAs = Join-Path $repoRoot "reference\RaceMenu\patched\RaceMenu.as"
+$sliderEntrySourceAs = Join-Path $repoRoot "reference\RaceMenu\patched\SliderListEntry.as"
 $outputDirectory = Join-Path $repoRoot "build\racemenu-swf"
+$raceMenuIntermediateSwf = Join-Path $outputDirectory "racesex_menu.racemenu-only.swf"
 $outputSwf = Join-Path $outputDirectory "racesex_menu.swf"
 
-foreach ($requiredPath in @($FfdecCli, $inputSwf, $sourceAs)) {
+foreach ($requiredPath in @($FfdecCli, $inputSwf, $sourceAs, $sliderEntrySourceAs)) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
         throw "Required RaceMenu build input is missing: $requiredPath"
     }
@@ -28,11 +30,22 @@ New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
     -onerror abort `
     -replace `
     $inputSwf `
-    $outputSwf `
+    $raceMenuIntermediateSwf `
     '\__Packages\RaceMenu' `
     $sourceAs
 if ($LASTEXITCODE -ne 0) {
     throw "FFDec failed to compile RaceMenu.as (exit code $LASTEXITCODE)."
+}
+
+& $FfdecCli `
+    -onerror abort `
+    -replace `
+    $raceMenuIntermediateSwf `
+    $outputSwf `
+    '\__Packages\SliderListEntry' `
+    $sliderEntrySourceAs
+if ($LASTEXITCODE -ne 0) {
+    throw "FFDec failed to compile SliderListEntry.as (exit code $LASTEXITCODE)."
 }
 
 & $FfdecCli -dumpSWF $outputSwf | Out-Null
