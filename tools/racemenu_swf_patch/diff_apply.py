@@ -25,10 +25,21 @@ def apply_diff(original_text: str, diff_text: str) -> str:
         original_file.write_text(original_text, encoding="utf-8")
         diff_file.write_text(diff_text, encoding="utf-8")
 
+        # --batch suppresses every interactive prompt (and otherwise assumes
+        # a detected reversal IS intended, i.e. assumes -R); --forward
+        # overrides that specific default so an already-applied/reversed
+        # diff fails closed instead of silently reverse-applying (verified
+        # by hand against GNU patch 2.7.6: --batch alone regresses this to
+        # "Assuming -R" and succeeds against already-patched input).
+        # stdin=DEVNULL is defense in depth against any other prompt class.
         result = subprocess.run(
-            ["patch", "--fuzz=0", "-o", str(output_file), str(original_file), str(diff_file)],
+            [
+                "patch", "--batch", "--forward", "--fuzz=0",
+                "-o", str(output_file), str(original_file), str(diff_file),
+            ],
             capture_output=True,
             text=True,
+            stdin=subprocess.DEVNULL,
         )
         if result.returncode != 0:
             raise DiffApplyError(diff_text, result.stderr or result.stdout)
