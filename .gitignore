@@ -33,15 +33,20 @@ SKSE/Plugins/MuSkeletonEditor/
 # Not redistributable -- see THIRD_PARTY_NOTICES.md. Regenerate it locally.
 interface/racesex_menu.swf
 
-# Complete decompiled/patched RaceMenu ActionScript sources. These are
-# full derivative copies of RaceMenu's own code, not project-owned -- only
-# reference/RaceMenu/diffs/*.as.diff (our changes alone) is distributable.
+# Full decompiled RaceMenu ActionScript, not our own patched sources --
+# these are just local FFDec scratch output and never the shippable diff.
 # See docs/RACEMENU_SWF_RUNTIME_MIGRATION_PLAN_2026-11-02.md section 5.2.
-# Regenerate locally with tools/racemenu_swf_patch/generate_diffs.py's
-# intermediate exports if you need them for local development.
-reference/RaceMenu/patched/
 reference/RaceMenu/decompiled-scripts/
 reference/RaceMenu/SWF Export/
+
+# reference/RaceMenu/patched/*.as (the full patched RaceMenu/SliderListEntry
+# sources) stays TRACKED for now -- see docs/superpowers/plans/
+# 2026-11-11-racemenu-swf-local-patcher.md Task 5's ledger ruling: until a
+# genuine stock SWF is available to run generate_diffs.py against for real,
+# reference/RaceMenu/diffs/*.as.diff (the one artifact meant to ship) does
+# not exist yet, and tests/cmake/RaceMenuWeightSyncStaticSafety.cmake plus
+# tools/BuildRaceMenuSwf.ps1 both still need these files. Untrack them in
+# the same commit that adds the real diffs, not before.
 
 # Local audit output
 docs/tri-audit-local-test/
