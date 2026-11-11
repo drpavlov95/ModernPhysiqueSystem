@@ -33,6 +33,16 @@ SKSE/Plugins/MuSkeletonEditor/
 # Not redistributable -- see THIRD_PARTY_NOTICES.md. Regenerate it locally.
 interface/racesex_menu.swf
 
+# Complete decompiled/patched RaceMenu ActionScript sources. These are
+# full derivative copies of RaceMenu's own code, not project-owned -- only
+# reference/RaceMenu/diffs/*.as.diff (our changes alone) is distributable.
+# See docs/RACEMENU_SWF_RUNTIME_MIGRATION_PLAN_2026-11-02.md section 5.2.
+# Regenerate locally with tools/racemenu_swf_patch/generate_diffs.py's
+# intermediate exports if you need them for local development.
+reference/RaceMenu/patched/
+reference/RaceMenu/decompiled-scripts/
+reference/RaceMenu/SWF Export/
+
 # Local audit output
 docs/tri-audit-local-test/
 
