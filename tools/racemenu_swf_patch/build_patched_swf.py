@@ -8,6 +8,7 @@ of a committed, full patched class file.
 """
 
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -52,3 +53,24 @@ def build_patched_swf(
         validate_swf(ffdec_cli, current_input_swf)
         output_swf_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(current_input_swf), str(output_swf_path))
+
+
+def main(argv: list[str]) -> int:
+    """CLI entry point used by tools/InstallPatchedRaceMenuSwf.ps1:
+    `python -m tools.racemenu_swf_patch.build_patched_swf <ffdec_cli> <stock_swf_path> <output_swf_path>`.
+    """
+    if len(argv) != 3:
+        print(
+            "usage: python -m tools.racemenu_swf_patch.build_patched_swf "
+            "<ffdec_cli> <stock_swf_path> <output_swf_path>",
+            file=sys.stderr,
+        )
+        return 2
+
+    ffdec_cli, stock_swf_path, output_swf_path = (Path(a) for a in argv)
+    build_patched_swf(ffdec_cli, stock_swf_path, output_swf_path)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

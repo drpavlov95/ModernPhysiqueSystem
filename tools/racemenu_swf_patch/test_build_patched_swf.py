@@ -70,3 +70,21 @@ def test_build_patched_swf_propagates_validation_failure(tmp_path, monkeypatch):
         build_patched_swf.build_patched_swf(
             Path("ffdec"), Path("stock.swf"), tmp_path / "out.swf", diffs_dir=_make_diffs_dir(tmp_path)
         )
+
+
+def test_main_requires_exactly_three_arguments(capsys):
+    assert build_patched_swf.main([]) == 2
+    assert "usage" in capsys.readouterr().err
+
+
+def test_main_delegates_to_build_patched_swf(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        build_patched_swf,
+        "build_patched_swf",
+        lambda ffdec_cli, stock_swf_path, output_swf_path: calls.append(
+            (ffdec_cli, stock_swf_path, output_swf_path)
+        ),
+    )
+    assert build_patched_swf.main(["ffdec.exe", "stock.swf", "out.swf"]) == 0
+    assert calls == [(Path("ffdec.exe"), Path("stock.swf"), Path("out.swf"))]
