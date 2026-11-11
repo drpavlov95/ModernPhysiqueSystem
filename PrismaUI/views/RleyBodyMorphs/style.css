@@ -159,3 +159,7 @@ canvas.dragging {
 .snap-toggle input:checked::after {
     transform: scale(1);
 }
+.face-controls { display: grid; gap: 6px; margin: 8px auto 0; width: 400px; pointer-events: auto; }
+.face-controls label { display: grid; grid-template-columns: 1fr 150px 38px; gap: 8px; align-items: center; font-size: 12px; }
+.face-controls input { width: 150px; }
+.face-controls span { text-align: right; }

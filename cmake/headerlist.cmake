@@ -14,4 +14,5 @@ set(headers ${headers}
     src/core/NormalMapCatalog.h
     src/core/FaceRouteState.h
     src/core/FaceGeometrySafety.h
+    src/core/RaceMenuLifecycleState.h
 )

@@ -212,7 +212,11 @@ namespace
 				return false;
 			}
 
-			if (name != "RLY_Thin" && name != "RLY_Muscular" && name != "RLY_Heavy") {
+			if (name != "RLY_Thin" && name != "RLY_Muscular" && name != "RLY_Heavy" &&
+				name != "RLY_NoThin" && name != "RLY_NoMuscular" && name != "RLY_NoFat" &&
+				name != "RLY_DoubleChin" && name != "RLY_HeavyFuller" && name != "RLY_HeavyFully" &&
+				name != "RLY_Standalone_Thin" && name != "RLY_Standalone_Muscular" &&
+				name != "RLY_Standalone_Heavy") {
 				if (!skipBlock(vertexCount, 6u)) {
 					error = "truncated unused morph";
 					return false;
@@ -469,13 +473,17 @@ namespace
 
 	bool HasMorphStrength(const mps::SharedFaceMorphTarget& target)
 	{
-		return target.thin != 0.0F || target.muscular != 0.0F || target.heavy != 0.0F;
+		return target.thin != 0.0F || target.muscular != 0.0F || target.heavy != 0.0F ||
+			target.noThin != 0.0F || target.noMuscular != 0.0F || target.noFat != 0.0F ||
+			target.doubleChin != 0.0F || target.heavyFully != 0.0F ||
+			target.standaloneThin != 0.0F || target.standaloneMuscular != 0.0F ||
+			target.standaloneHeavy != 0.0F;
 	}
 
 	struct ResolvedTargetDeltas
 	{
-		std::array<const Deltas*, 3> deltas{};
-		std::array<float, 3> strengths{};
+		std::array<const Deltas*, 11> deltas{};
+		std::array<float, 11> strengths{};
 
 		[[nodiscard]] Vec3 At(std::size_t index) const
 		{
@@ -497,11 +505,16 @@ namespace
 		const mps::SharedFaceMorphTarget& target)
 	{
 		ResolvedTargetDeltas result{
-			.deltas = {
-				tri.Find("RLY_Thin"),
-				tri.Find("RLY_Muscular"),
-				tri.Find("RLY_Heavy") },
-			.strengths = { target.thin, target.muscular, target.heavy }
+			.deltas = { tri.Find("RLY_Thin"), tri.Find("RLY_Muscular"), tri.Find("RLY_Heavy"),
+				tri.Find("RLY_NoThin"), tri.Find("RLY_NoMuscular"), tri.Find("RLY_NoFat"),
+				tri.Find("RLY_DoubleChin"),
+				tri.Find("RLY_HeavyFuller") ? tri.Find("RLY_HeavyFuller") : tri.Find("RLY_HeavyFully"),
+				tri.Find("RLY_Standalone_Thin"), tri.Find("RLY_Standalone_Muscular"),
+				tri.Find("RLY_Standalone_Heavy") },
+			.strengths = { target.thin, target.muscular, target.heavy,
+				target.noThin, target.noMuscular, target.noFat, target.doubleChin,
+				target.heavyFully, target.standaloneThin, target.standaloneMuscular,
+				target.standaloneHeavy }
 		};
 		for (std::size_t axis = 0; axis < result.deltas.size(); ++axis) {
 			if (result.deltas[axis] && result.deltas[axis]->size() != tri.vertexCount) {
@@ -740,8 +753,12 @@ namespace mps
 		{
 			RE::NiPoint3* data{ nullptr };
 			std::uint32_t count{ 0 };
+			Entry* entry{ nullptr };
 			std::vector<RE::NiPoint3> base;
+			std::vector<RE::NiPoint3> output;
+			SharedFaceMorphTarget appliedTarget{};
 			std::uint64_t lastAppliedFingerprint{ 0 };
+			bool hasAppliedTarget{ false };
 			bool hasAppliedFingerprint{ false };
 		};
 
@@ -755,6 +772,7 @@ namespace mps
 		bool hasTarget{ false };
 		std::uint8_t lastTargetSex{ 2 };
 		bool loaded{ false };
+		bool recoverInteractiveEdit{ false };
 		std::uint64_t lastSceneFingerprint{ 0 };
 		bool hasSceneFingerprint{ false };
 
@@ -1061,6 +1079,7 @@ namespace mps
 		_impl->hasTarget = false;
 		_impl->lastTargetSex = 2;
 		_impl->hasSceneFingerprint = false;
+		_impl->recoverInteractiveEdit = false;
 		_impl->observedScene = {};
 		_impl->observedStableSamples = 0;
 	}
@@ -1081,6 +1100,18 @@ namespace mps
 		}
 		_impl->observedScene = {};
 		_impl->observedStableSamples = 0;
+		_impl->recoverInteractiveEdit = false;
+	}
+
+	void SharedFaceMorphLibrary::BeginInteractiveFaceEdit()
+	{
+		if (!_impl) {
+			return;
+		}
+		_impl->observedScene = {};
+		_impl->observedStableSamples = 0;
+		_impl->hasSceneFingerprint = false;
+		_impl->recoverInteractiveEdit = true;
 	}
 
 	bool SharedFaceMorphLibrary::ObserveStableFaceScene(
@@ -1179,19 +1210,37 @@ namespace mps
 				geometryVertexCount != fod->vertexCount) {
 				return RE::BSVisit::BSVisitControl::kContinue;
 			}
-			const auto pick = _impl->Pick(female, sexIndex, fod, previousHistory);
+			const auto key = reinterpret_cast<std::uintptr_t>(fod);
+			auto stateIt = _impl->buffers.find(key);
+			const bool canRecoverInteractiveEdit =
+				_impl->recoverInteractiveEdit &&
+				stateIt != _impl->buffers.end() &&
+				stateIt->second.data == fod->vertexData &&
+				stateIt->second.count == fod->vertexCount &&
+				stateIt->second.entry &&
+				stateIt->second.entry->female == female &&
+				stateIt->second.entry->vertexCount == fod->vertexCount;
+
+			Impl::PickResult pick;
+			if (canRecoverInteractiveEdit) {
+				// This is stronger evidence than TRI similarity: this exact live
+				// FOD/data pair was owned by PW immediately before RaceMenu edited it.
+				pick.entry = stateIt->second.entry;
+				pick.previousTarget = stateIt->second.appliedTarget;
+			} else {
+				pick = _impl->Pick(female, sexIndex, fod, previousHistory);
+			}
 			if (!pick.entry) {
 				return RE::BSVisit::BSVisitControl::kContinue;
 			}
 
-			const auto key = reinterpret_cast<std::uintptr_t>(fod);
 			visited.insert(key);
-			auto stateIt = _impl->buffers.find(key);
 			if (stateIt == _impl->buffers.end() ||
 				stateIt->second.data != fod->vertexData || stateIt->second.count != fod->vertexCount) {
 				Impl::BufferState state;
 				state.data = fod->vertexData;
 				state.count = fod->vertexCount;
+				state.entry = pick.entry;
 				if (pick.recoveredGeneration &&
 					pick.recoveredGeneration->base.size() == fod->vertexCount) {
 					state.base = pick.recoveredGeneration->base;
@@ -1227,7 +1276,35 @@ namespace mps
 				// changed contents as a new scene. It may still contain the last
 				// target used by this sex, so normalize it before accepting it as
 				// the new clean base.
-				if (pick.recoveredGeneration &&
+				if (canRecoverInteractiveEdit) {
+					const float previousBaseDistance = CentredMeanDistance(
+						fod->vertexData,
+						stateIt->second.base);
+					const float previousOutputDistance = CentredMeanDistance(
+						fod->vertexData,
+						stateIt->second.output);
+					const bool containsPriorTarget =
+						stateIt->second.hasAppliedTarget &&
+						HasMorphStrength(stateIt->second.appliedTarget) &&
+						mps::IsMaterialFaceResidualImprovement(
+							previousBaseDistance,
+							previousOutputDistance);
+					stateIt->second.base.assign(
+						fod->vertexData,
+						fod->vertexData + fod->vertexCount);
+					if (containsPriorTarget) {
+						const auto previousDeltas = ResolveTargetDeltas(
+							pick.entry->tri,
+							stateIt->second.appliedTarget);
+						RemoveTarget(stateIt->second.base, pick.entry->tri, previousDeltas);
+					}
+					spdlog::info(
+						"PW shared face morph: adopted tracked RaceMenu edit TRI {} priorTargetRemoved={} baseDistance={:.6f} outputDistance={:.6f}",
+						pick.entry->path.string(),
+						containsPriorTarget ? 1 : 0,
+						previousBaseDistance,
+						previousOutputDistance);
+				} else if (pick.recoveredGeneration &&
 					pick.recoveredGeneration->base.size() == fod->vertexCount) {
 					stateIt->second.base = pick.recoveredGeneration->base;
 					spdlog::info(
@@ -1240,7 +1317,8 @@ namespace mps
 				} else {
 					stateIt->second.base.assign(fod->vertexData, fod->vertexData + fod->vertexCount);
 				}
-				if (!pick.recoveredGeneration && pick.removePreviousTarget) {
+				if (!canRecoverInteractiveEdit &&
+					!pick.recoveredGeneration && pick.removePreviousTarget) {
 					const auto previousDeltas = ResolveTargetDeltas(
 						pick.entry->tri,
 						pick.previousTarget);
@@ -1258,6 +1336,12 @@ namespace mps
 			}
 			const auto targetDeltas = ResolveTargetDeltas(pick.entry->tri, target);
 			AddTarget(fod->vertexData, fod->vertexCount, pick.entry->tri, targetDeltas);
+			stateIt->second.entry = pick.entry;
+			stateIt->second.output.assign(
+				fod->vertexData,
+				fod->vertexData + fod->vertexCount);
+			stateIt->second.appliedTarget = target;
+			stateIt->second.hasAppliedTarget = true;
 			stateIt->second.lastAppliedFingerprint = Fingerprint(
 				fod->vertexData,
 				fod->vertexCount,
@@ -1301,6 +1385,7 @@ namespace mps
 		if (appliedAny) {
 			_impl->sexHistory[sexIndex].target = target;
 			_impl->sexHistory[sexIndex].hasTarget = true;
+			_impl->recoverInteractiveEdit = false;
 		}
 		return appliedAny;
 	}

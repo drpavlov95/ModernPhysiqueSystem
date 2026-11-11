@@ -50,6 +50,35 @@ namespace mps
             0x40, 0xCC, 0xB0, 0x5E, 0xB8, 0x0E, 0x72, 0x73
         };
 
+        // UBE 2.0 ships a custom SKEE build. It retains the same public
+        // interface and CreateSliderList contract, but every private RVA is
+        // different from stock RaceMenu 0.4.16. Keep this as a fully pinned
+        // layout: PE identity, fixed version, SHA-256, object/vtable ABI and
+        // function signature must all agree before any private call is made.
+        constexpr std::uintptr_t kUbeCreateSliderListRva = 0x62140;
+        constexpr std::uintptr_t kUbeFaceMorphObjectRva = 0x1DC420;
+        constexpr std::uintptr_t kUbeFaceMorphVtableRva = 0x180C28;
+        constexpr std::uintptr_t kUbeFaceMorphGetRva = 0x5CA90;
+        constexpr std::uintptr_t kUbeFaceMorphSetRva = 0x5CB80;
+        constexpr std::size_t kUbeSkeeImageSize = 0x1F6000;
+        constexpr std::uint32_t kUbeSkeeTimestamp = 0x61ECAF64;
+
+        constexpr std::array<std::uint8_t, 28>
+            kUbeCreateSliderListSignature{
+                0x44, 0x88, 0x44, 0x24, 0x18,
+                0x48, 0x89, 0x54, 0x24, 0x10,
+                0x55, 0x53, 0x56, 0x57, 0x41, 0x56,
+                0x48, 0x8D, 0x6C, 0x24, 0xC9,
+                0x48, 0x81, 0xEC, 0x90, 0x00, 0x00, 0x00
+            };
+
+        constexpr std::array<std::uint8_t, 32> kUbeSkeeSha256{
+            0x28, 0x3E, 0xA6, 0xF0, 0xDF, 0x62, 0x34, 0xB5,
+            0x63, 0x6D, 0x6B, 0x03, 0x44, 0x5A, 0x57, 0xC9,
+            0x03, 0x69, 0x51, 0x4E, 0x61, 0xEC, 0x3B, 0x02,
+            0xDA, 0x07, 0xF7, 0x31, 0xFC, 0xF3, 0x46, 0x9B
+        };
+
         struct FixedFileVersion
         {
             std::uint16_t major = 0;
@@ -466,13 +495,43 @@ namespace mps
         }
 
         auto* base = reinterpret_cast<std::uint8_t*>(module);
-        if (imageSize != kExpectedSkeeImageSize ||
-            timestamp != kExpectedSkeeTimestamp ||
-            imageSize <= kCreateSliderListRva ||
-            imageSize <= kFaceMorphObjectRva ||
-            imageSize <= kFaceMorphVtableRva ||
-            imageSize <= kFaceMorphGetRva ||
-            imageSize <= kFaceMorphSetRva) {
+        std::uintptr_t createSliderListRva = 0;
+        std::uintptr_t faceMorphObjectRva = 0;
+        std::uintptr_t faceMorphVtableRva = 0;
+        std::uintptr_t faceMorphGetRva = 0;
+        std::uintptr_t faceMorphSetRva = 0;
+        const std::uint8_t* createSliderListSignature = nullptr;
+        std::size_t createSliderListSignatureSize = 0;
+        const std::array<std::uint8_t, 32>* expectedHash = nullptr;
+        const char* layoutName = nullptr;
+
+        if (imageSize == kExpectedSkeeImageSize &&
+            timestamp == kExpectedSkeeTimestamp) {
+            createSliderListRva = kCreateSliderListRva;
+            faceMorphObjectRva = kFaceMorphObjectRva;
+            faceMorphVtableRva = kFaceMorphVtableRva;
+            faceMorphGetRva = kFaceMorphGetRva;
+            faceMorphSetRva = kFaceMorphSetRva;
+            createSliderListSignature =
+                kCreateSliderListSignature.data();
+            createSliderListSignatureSize =
+                kCreateSliderListSignature.size();
+            expectedHash = std::addressof(kExpectedSkeeSha256);
+            layoutName = "racemenu_0_4_16_stock";
+        } else if (imageSize == kUbeSkeeImageSize &&
+                   timestamp == kUbeSkeeTimestamp) {
+            createSliderListRva = kUbeCreateSliderListRva;
+            faceMorphObjectRva = kUbeFaceMorphObjectRva;
+            faceMorphVtableRva = kUbeFaceMorphVtableRva;
+            faceMorphGetRva = kUbeFaceMorphGetRva;
+            faceMorphSetRva = kUbeFaceMorphSetRva;
+            createSliderListSignature =
+                kUbeCreateSliderListSignature.data();
+            createSliderListSignatureSize =
+                kUbeCreateSliderListSignature.size();
+            expectedHash = std::addressof(kUbeSkeeSha256);
+            layoutName = "ube_2_0_custom";
+        } else {
             gateState_ = GateState::Unavailable;
             spdlog::error(
                 "SkeeFaceMapGuard gate rejected reason=pe_identity_mismatch imageSize=0x{:X} timestamp=0x{:08X}",
@@ -480,12 +539,25 @@ namespace mps
                 timestamp);
             return false;
         }
-        if (faceMorphInterface_ !=
-            reinterpret_cast<IFaceMorphInterface*>(
-                base + kFaceMorphObjectRva)) {
+
+        if (imageSize <= createSliderListRva ||
+            imageSize <= faceMorphObjectRva ||
+            imageSize <= faceMorphVtableRva ||
+            imageSize <= faceMorphGetRva ||
+            imageSize <= faceMorphSetRva) {
             gateState_ = GateState::Unavailable;
             spdlog::error(
-                "SkeeFaceMapGuard gate rejected reason=face_object_mismatch");
+                "SkeeFaceMapGuard gate rejected reason=layout_bounds_mismatch layout={}",
+                layoutName);
+            return false;
+        }
+        if (faceMorphInterface_ !=
+            reinterpret_cast<IFaceMorphInterface*>(
+                base + faceMorphObjectRva)) {
+            gateState_ = GateState::Unavailable;
+            spdlog::error(
+                "SkeeFaceMapGuard gate rejected reason=face_object_mismatch layout={}",
+                layoutName);
             return false;
         }
 
@@ -495,18 +567,19 @@ namespace mps
         if (!ReadObjectVtableSEH(
                 faceMorphInterface_,
                 std::addressof(vtable)) ||
-            vtable != base + kFaceMorphVtableRva ||
+            vtable != base + faceMorphVtableRva ||
             !ReadVtableSlotsSEH(
                 vtable,
                 5,
                 std::addressof(getSlot),
                 6,
                 std::addressof(setSlot)) ||
-            getSlot != base + kFaceMorphGetRva ||
-            setSlot != base + kFaceMorphSetRva) {
+            getSlot != base + faceMorphGetRva ||
+            setSlot != base + faceMorphSetRva) {
             gateState_ = GateState::Unavailable;
             spdlog::error(
-                "SkeeFaceMapGuard gate rejected reason=face_abi_mismatch");
+                "SkeeFaceMapGuard gate rejected reason=face_abi_mismatch layout={}",
+                layoutName);
             return false;
         }
 
@@ -544,24 +617,26 @@ namespace mps
                 "SkeeFaceMapGuard gate deferred reason=sha256_unreadable");
             return false;
         }
-        if (actualHash != kExpectedSkeeSha256 ||
+        if (actualHash != *expectedHash ||
             !MemoryMatchesSEH(
-                base + kCreateSliderListRva,
-                kCreateSliderListSignature.data(),
-                kCreateSliderListSignature.size())) {
+                base + createSliderListRva,
+                createSliderListSignature,
+                createSliderListSignatureSize)) {
             gateState_ = GateState::Unavailable;
             spdlog::error(
-                "SkeeFaceMapGuard gate rejected reason=hash_or_signature_mismatch");
+                "SkeeFaceMapGuard gate rejected reason=hash_or_signature_mismatch layout={}",
+                layoutName);
             return false;
         }
 
         skeeModuleBase_ = module;
         createSliderList_ =
             reinterpret_cast<CreateSliderListFn>(
-                base + kCreateSliderListRva);
+                base + createSliderListRva);
         gateState_ = GateState::Available;
         spdlog::info(
-            "SkeeFaceMapGuard exact SKEE CreateSliderList shim enabled");
+            "SkeeFaceMapGuard exact SKEE CreateSliderList shim enabled layout={}",
+            layoutName);
         return true;
     }
 

@@ -6,6 +6,8 @@ const muscularValueEl = document.getElementById("muscularValue");
 const fatValueEl = document.getElementById("fatValue");
 const resetButton = document.getElementById("reset");
 const snapToggleEl = document.getElementById("snapToggle");
+const faceSliderNames = ["removeFaceMorph", "doubleChin", "fullerChin", "standaloneThin", "standaloneMuscular", "standaloneHeavy"];
+const faceSliders = Object.fromEntries(faceSliderNames.map(name => [name, document.getElementById(name)]));
 
 const center = { x: canvas.width / 2, y: canvas.height / 2 };
 const radius = 138;
@@ -51,7 +53,7 @@ const LINE_SNAP_RELEASE = 22;
 // snap wins instead of the two fighting over the same pixels.
 const RAIL_END_MARGIN = POLE_SNAP_RADIUS / radius;
 
-let pendingMorphValues = { thin: 0, muscular: 0, fat: 0 };
+let pendingMorphValues = { thin: 0, muscular: 0, fat: 0, removeFaceMorph: 0, doubleChin: 0, fullerChin: 0, standaloneThin: 0, standaloneMuscular: 0, standaloneHeavy: 0 };
 let lastPreviewSentValues = null;
 let lastCommitSentValues = null;
 let morphTraceSequence = 0;
@@ -505,7 +507,13 @@ function cloneMorphValues(values) {
     return {
         thin: sanitize(values.thin),
         muscular: sanitize(values.muscular),
-        fat: sanitize(values.fat)
+        fat: sanitize(values.fat),
+        removeFaceMorph: sanitize(values.removeFaceMorph),
+        doubleChin: sanitize(values.doubleChin),
+        fullerChin: sanitize(values.fullerChin),
+        standaloneThin: sanitize(values.standaloneThin),
+        standaloneMuscular: sanitize(values.standaloneMuscular),
+        standaloneHeavy: sanitize(values.standaloneHeavy)
     };
 }
 
@@ -515,7 +523,8 @@ function hasMeaningfulDelta(a, b) {
     return (
         Math.abs(a.thin - b.thin) > MORPH_DELTA_THRESHOLD ||
         Math.abs(a.muscular - b.muscular) > MORPH_DELTA_THRESHOLD ||
-        Math.abs(a.fat - b.fat) > MORPH_DELTA_THRESHOLD
+        Math.abs(a.fat - b.fat) > MORPH_DELTA_THRESHOLD ||
+        faceSliderNames.some(name => Math.abs(a[name] - b[name]) > MORPH_DELTA_THRESHOLD)
     );
 }
 
@@ -532,7 +541,7 @@ function sendPreviewMorphs(values) {
     }
 
     const traceId = nextMorphTraceId("preview");
-    window.onMorphsPreview(`${safe.thin},${safe.muscular},${safe.fat},${traceId}`);
+    window.onMorphsPreview(`${safe.thin},${safe.muscular},${safe.fat},${safe.removeFaceMorph},${safe.doubleChin},${safe.fullerChin},${safe.standaloneThin},${safe.standaloneMuscular},${safe.standaloneHeavy},${traceId}`);
     lastPreviewSentValues = safe;
 }
 
@@ -544,7 +553,7 @@ function sendCommitMorphs(values) {
     }
 
     const traceId = nextMorphTraceId("commit");
-    window.onMorphsCommit(`${safe.thin},${safe.muscular},${safe.fat},${traceId}`);
+    window.onMorphsCommit(`${safe.thin},${safe.muscular},${safe.fat},${safe.removeFaceMorph},${safe.doubleChin},${safe.fullerChin},${safe.standaloneThin},${safe.standaloneMuscular},${safe.standaloneHeavy},${traceId}`);
     lastCommitSentValues = safe;
     lastPreviewSentValues = cloneMorphValues(safe);
 }
@@ -553,6 +562,10 @@ function updateReadout(values) {
     thinValueEl.textContent = values.thin.toFixed(2);
     muscularValueEl.textContent = values.muscular.toFixed(2);
     fatValueEl.textContent = values.fat.toFixed(2);
+    faceSliderNames.forEach(name => {
+        faceSliders[name].value = Math.round(values[name] * 100);
+        document.getElementById(`${name}Value`).textContent = `${Math.round(values[name] * 100)}%`;
+    });
 }
 
 window.restoreMorphs = function(payload) {
@@ -563,6 +576,7 @@ window.restoreMorphs = function(payload) {
     const fat = parseFloat(parts[2]) || 0;
 
     const restored = { thin, muscular, fat };
+    faceSliderNames.forEach((name, index) => restored[name] = parseFloat(parts[index + 3]) || 0);
 
     pendingMorphValues = cloneMorphValues(restored);
     lastPreviewSentValues = cloneMorphValues(restored);
@@ -619,7 +633,9 @@ function scheduleMorphUpdate(options = {}) {
     const commit = !!options.commit;
     const preview = options.preview !== false;
 
-    pendingMorphValues = computeMorphsFromKnob();
+    const faceValues = {};
+    faceSliderNames.forEach(name => { faceValues[name] = pendingMorphValues[name] || 0; });
+    pendingMorphValues = { ...computeMorphsFromKnob(), ...faceValues };
     updateReadout(pendingMorphValues);
 
     if (!preview) {
@@ -1248,6 +1264,14 @@ snapToggleEl.addEventListener("change", () => {
         setSnapLineHighlight(null, "off");
         draw();
     }
+});
+
+faceSliderNames.forEach(name => {
+    faceSliders[name].addEventListener("input", () => {
+        pendingMorphValues[name] = clamp(parseFloat(faceSliders[name].value) / 100, 0, 1);
+        document.getElementById(`${name}Value`).textContent = `${faceSliders[name].value}%`;
+        scheduleMorphUpdate({ preview: true, commit: true });
+    });
 });
 
 runBlendModelSelfTests();

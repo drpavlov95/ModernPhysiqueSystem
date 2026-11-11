@@ -68,6 +68,20 @@ Function ApplyMpsLegacyNormalCleanup(Actor playerRef) global
 	playerRef.QueueNiNodeUpdate()
 EndFunction
 
+Function ClearLegacyNormalOverridesForPlayer(String applySource = "unspecified") global
+	String prefix = "[ModernPhysiqueSystem] [RleyTextureBridge] "
+	Actor playerRef = Game.GetPlayer()
+	If playerRef == None
+		TraceVerbose(prefix + "Legacy cleanup aborted: player is None (source=" + applySource + ")")
+		Return
+	EndIf
+
+	ClearMpsLegacyNormalOverrides(playerRef, False)
+	ClearMpsLegacyNormalOverrides(playerRef, True)
+	ApplyMpsLegacyNormalCleanup(playerRef)
+	TraceVerbose(prefix + "Cleared persisted MPS legacy normal overrides for both sex keys (source=" + applySource + ")")
+EndFunction
+
 Function PrepareMuBackend(Int cleanupGeneration, String applySource = "unspecified") global
 	String prefix = "[ModernPhysiqueSystem] [RleyTextureBridge] "
 	Actor playerRef = Game.GetPlayer()

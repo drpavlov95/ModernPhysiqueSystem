@@ -54,3 +54,11 @@ docs/tri-audit-local-test/
 # Agent/editor local state
 .claude/
 .claude-octopus/
+
+# Local tool checkouts/config that ended up under the repo root by
+# accident -- not project content. ReverseEngineering/tools/ holds a full
+# clone of an external Ghidra scripts repo (6.6 GB, its own nested .git);
+# profiles/ looks like another tool's own settings (BodySlide/Ghidra-style
+# profile.ini), not anything this mod ships or needs to build.
+ReverseEngineering/tools/
+profiles/

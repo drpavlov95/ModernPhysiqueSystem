@@ -31,7 +31,25 @@ namespace mps
         payload.traceId.clear();
 
         const auto parts = text::SplitStringView(argument, ',');
-        if (parts.size() >= 4) {
+        auto readOptional = [&parts](std::size_t index) {
+            if (index >= parts.size()) {
+                return 0.0f;
+            }
+            float value = 0.0f;
+            const auto text = std::string(parts[index]);
+            return sscanf_s(text.c_str(), "%f", &value) == 1 && std::isfinite(value)
+                ? std::clamp(value, 0.0f, 1.0f)
+                : 0.0f;
+        };
+        payload.removeFaceMorph = readOptional(3);
+        payload.doubleChin = readOptional(4);
+        payload.fullerChin = readOptional(5);
+        payload.standaloneThin = readOptional(6);
+        payload.standaloneMuscular = readOptional(7);
+        payload.standaloneHeavy = readOptional(8);
+        if (parts.size() >= 10) {
+            payload.traceId = text::TrimAscii(parts[9]);
+        } else if (parts.size() >= 4) {
             payload.traceId = text::TrimAscii(parts[3]);
         }
 

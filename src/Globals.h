@@ -51,6 +51,8 @@ constexpr const char* kTextureBridgeQueueMuNormalUpdateFunction =
     "QueueMuNormalUpdate";
 constexpr const char* kTextureBridgePrepareMuBackendFunction =
     "PrepareMuBackend";
+constexpr const char* kTextureBridgeClearLegacyNormalOverridesFunction =
+    "ClearLegacyNormalOverridesForPlayer";
 constexpr const wchar_t* kMuDynamicNormalMapDllName =
     L"MuDynamicNormalMap.dll";
 // The active meshes do not share one body slot: HIMBO uses slot 2, while the
@@ -87,6 +89,16 @@ struct FaceMorphTriplet
     float thin = 0.0f;
     float muscular = 0.0f;
     float fat = 0.0f;
+};
+
+struct WheelFaceMorphState
+{
+    float removeFaceMorph = 0.0f;
+    float doubleChin = 0.0f;
+    float fullerChin = 0.0f;
+    float standaloneThin = 0.0f;
+    float standaloneMuscular = 0.0f;
+    float standaloneHeavy = 0.0f;
 };
 
 struct SelectedNormalMapCandidate
@@ -130,6 +142,12 @@ struct FaceDelayedReadRequest
 extern std::atomic<float> g_lastThin;
 extern std::atomic<float> g_lastMuscular;
 extern std::atomic<float> g_lastFat;
+extern std::atomic<float> g_removeFaceMorph;
+extern std::atomic<float> g_doubleChin;
+extern std::atomic<float> g_fullerChin;
+extern std::atomic<float> g_standaloneThin;
+extern std::atomic<float> g_standaloneMuscular;
+extern std::atomic<float> g_standaloneHeavy;
 extern std::atomic<bool> g_hasSavedState;
 extern float g_lastDirectionThin;
 extern float g_lastDirectionMuscular;

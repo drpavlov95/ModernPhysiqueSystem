@@ -1,7 +1,9 @@
 """Read and write BodySlide .osd binary files.
 
 OSD format (from BodySlide source DiffData.cpp):
-  [4]  magic   = b'OSD\x00'
+  [4]  magic   = b'\x00DSO' on little-endian Windows builds. BodySlide writes
+                 the multi-character integer literal ``"OSD\\0"_mci``;
+                 its bytes therefore appear reversed in the file.
   [4]  version = uint32 (always 1)
   [4]  count   = uint32 (number of morph entries)
   For each entry:
@@ -32,7 +34,9 @@ def read_osd(path: Path) -> list[MorphEntry]:
     pos = 0
 
     magic = data[pos:pos+4]
-    if magic != b'OSD\x00':
+    # Accept the on-disk BodySlide representation and the intuitive spelling
+    # used by a few third-party writers.
+    if magic not in (b'\x00DSO', b'OSD\x00'):
         raise ValueError(f"Not an OSD file (bad magic): {path}")
     pos += 4
 

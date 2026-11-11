@@ -31,6 +31,7 @@ namespace
 	};
 	std::atomic_bool g_muDynamicNormalMapsAvailable{ false };
 	std::atomic_bool g_muDynamicNormalMapsRequired{ false };
+	std::atomic_bool g_clearLegacyNormalOverrides{ false };
 	std::atomic_bool g_realtimeNormalMapPreview{
 		FaceMorphDiagnostics::kEnableRealtimeNormalMapPreview
 	};
@@ -155,6 +156,11 @@ namespace FaceMorphDiagnostics
 		std::ranges::transform(normalMapBackend, normalMapBackend.begin(), [](unsigned char ch) {
 			return static_cast<char>(std::tolower(ch));
 		});
+		const bool clearLegacyNormalOverrides = ReadBool(
+			configPath,
+			"NormalMaps",
+			"ClearLegacyOverridesOnLoad",
+			normalMapBackend == "legacy");
 		if (normalMapBackend != "auto" && normalMapBackend != "mu" && normalMapBackend != "none") {
 			spdlog::warn(
 				"Unsupported NormalMaps.Backend={}; falling back to auto",
@@ -180,6 +186,7 @@ namespace FaceMorphDiagnostics
 		g_useSharedFaceMorphLibrary.store(faceMorphBackend == "shared");
 		g_useMuDynamicNormalMaps.store(useMuDynamicNormalMaps);
 		g_muDynamicNormalMapsRequired.store(requireMuDynamicNormalMaps);
+		g_clearLegacyNormalOverrides.store(clearLegacyNormalOverrides);
 		g_realtimeNormalMapPreview.store(realtimeNormalMapPreview);
 
 		spdlog::set_level(logLevel);
@@ -250,6 +257,11 @@ namespace FaceMorphDiagnostics
 	bool MuDynamicNormalMapsRequired()
 	{
 		return g_muDynamicNormalMapsRequired.load();
+	}
+
+	bool ShouldClearLegacyNormalOverrides()
+	{
+		return g_clearLegacyNormalOverrides.load();
 	}
 
 	bool UseMuDynamicNormalMaps()

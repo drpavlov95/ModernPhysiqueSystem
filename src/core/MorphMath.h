@@ -9,6 +9,12 @@ namespace mps
         float thin = 0.0f;
         float muscular = 0.0f;
         float fat = 0.0f;
+        float removeFaceMorph = 0.0f;
+        float doubleChin = 0.0f;
+        float fullerChin = 0.0f;
+        float standaloneThin = 0.0f;
+        float standaloneMuscular = 0.0f;
+        float standaloneHeavy = 0.0f;
         std::string traceId;
     };
 

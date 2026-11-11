@@ -77,6 +77,36 @@ string(REGEX REPLACE "[ \t\r\n]+" "" compact_map_guard "${map_guard_source}")
 string(REGEX REPLACE "[ \t\r\n]+" "" compact_plugin "${plugin_source}")
 string(REGEX REPLACE "[ \t\r\n]+" "" compact_globals "${globals_source}")
 
+# UBE 2.0 replaces skee64.dll with a custom binary. Its private layout must be
+# supported only through the same exact fail-closed gate as stock RaceMenu.
+foreach(required_ube_layout_fragment IN ITEMS
+    "kUbeCreateSliderListRva=0x62140"
+    "kUbeFaceMorphObjectRva=0x1DC420"
+    "kUbeFaceMorphVtableRva=0x180C28"
+    "kUbeFaceMorphGetRva=0x5CA90"
+    "kUbeFaceMorphSetRva=0x5CB80"
+    "kUbeSkeeImageSize=0x1F6000"
+    "kUbeSkeeTimestamp=0x61ECAF64"
+    "timestamp==kUbeSkeeTimestamp"
+    "expectedHash=std::addressof(kUbeSkeeSha256)"
+    "layoutName=\"ube_2_0_custom\""
+    "actualHash!=*expectedHash"
+    "base+createSliderListRva"
+)
+    string(
+        FIND
+        "${compact_map_guard}"
+        "${required_ube_layout_fragment}"
+        ube_layout_offset
+    )
+    if(ube_layout_offset EQUAL -1)
+        message(
+            FATAL_ERROR
+            "SkeeFaceMapGuard exact UBE layout fragment is missing: ${required_ube_layout_fragment}"
+        )
+    endif()
+endforeach()
+
 # The supported RaceMenu 0.4.16 binary has a display string version of
 # 4.0.0.0 but a VS_FIXEDFILEINFO value of 3.4.5.0. The native gate reads the
 # fixed block, so pin that exact value alongside the stronger hash/PE/signature

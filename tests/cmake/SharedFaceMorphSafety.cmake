@@ -27,6 +27,9 @@ foreach(required_fragment IN ITEMS
     "CentredMaxDistance(fod->vertexData,entry.tri.base)"
     "IsSafeFaceGeometryCandidate({"
     "IsMaterialFaceResidualImprovement("
+    "voidSharedFaceMorphLibrary::BeginInteractiveFaceEdit()"
+    "recoverInteractiveEdit"
+    "adoptedtrackedRaceMenuedit"
 )
     string(FIND "${compact_shared_face}" "${required_fragment}" fragment_offset)
     if(fragment_offset EQUAL -1)
@@ -39,6 +42,8 @@ foreach(required_fragment IN ITEMS
     "caseSKSE::MessagingInterface::kPreLoadGame:"
     "caseSKSE::MessagingInterface::kPostLoadGame:"
     "caseSKSE::MessagingInterface::kNewGame:"
+    "BeginFaceMorphTransition(\"RSM_SliderChange\",false,true)"
+    "if(!g_faceMorphLifecycle.pending){"
 )
     string(FIND "${compact_plugin}" "${required_fragment}" fragment_offset)
     if(fragment_offset EQUAL -1)

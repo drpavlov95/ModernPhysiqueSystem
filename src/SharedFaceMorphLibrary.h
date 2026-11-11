@@ -17,6 +17,14 @@ namespace mps
 		float thin{ 0.0F };
 		float muscular{ 0.0F };
 		float heavy{ 0.0F };
+		float noThin{ 0.0F };
+		float noMuscular{ 0.0F };
+		float noFat{ 0.0F };
+		float doubleChin{ 0.0F };
+		float heavyFully{ 0.0F };
+		float standaloneThin{ 0.0F };
+		float standaloneMuscular{ 0.0F };
+		float standaloneHeavy{ 0.0F };
 
 		[[nodiscard]] bool operator==(const SharedFaceMorphTarget&) const = default;
 	};
@@ -47,6 +55,11 @@ namespace mps
 		// per-sex morph history.  RaceMenu can rebuild the same sex more than
 		// once during a single ChangeSex operation.
 		void BeginFaceTransition();
+		// Starts observation for an ordinary RaceMenu face-slider edit while
+		// retaining the exact PW-owned buffer state.  On the next Apply, that
+		// state is used to remove at most one prior PW target from the edited
+		// live geometry before it is accepted as the new native base.
+		void BeginInteractiveFaceEdit();
 		// Returns true only after the same live face/FOD scene has been observed
 		// for the requested number of consecutive samples.
 		[[nodiscard]] bool ObserveStableFaceScene(

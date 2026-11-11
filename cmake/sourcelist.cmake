@@ -10,4 +10,5 @@ set(sources ${sources}
     src/core/NormalMapCatalog.cpp
     src/core/FaceRouteState.cpp
     src/core/FaceGeometrySafety.cpp
+    src/core/RaceMenuLifecycleState.cpp
 )
