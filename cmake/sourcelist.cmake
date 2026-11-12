@@ -11,4 +11,9 @@ set(sources ${sources}
     src/core/FaceRouteState.cpp
     src/core/FaceGeometrySafety.cpp
     src/core/RaceMenuLifecycleState.cpp
+    src/core/Hashing.cpp
+    src/core/SwfContainer.cpp
+    src/core/SwfInflate.cpp
+    src/core/SwfPatchFormat.cpp
+    src/SwfStockPatcher.cpp
 )

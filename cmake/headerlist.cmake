@@ -15,4 +15,9 @@ set(headers ${headers}
     src/core/FaceRouteState.h
     src/core/FaceGeometrySafety.h
     src/core/RaceMenuLifecycleState.h
+    src/core/Hashing.h
+    src/core/SwfContainer.h
+    src/core/SwfInflate.h
+    src/core/SwfPatchFormat.h
+    src/SwfStockPatcher.h
 )
