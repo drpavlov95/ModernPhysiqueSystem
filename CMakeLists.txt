@@ -39,6 +39,9 @@ endif()
 # Setup your SKSE plugin as an SKSE plugin!
 find_package(CommonLibSSE CONFIG REQUIRED)
 find_package(directxtk CONFIG REQUIRED)
+# Inflate-only use (reconstructing the patched RaceMenu SWF from the user's
+# own stock SWF) -- see docs/superpowers/plans/2026-11-11-swf-inprocess-patcher.md.
+find_package(ZLIB REQUIRED)
 include(cmake/headerlist.cmake)
 include(cmake/sourcelist.cmake)
 add_commonlibsse_plugin(${PROJECT_NAME} SOURCES ${headers} ${sources}) # <--- specifies plugin.cpp
@@ -90,6 +93,7 @@ target_include_directories(
 		${SIMPLEINI_INCLUDE_DIRS}
 		"${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
+target_link_libraries("${PROJECT_NAME}" PRIVATE ZLIB::ZLIB)
 # Optional post-build deployment. This is disabled in all ordinary presets;
 # tools/BuildAndDeployDebug.ps1 performs the reviewed paired deployment instead.
 if(MPS_ENABLE_POST_BUILD_DEPLOY)
@@ -142,6 +146,7 @@ if(MPS_BUILD_TESTS)
         src/core/RaceMenuLifecycleState.cpp
         src/core/Hashing.cpp
         src/core/SwfContainer.cpp
+        src/core/SwfInflate.cpp
     )
     set(MPS_TEST_SOURCES
         tests/cpp/test_main.cpp
@@ -154,11 +159,12 @@ if(MPS_BUILD_TESTS)
         tests/cpp/test_racemenulifecyclestate.cpp
         tests/cpp/test_hashing.cpp
         tests/cpp/test_swfcontainer.cpp
+        tests/cpp/test_swfinflate.cpp
     )
     add_executable(mps_tests ${MPS_CORE_SOURCES} ${MPS_TEST_SOURCES})
     target_compile_features(mps_tests PRIVATE cxx_std_23)
     target_include_directories(mps_tests PRIVATE src)
-    target_link_libraries(mps_tests PRIVATE doctest::doctest)
+    target_link_libraries(mps_tests PRIVATE doctest::doctest ZLIB::ZLIB)
     enable_testing()
     add_test(NAME mps_tests COMMAND mps_tests)
     add_test(
