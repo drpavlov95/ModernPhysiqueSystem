@@ -8,6 +8,7 @@
 #include "RaceMenuInterop.h"
 #include "core/Text.h"
 #include "core/MorphMath.h"
+#include "SwfStockPatcher.h"
 #include "core/NormalMapCatalog.h"
 #include "core/RaceMenuLifecycleState.h"
 
@@ -29,6 +30,7 @@
 #include <fstream>
 #include <limits>
 #include <optional>
+#include <span>
 #include <source_location>
 #include <unordered_set>
 #include <exception>
@@ -4578,6 +4580,39 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
     g_pluginMainThreadId.store(loadThreadId);
     LogPluginBuildIdentity();
     spdlog::info("Rley plugin loaded");
+
+    // Reconstruct the patched racesex_menu.swf from the user's own stock
+    // SWF in-process -- see docs/superpowers/plans/2026-11-11-swf-inprocess-patcher.md.
+    // patchData/supportedStockHash are placeholders: the real patch-data
+    // file and a genuine stock SWF hash are not available yet (same
+    // Prerequisite gap as the Python-based patcher plan's
+    // KNOWN_STOCK_CLASS_HASHES), so UnsupportedStock is the only reachable
+    // outcome today. TODO: once a genuine stock racesex_menu.swf is
+    // available, generate the real patch via
+    // tools/racemenu_swf_patch/generate_binary_patch.py and replace these
+    // two placeholders with the real patch bytes and hash.
+    {
+        constexpr std::span<const std::byte> kPlaceholderSwfPatchData{};
+        constexpr std::uint64_t kPlaceholderSupportedStockSwfHash = 0;
+        const auto swfPatchResult = mps::PatchStockSwfIfNeeded(
+            "Data\\interface\\racesex_menu.swf",
+            kPlaceholderSwfPatchData,
+            kPlaceholderSupportedStockSwfHash);
+        switch (swfPatchResult) {
+        case mps::SwfPatchResult::Patched:
+            spdlog::info("SwfStockPatcher: patched racesex_menu.swf this load");
+            break;
+        case mps::SwfPatchResult::AlreadyPatched:
+            spdlog::info("SwfStockPatcher: racesex_menu.swf already patched");
+            break;
+        case mps::SwfPatchResult::UnsupportedStock:
+            spdlog::warn("SwfStockPatcher: unsupported stock racesex_menu.swf; left untouched");
+            break;
+        case mps::SwfPatchResult::Failed:
+            spdlog::error("SwfStockPatcher: failed to patch racesex_menu.swf; left untouched");
+            break;
+        }
+    }
     LogFaceFlagChange(
         "pluginMainThreadId",
         "0",
