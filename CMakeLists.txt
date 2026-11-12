@@ -140,6 +140,7 @@ if(MPS_BUILD_TESTS)
         src/core/FaceRouteState.cpp
         src/core/FaceGeometrySafety.cpp
         src/core/RaceMenuLifecycleState.cpp
+        src/core/Hashing.cpp
     )
     set(MPS_TEST_SOURCES
         tests/cpp/test_main.cpp
@@ -150,6 +151,7 @@ if(MPS_BUILD_TESTS)
         tests/cpp/test_faceroutestate.cpp
         tests/cpp/test_facegeometrysafety.cpp
         tests/cpp/test_racemenulifecyclestate.cpp
+        tests/cpp/test_hashing.cpp
     )
     add_executable(mps_tests ${MPS_CORE_SOURCES} ${MPS_TEST_SOURCES})
     target_compile_features(mps_tests PRIVATE cxx_std_23)
