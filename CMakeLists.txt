@@ -147,6 +147,7 @@ if(MPS_BUILD_TESTS)
         src/core/Hashing.cpp
         src/core/SwfContainer.cpp
         src/core/SwfInflate.cpp
+        src/core/SwfPatchFormat.cpp
     )
     set(MPS_TEST_SOURCES
         tests/cpp/test_main.cpp
@@ -160,6 +161,7 @@ if(MPS_BUILD_TESTS)
         tests/cpp/test_hashing.cpp
         tests/cpp/test_swfcontainer.cpp
         tests/cpp/test_swfinflate.cpp
+        tests/cpp/test_swfpatchformat.cpp
     )
     add_executable(mps_tests ${MPS_CORE_SOURCES} ${MPS_TEST_SOURCES})
     target_compile_features(mps_tests PRIVATE cxx_std_23)
