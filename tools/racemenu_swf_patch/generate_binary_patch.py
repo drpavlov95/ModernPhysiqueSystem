@@ -18,7 +18,6 @@ sync):
       0xFF END    : ends the operation sequence
 """
 
-import difflib
 import struct
 import sys
 import zlib
@@ -31,18 +30,62 @@ OP_END = 0xFF
 
 
 def generate_binary_patch(stock: bytes, patched: bytes) -> bytes:
+    min_match = 16
+    max_candidates = 16
+
+    # Index short exact anchors from the stock stream, then extend matching
+    # anchors byte-for-byte. This is linear for the mostly-identical SWFs we
+    # author and avoids SequenceMatcher's pathological behaviour on the many
+    # repeated zero/opcode bytes in compiled ActionScript.
+    anchors: dict[bytes, list[int]] = {}
+    for offset in range(0, max(0, len(stock) - min_match + 1)):
+        key = stock[offset : offset + min_match]
+        positions = anchors.setdefault(key, [])
+        if len(positions) < max_candidates:
+            positions.append(offset)
+
     ops = bytearray()
-    matcher = difflib.SequenceMatcher(None, stock, patched, autojunk=False)
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
+    insert_start = 0
+    patched_offset = 0
+
+    while patched_offset < len(patched):
+        best_stock_offset = -1
+        best_length = 0
+
+        if patched_offset + min_match <= len(patched):
+            key = patched[patched_offset : patched_offset + min_match]
+            for stock_offset in anchors.get(key, ()):
+                match_length = min_match
+                limit = min(len(stock) - stock_offset, len(patched) - patched_offset)
+                while (
+                    match_length < limit
+                    and stock[stock_offset + match_length]
+                    == patched[patched_offset + match_length]
+                ):
+                    match_length += 1
+                if match_length > best_length:
+                    best_stock_offset = stock_offset
+                    best_length = match_length
+
+        if best_length >= min_match:
+            if insert_start < patched_offset:
+                inserted = patched[insert_start:patched_offset]
+                ops += bytes([OP_INSERT])
+                ops += struct.pack("<I", len(inserted))
+                ops += inserted
+
             ops += bytes([OP_COPY])
-            ops += struct.pack("<II", i1, i2 - i1)
-        elif tag in ("replace", "insert"):
-            inserted = patched[j1:j2]
-            ops += bytes([OP_INSERT])
-            ops += struct.pack("<I", len(inserted))
-            ops += inserted
-        # "delete" contributes no output bytes; nothing to emit.
+            ops += struct.pack("<II", best_stock_offset, best_length)
+            patched_offset += best_length
+            insert_start = patched_offset
+        else:
+            patched_offset += 1
+
+    if insert_start < len(patched):
+        inserted = patched[insert_start:]
+        ops += bytes([OP_INSERT])
+        ops += struct.pack("<I", len(inserted))
+        ops += inserted
     ops += bytes([OP_END])
 
     header = MAGIC + struct.pack("<I", len(patched))

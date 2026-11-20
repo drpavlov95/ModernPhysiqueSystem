@@ -681,6 +681,14 @@ class RaceMenu extends MovieClip
       while(_loc6_ < arguments.length)
       {
          _loc7_ = {type:RaceMenuDefines.ENTRY_TYPE_SLIDER,text:arguments[_loc6_ + RaceMenuDefines.SLIDER_NAME],filterFlag:arguments[_loc6_ + RaceMenuDefines.SLIDER_FILTERFLAG],callbackName:arguments[_loc6_ + RaceMenuDefines.SLIDER_CALLBACKNAME],sliderMin:arguments[_loc6_ + RaceMenuDefines.SLIDER_MIN],sliderMax:arguments[_loc6_ + RaceMenuDefines.SLIDER_MAX],sliderID:arguments[_loc6_ + RaceMenuDefines.SLIDER_ID],position:arguments[_loc6_ + RaceMenuDefines.SLIDER_POSITION],interval:arguments[_loc6_ + RaceMenuDefines.SLIDER_INTERVAL],enabled:true};
+         // Physique Wheel replaces the native Weight control. Keeping both
+         // visible lets ChangeWeight rebuild and reapply the same face morph
+         // stack, so omit only that row while preserving the native value.
+         if(_loc7_.callbackName == "ChangeWeight")
+         {
+            _loc6_ += RaceMenuDefines.SLIDER_STRIDE;
+            continue;
+         }
          if(_loc7_.callbackName == "ChangeTintingMask" || _loc7_.callbackName == "ChangeMaskColor" || _loc7_.callbackName == "ChangeHairColorPreset")
          {
             _loc7_.filterFlag += RaceMenuDefines.CATEGORY_COLOR;
