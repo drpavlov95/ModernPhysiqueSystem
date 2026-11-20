@@ -1,9 +1,0 @@
-SpriggitSource:
-  PackageName: Spriggit.Yaml.Skyrim
-  Version: 0.35.1
-ModKey: RBM_Racemenu.esp
-GameRelease: SkyrimSE
-ModHeader:
-  Stats:
-    Version: 1.7
-  Author: ''
