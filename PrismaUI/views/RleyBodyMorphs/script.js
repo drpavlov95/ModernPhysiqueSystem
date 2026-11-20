@@ -1,9 +1,6 @@
 const canvas = document.getElementById("morphCanvas");
 const ctx = canvas.getContext("2d");
 
-const thinValueEl = document.getElementById("thinValue");
-const muscularValueEl = document.getElementById("muscularValue");
-const fatValueEl = document.getElementById("fatValue");
 const resetButton = document.getElementById("reset");
 const snapToggleEl = document.getElementById("snapToggle");
 const faceSliderNames = ["removeFaceMorph", "doubleChin", "fullerChin", "standaloneThin", "standaloneMuscular", "standaloneHeavy"];
@@ -24,14 +21,22 @@ let pointerStartPos = null;
 let pointerStartTime = 0;
 let pointerMoved = false;
 let knob = { x: center.x, y: center.y };
+let renderedKnob = { x: center.x, y: center.y };
+let lastRenderTime = 0;
 
 let morphPreviewTimeout = null;
+let morphPreviewFrame = null;
 let morphCommitTimeout = null;
 let lastPreviewSendTime = 0;
 
-const MORPH_PREVIEW_INTERVAL = 32;
+// Body/face application is substantially more expensive than painting the UI.
+// Keep previews frequent enough to feel live, but do not let native calls
+// monopolize every other frame on a 60 Hz display.
+const MORPH_PREVIEW_INTERVAL = 64;
 const MORPH_COMMIT_DELAY = 120;
 const MORPH_DELTA_THRESHOLD = 0.01;
+const KNOB_RESPONSE_MS = 12;
+const KNOB_SETTLE_EPSILON = 0.08;
 
 // A press always jumps the knob to the cursor. It only starts *following* the
 // cursor once the gesture proves itself a drag: either the cursor travelled far
@@ -42,7 +47,7 @@ const DRAG_START_DISTANCE = 4;
 const DRAG_START_HOLD_MS = 140;
 
 // Snap geometry, in canvas pixels against a 138 px wheel radius.
-// Poles and the centre snap EXACTLY, so the readout lands on 1.00 / 0.00
+// Poles and the centre snap EXACTLY, so the model lands on 1.00 / 0.00
 // rather than 0.997. Axis rails use hysteresis: easy to enter, harder to leave,
 // which is what stops the knob chattering on and off a line.
 const POLE_SNAP_RADIUS = 14;
@@ -191,6 +196,25 @@ function stepSnapLineAnimation() {
     }
 }
 
+function stepKnobAnimation(timestamp) {
+    const elapsed = lastRenderTime > 0
+        ? clamp(timestamp - lastRenderTime, 0, 50)
+        : 16.67;
+    lastRenderTime = timestamp;
+
+    const response = 1 - Math.exp(-elapsed / KNOB_RESPONSE_MS);
+    renderedKnob.x += (knob.x - renderedKnob.x) * response;
+    renderedKnob.y += (knob.y - renderedKnob.y) * response;
+
+    const remaining = length(knob.x - renderedKnob.x, knob.y - renderedKnob.y);
+    if (remaining <= KNOB_SETTLE_EPSILON) {
+        renderedKnob.x = knob.x;
+        renderedKnob.y = knob.y;
+        return false;
+    }
+    return true;
+}
+
 // One scheduler, one repaint per frame. These were two independent
 // requestAnimationFrame paths, so dragging while the snap line animated queued
 // two full canvas repaints in the same frame.
@@ -200,18 +224,20 @@ function scheduleFrame(animate) {
     if (drawFramePending) return;
 
     drawFramePending = true;
-    requestAnimationFrame(() => {
+    requestAnimationFrame((timestamp) => {
         drawFramePending = false;
 
         const animating = animationFramePending;
         animationFramePending = false;
 
         if (animating) stepSnapLineAnimation();
+        const knobAnimating = stepKnobAnimation(timestamp);
 
         draw();
 
-        if (animating &&
-            Math.abs(snapLineState.targetAlpha - snapLineState.alpha) > 0.001) {
+        const snapAnimating = animating &&
+            Math.abs(snapLineState.targetAlpha - snapLineState.alpha) > 0.001;
+        if (snapAnimating || knobAnimating) {
             scheduleFrame(true);
         }
     });
@@ -385,28 +411,36 @@ function updateKnobFromMorphs(thin, muscular, fat) {
     if (total <= EPS) {
         knob.x = center.x;
         knob.y = center.y;
-        draw();
+        renderedKnob.x = knob.x;
+        renderedKnob.y = knob.y;
+        requestDraw();
         return;
     }
 
     if (thin >= 0.999 && muscular <= 0.001 && fat <= 0.001) {
         knob.x = anchors.thin.x;
         knob.y = anchors.thin.y;
-        draw();
+        renderedKnob.x = knob.x;
+        renderedKnob.y = knob.y;
+        requestDraw();
         return;
     }
 
     if (muscular >= 0.999 && thin <= 0.001 && fat <= 0.001) {
         knob.x = anchors.muscular.x;
         knob.y = anchors.muscular.y;
-        draw();
+        renderedKnob.x = knob.x;
+        renderedKnob.y = knob.y;
+        requestDraw();
         return;
     }
 
     if (fat >= 0.999 && thin <= 0.001 && muscular <= 0.001) {
         knob.x = anchors.fat.x;
         knob.y = anchors.fat.y;
-        draw();
+        renderedKnob.x = knob.x;
+        renderedKnob.y = knob.y;
+        requestDraw();
         return;
     }
 
@@ -446,13 +480,17 @@ function updateKnobFromMorphs(thin, muscular, fat) {
 
         knob.x = nx;
         knob.y = ny;
-        draw();
+        renderedKnob.x = knob.x;
+        renderedKnob.y = knob.y;
+        requestDraw();
         return;
     }
 
     knob.x = center.x + Math.cos(angle) * (radial * radius);
     knob.y = center.y + Math.sin(angle) * (radial * radius);
-    draw();
+    renderedKnob.x = knob.x;
+    renderedKnob.y = knob.y;
+    requestDraw();
 }
 
 function approxEqual(a, b, epsilon = 0.02) {
@@ -558,14 +596,21 @@ function sendCommitMorphs(values) {
     lastPreviewSentValues = cloneMorphValues(safe);
 }
 
-function updateReadout(values) {
-    thinValueEl.textContent = values.thin.toFixed(2);
-    muscularValueEl.textContent = values.muscular.toFixed(2);
-    fatValueEl.textContent = values.fat.toFixed(2);
+function updateWheelReadout(values) {
+    // The wheel itself communicates the blend; keeping this hook avoids
+    // coupling morph dispatch to optional numeric UI.
+}
+
+function updateFaceReadout(values) {
     faceSliderNames.forEach(name => {
         faceSliders[name].value = Math.round(values[name] * 100);
         document.getElementById(`${name}Value`).textContent = `${Math.round(values[name] * 100)}%`;
     });
+}
+
+function updateReadout(values) {
+    updateWheelReadout(values);
+    updateFaceReadout(values);
 }
 
 window.restoreMorphs = function(payload) {
@@ -603,16 +648,6 @@ function scheduleMorphCommit() {
     }, MORPH_COMMIT_DELAY);
 }
 
-function flushPreviewNow() {
-    if (morphPreviewTimeout !== null) {
-        clearTimeout(morphPreviewTimeout);
-        morphPreviewTimeout = null;
-    }
-
-    sendPreviewMorphs(pendingMorphValues);
-    lastPreviewSendTime = performance.now();
-}
-
 function flushCommitNow() {
     if (morphCommitTimeout !== null) {
         clearTimeout(morphCommitTimeout);
@@ -627,6 +662,30 @@ function cancelPendingPreview() {
         clearTimeout(morphPreviewTimeout);
         morphPreviewTimeout = null;
     }
+
+    if (morphPreviewFrame !== null) {
+        cancelAnimationFrame(morphPreviewFrame);
+        morphPreviewFrame = null;
+    }
+}
+
+// Native morph application blocks Prisma's browser thread. Queue it after a
+// paint opportunity so pointer input and the puck are visually processed
+// first. Repeated moves only replace pending values; they never build a queue.
+function schedulePreviewAfterPaint(delay) {
+    if (morphPreviewTimeout !== null || morphPreviewFrame !== null) return;
+
+    morphPreviewTimeout = setTimeout(() => {
+        morphPreviewTimeout = null;
+        morphPreviewFrame = requestAnimationFrame(() => {
+            morphPreviewFrame = null;
+            morphPreviewTimeout = setTimeout(() => {
+                morphPreviewTimeout = null;
+                sendPreviewMorphs(pendingMorphValues);
+                lastPreviewSendTime = performance.now();
+            }, 0);
+        });
+    }, Math.max(0, delay));
 }
 
 function scheduleMorphUpdate(options = {}) {
@@ -636,25 +695,14 @@ function scheduleMorphUpdate(options = {}) {
     const faceValues = {};
     faceSliderNames.forEach(name => { faceValues[name] = pendingMorphValues[name] || 0; });
     pendingMorphValues = { ...computeMorphsFromKnob(), ...faceValues };
-    updateReadout(pendingMorphValues);
+    updateWheelReadout(pendingMorphValues);
 
     if (!preview) {
         cancelPendingPreview();
     } else {
         const now = performance.now();
         const elapsed = now - lastPreviewSendTime;
-
-        if (elapsed >= MORPH_PREVIEW_INTERVAL) {
-            sendPreviewMorphs(pendingMorphValues);
-            lastPreviewSendTime = now;
-            cancelPendingPreview();
-        } else if (morphPreviewTimeout === null) {
-            morphPreviewTimeout = setTimeout(() => {
-                sendPreviewMorphs(pendingMorphValues);
-                lastPreviewSendTime = performance.now();
-                morphPreviewTimeout = null;
-            }, MORPH_PREVIEW_INTERVAL - elapsed);
-        }
+        schedulePreviewAfterPaint(MORPH_PREVIEW_INTERVAL - elapsed);
     }
 
     if (commit) {
@@ -706,17 +754,17 @@ function drawSelectionDot() {
     ctx.save();
 
     // A halo while snapped tells you the value is locked to a rail or a pole,
-    // which is otherwise only inferable from the readout.
+    // which is otherwise only inferable from the wheel position.
     if (snapLineState.isSnapped) {
         ctx.beginPath();
-        ctx.arc(knob.x, knob.y, 9.5, 0, Math.PI * 2);
+        ctx.arc(renderedKnob.x, renderedKnob.y, 9.5, 0, Math.PI * 2);
         ctx.strokeStyle = "rgba(240,240,240,0.55)";
         ctx.lineWidth = 1.4;
         ctx.stroke();
     }
 
     ctx.beginPath();
-    ctx.arc(knob.x, knob.y, dragging ? 6.4 : 5.2, 0, Math.PI * 2);
+    ctx.arc(renderedKnob.x, renderedKnob.y, dragging ? 6.4 : 5.2, 0, Math.PI * 2);
     ctx.fillStyle = "rgba(35,35,35,0.98)";
     ctx.fill();
 
@@ -764,8 +812,8 @@ const SLOT_ANGULAR_SPREAD = 0.20;
 // so every lit slot was filled twice. One pass fills each slot exactly once at
 // whichever alpha wins, which halves the path count in the worst case.
 function drawSlotGrid() {
-    const dx = knob.x - center.x;
-    const dy = knob.y - center.y;
+    const dx = renderedKnob.x - center.x;
+    const dy = renderedKnob.y - center.y;
     const knobDist = length(dx, dy);
     const lit = knobDist >= 6;
 
@@ -884,8 +932,16 @@ function setKnobFromPoint(x, y, options = {}) {
         setSnapLineHighlight(null, "off");
         knob.x = targetX;
         knob.y = targetY;
+        // Pointer motion already arrives as a stream. Filtering that stream a
+        // second time makes the puck visibly trail the cursor, especially in
+        // Prisma's embedded browser. Interpolation remains useful for restores
+        // and other non-pointer changes, but direct manipulation must be 1:1.
+        if (activePointerId !== null) {
+            renderedKnob.x = knob.x;
+            renderedKnob.y = knob.y;
+        }
         markSlidingActivity();
-        requestDraw();
+        requestAnimatedRedraw();
         scheduleMorphUpdate(options);
         return;
     }
@@ -895,6 +951,11 @@ function setKnobFromPoint(x, y, options = {}) {
     knob.x = snapped.x;
     knob.y = snapped.y;
 
+    if (activePointerId !== null) {
+        renderedKnob.x = knob.x;
+        renderedKnob.y = knob.y;
+    }
+
     if (snapped.line) {
         setSnapLineHighlight(snapped.line, snapped.entering ? "blink" : "hold");
     } else {
@@ -903,7 +964,7 @@ function setKnobFromPoint(x, y, options = {}) {
 
     markSlidingActivity();
 
-    requestDraw();
+    requestAnimatedRedraw();
     scheduleMorphUpdate(options);
 }
 
@@ -998,8 +1059,6 @@ function finishPointerInteraction(event) {
     }
 
     const pointerId = activePointerId;
-    const wasMoved = pointerMoved;
-
     // Clear first: releasePointerCapture dispatches lostpointercapture, so the
     // finish path must already be inert when that event arrives.
     activePointerId = null;
@@ -1027,12 +1086,9 @@ function finishPointerInteraction(event) {
         }
     }
 
-    if (wasMoved) {
-        flushPreviewNow();
-    } else {
-        cancelPendingPreview();
-    }
-
+    // The final commit contains the same current values as a final preview.
+    // Sending both back-to-back stalls two frames and applies no extra state.
+    cancelPendingPreview();
     flushCommitNow();
 
     setSnapLineHighlight(null, "off");

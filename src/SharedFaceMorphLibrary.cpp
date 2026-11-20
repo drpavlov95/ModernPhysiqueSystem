@@ -1103,6 +1103,30 @@ namespace mps
 		_impl->recoverInteractiveEdit = false;
 	}
 
+	bool SharedFaceMorphLibrary::HasExternalFaceEdit(RE::PlayerCharacter* player) const
+	{
+		if (!_impl || !player || _impl->buffers.empty()) return false;
+		auto* faceNode = player->GetFaceNodeSkinned();
+		if (!faceNode) return true;
+		bool changed = false;
+		std::size_t trackedSeen = 0;
+		RE::BSVisit::TraverseScenegraphGeometries(faceNode, [&](RE::BSGeometry* geometry) {
+			auto* fod = GetFOD(geometry);
+			if (!fod) return RE::BSVisit::BSVisitControl::kContinue;
+			const auto it = _impl->buffers.find(reinterpret_cast<std::uintptr_t>(fod));
+			if (it != _impl->buffers.end()) {
+				++trackedSeen;
+				const auto& state = it->second;
+				if (state.data != fod->vertexData || state.count != fod->vertexCount ||
+					(state.hasAppliedFingerprint && Fingerprint(fod->vertexData, fod->vertexCount, true) != state.lastAppliedFingerprint)) {
+					changed = true;
+				}
+			}
+			return RE::BSVisit::BSVisitControl::kContinue;
+		});
+		return changed || trackedSeen != _impl->buffers.size();
+	}
+
 	void SharedFaceMorphLibrary::BeginInteractiveFaceEdit()
 	{
 		if (!_impl) {

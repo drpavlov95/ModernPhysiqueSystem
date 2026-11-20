@@ -9,9 +9,7 @@
 #include <spdlog/spdlog.h>
 
 #include "core/Hashing.h"
-#include "core/SwfContainer.h"
-#include "core/SwfInflate.h"
-#include "core/SwfPatchFormat.h"
+#include "core/SwfPatcher.h"
 
 namespace mps
 {
@@ -44,19 +42,45 @@ namespace mps
 
         bool ReadStockSwfBytes(const std::filesystem::path& liveSwfPath, std::vector<std::byte>& outBytes)
         {
-            RE::BSResourceNiBinaryStream stream(ResourcePathFor(liveSwfPath).c_str());
-            if (!stream.good()) {
+            const auto resourcePath = ResourcePathFor(liveSwfPath);
+            RE::BSResourceNiBinaryStream stream(resourcePath.c_str());
+            if (!stream.good() || !stream.stream) {
+                spdlog::error(
+                    "SwfStockPatcher: resource stream unavailable path={} lastError={}",
+                    resourcePath,
+                    static_cast<int>(stream.lastError));
                 return false;
             }
 
-            RE::NiBinaryStream::BufferInfo info{};
-            stream.get_info(info);
-            if (info.totalSize == 0) {
+            // The BSResourceNiBinaryStream constructor already opens the
+            // underlying resource stream. Calling DoOpen() again returns
+            // kInvalidPath in-game, so read directly from the open stream.
+            // Avoid get_info() as CommonLib's override is an empty stub.
+            const std::uint32_t totalSize = stream.stream->totalSize;
+            if (totalSize == 0) {
+                spdlog::error("SwfStockPatcher: resource is empty path={}", resourcePath);
                 return false;
             }
 
-            outBytes.resize(info.totalSize);
-            return stream.read(reinterpret_cast<char*>(outBytes.data()), info.totalSize);
+            outBytes.resize(totalSize);
+            std::uint64_t bytesRead = 0;
+            const auto readError = stream.stream->DoRead(outBytes.data(), totalSize, bytesRead);
+            if (readError != RE::BSResource::ErrorCode::kNone || bytesRead != totalSize) {
+                spdlog::error(
+                    "SwfStockPatcher: resource read incomplete path={} error={} read={} expected={}",
+                    resourcePath,
+                    static_cast<int>(readError),
+                    bytesRead,
+                    totalSize);
+                outBytes.clear();
+                return false;
+            }
+
+            spdlog::info(
+                "SwfStockPatcher: read resource path={} bytes={}",
+                resourcePath,
+                totalSize);
+            return true;
         }
 
         bool ReadWholeFile(const std::filesystem::path& path, std::vector<std::byte>& outBytes)
@@ -83,6 +107,16 @@ namespace mps
             }
             file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
             return file.good();
+        }
+
+        bool ReplaceFileAtomically(
+            const std::filesystem::path& source,
+            const std::filesystem::path& destination)
+        {
+            return MoveFileExW(
+                       source.c_str(),
+                       destination.c_str(),
+                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
         }
     }
 
@@ -120,22 +154,17 @@ namespace mps
         }
 
         try {
-            const auto header = ParseSwfHeader(stockBytes);
-            std::vector<std::byte> tagStream;
-            const std::span<const std::byte> payload(
-                stockBytes.data() + header.payloadOffset, stockBytes.size() - header.payloadOffset);
+            const auto builtSwf = ReconstructPatchedSwf(stockBytes, patchData);
 
-            if (header.compression == SwfCompression::Zlib) {
-                tagStream = InflateZlibStream(payload, header.fileLength - header.payloadOffset);
-            } else if (header.compression == SwfCompression::Uncompressed) {
-                tagStream.assign(payload.begin(), payload.end());
-            } else {
-                spdlog::error("SwfStockPatcher: unsupported SWF signature at {}", liveSwfPath.string());
+            std::error_code directoryError;
+            std::filesystem::create_directories(liveSwfPath.parent_path(), directoryError);
+            if (directoryError) {
+                spdlog::error(
+                    "SwfStockPatcher: failed to prepare output directory {}: {}",
+                    liveSwfPath.parent_path().string(),
+                    directoryError.message());
                 return SwfPatchResult::Failed;
             }
-
-            const auto patchedTagStream = ApplyBinaryPatch(tagStream, patchData);
-            const auto builtSwf = BuildUncompressedSwf(patchedTagStream, header.version);
 
             if (!std::filesystem::exists(BackupPath(liveSwfPath))) {
                 if (!WriteWholeFile(BackupPath(liveSwfPath), stockBytes)) {
@@ -150,12 +179,12 @@ namespace mps
                 return SwfPatchResult::Failed;
             }
 
-            std::error_code renameError;
-            std::filesystem::rename(tempPath, liveSwfPath, renameError);
-            if (renameError) {
+            if (!ReplaceFileAtomically(tempPath, liveSwfPath)) {
+                const DWORD moveError = GetLastError();
                 spdlog::error(
-                    "SwfStockPatcher: failed to move patched output into place for {}: {}",
-                    liveSwfPath.string(), renameError.message());
+                    "SwfStockPatcher: failed to move patched output into place for {} win32={}",
+                    liveSwfPath.string(),
+                    moveError);
                 return SwfPatchResult::Failed;
             }
 

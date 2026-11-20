@@ -1,6 +1,6 @@
 # Third-party notices
 
-Physique Wheel (`ModernPhysiqueSystem.dll`) is licensed under the GNU General Public
+Physique Wheel (`PhysiqueWheel.dll`) is licensed under the GNU General Public
 License version 3; its complete text is retained in the root `LICENSE` file.
 
 ## RaceMenu/SKEE interfaces
@@ -51,7 +51,7 @@ copyleft vector:
 ## Assets are not covered by the GPL
 
 The licence covers **code**: the SKSE plugin, the Prisma UI frontend under
-`PrismaUI/views/`, and the Papyrus scripts under `Source/Scripts/`.
+and `PrismaUI/views/`.
 
 It does **not** cover morph, mesh or texture assets. The `RLY_*` face morphs and `RM_*`
 body morphs this plugin reads are hand-made and ship with **Physiques of Skyrim**,

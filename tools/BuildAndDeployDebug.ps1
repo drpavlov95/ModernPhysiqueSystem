@@ -1,18 +1,9 @@
 [CmdletBinding()]
-param(
-    [switch]$CompileRuntimeMorphController
-)
+param()
 
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$papyrusCompiler = "C:\Program Files (x86)\Steam\steamapps\common\Skyrim Special Edition\Papyrus Compiler\PapyrusCompiler.exe"
-$papyrusFlags = "C:\Program Files (x86)\Steam\steamapps\common\Skyrim Special Edition\Data\Scripts\Source\TESV_Papyrus_Flags.flg"
-$papyrusImports = @(
-    (Join-Path $repoRoot "Source\Scripts"),
-    "E:\Wabbajack\InstallPacks\overwrite\source\scripts",
-    "C:\Program Files (x86)\Steam\steamapps\common\Skyrim Special Edition\Data\Scripts\Source"
-) -join ";"
 
 $modRoot = "E:\Wabbajack\InstallPacks\mods\ModernPhysiquePicker"
 $muModRoot = "E:\Wabbajack\InstallPacks\mods\Mu Dynamic NormalMap"
@@ -103,17 +94,6 @@ try {
         throw "Native build failed."
     }
 
-    # Compile the bridge before the test suite: static safety validates the
-    # deployed PEX ABI against the native callbacks added by this source tree.
-    & $papyrusCompiler `
-        "Source\Scripts\RleyTextureBridge.psc" `
-        "-import=$papyrusImports" `
-        "-output=$(Join-Path $repoRoot 'Scripts')" `
-        "-flags=$papyrusFlags"
-    if ($LASTEXITCODE -ne 0) {
-        throw "Papyrus compile failed for RleyTextureBridge."
-    }
-
     $testDirectory = Join-Path $repoRoot "build\release-msvc"
     $requiredTests = @(
         "mps_tests",
@@ -145,31 +125,15 @@ try {
         throw "Pre-deploy test suite failed."
     }
 
-    if ($CompileRuntimeMorphController) {
-        & $papyrusCompiler `
-            "Source\Scripts\RleyRuntimeMorphController.psc" `
-            "-import=$papyrusImports" `
-            "-output=$(Join-Path $repoRoot 'Scripts')" `
-            "-flags=$papyrusFlags"
-        if ($LASTEXITCODE -ne 0) {
-            throw "Papyrus compile failed for RleyRuntimeMorphController."
-        }
-    }
-
     $requiredDeploySources = @(
-        "Scripts\RleyTextureBridge.pex",
         "interface\racesex_menu.swf",
-        "build\release-msvc\ModernPhysiqueSystem.dll",
-        "build\release-msvc\ModernPhysiqueSystem.pdb",
-        "SKSE\Plugins\ModernPhysiqueSystem.ini",
+        "build\release-msvc\PhysiqueWheel.dll",
+        "build\release-msvc\PhysiqueWheel.pdb",
+        "SKSE\Plugins\PhysiqueWheel.ini",
         "SKSE\Plugins\MuDynamicNormalMap.ini",
         "PrismaUI\views\RleyBodyMorphs\index.html",
         "PrismaUI\views\RleyBodyMorphs\script.js",
-        "PrismaUI\views\RleyBodyMorphs\style.css",
-        "Source\Scripts\RleyTextureBridge.psc",
-        "Source\Scripts\MuDynamicNormalMap.psc",
-        "Source\Scripts\NiOverride.psc",
-        "Source\Scripts\ArmorAddon.psc"
+        "PrismaUI\views\RleyBodyMorphs\style.css"
     )
     $muRestoreAssetRelativePaths = @(
         "Meshes\!COR\Hands\femalehands_1.nif",
@@ -178,12 +142,6 @@ try {
     $mpsMuAssetBackupRoot = Join-Path $repoRoot "backups\deploy_original_mps_mu_assets"
     foreach ($assetRelativePath in $muRestoreAssetRelativePaths) {
         $requiredDeploySources += Join-Path $mpsMuAssetBackupRoot $assetRelativePath
-    }
-    if ($CompileRuntimeMorphController) {
-        $requiredDeploySources += @(
-            "Scripts\RleyRuntimeMorphController.pex",
-            "Source\Scripts\RleyRuntimeMorphController.psc"
-        )
     }
     $missingDeploySources = @(
         $requiredDeploySources | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }
@@ -224,25 +182,34 @@ try {
     Assert-PathWithinRoot $muCompiledShaderPath $muModRoot
     Assert-PathWithinRoot $muOverwriteCompiledShaderPath $mo2OverwriteRoot
 
-    # The build and Papyrus compile can take long enough for either process to
+    # The build can take long enough for either process to
     # be opened after the initial guard. Close that window before any write.
     Assert-DeploymentProcessesStopped
 
     New-Item -ItemType Directory -Path (Join-Path $modRoot "PrismaUI\views\RleyBodyMorphs") -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $modRoot "SKSE\Plugins") -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $modRoot "SKSE\Plugins\MuDynamicNormalMap") -Force | Out-Null
-    New-Item -ItemType Directory -Path (Join-Path $modRoot "Scripts") -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $modRoot "interface") -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $modRoot "Meshes\!COR\Hands") -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $modRoot "Meshes\!COR\Feet") -Force | Out-Null
 
-    # The new PEX keeps the legacy entrypoint, so copying it before the DLL
-    # avoids a transient new-DLL/old-PEX ABI mismatch during deployment.
-    Copy-Item "Scripts\RleyTextureBridge.pex" (Join-Path $modRoot "Scripts\RleyTextureBridge.pex") -Force
     Copy-Item "interface\racesex_menu.swf" (Join-Path $modRoot "interface\racesex_menu.swf") -Force
-    Copy-Item "build\release-msvc\ModernPhysiqueSystem.dll" (Join-Path $modRoot "SKSE\Plugins\ModernPhysiqueSystem.dll") -Force
-    Copy-Item "build\release-msvc\ModernPhysiqueSystem.pdb" (Join-Path $modRoot "SKSE\Plugins\ModernPhysiqueSystem.pdb") -Force
-    Copy-Item "SKSE\Plugins\ModernPhysiqueSystem.ini" (Join-Path $modRoot "SKSE\Plugins\ModernPhysiqueSystem.ini") -Force
+    Copy-Item "build\release-msvc\PhysiqueWheel.dll" (Join-Path $modRoot "SKSE\Plugins\PhysiqueWheel.dll") -Force
+    Copy-Item "build\release-msvc\PhysiqueWheel.pdb" (Join-Path $modRoot "SKSE\Plugins\PhysiqueWheel.pdb") -Force
+    Copy-Item "SKSE\Plugins\PhysiqueWheel.ini" (Join-Path $modRoot "SKSE\Plugins\PhysiqueWheel.ini") -Force
+    # The plugin was renamed from ModernPhysiqueSystem. A leftover legacy DLL
+    # would be loaded by SKSE alongside the new one and install every hook
+    # twice, so remove it; keep the old INI only as a renamed backup.
+    foreach ($legacyName in @("ModernPhysiqueSystem.dll", "ModernPhysiqueSystem.pdb")) {
+        $legacyPath = Join-Path $modRoot "SKSE\Plugins\$legacyName"
+        if (Test-Path -LiteralPath $legacyPath -PathType Leaf) {
+            Remove-Item -LiteralPath $legacyPath -Force
+        }
+    }
+    $legacyIniPath = Join-Path $modRoot "SKSE\Plugins\ModernPhysiqueSystem.ini"
+    if (Test-Path -LiteralPath $legacyIniPath -PathType Leaf) {
+        Move-Item -LiteralPath $legacyIniPath -Destination "$legacyIniPath.legacy.bak" -Force
+    }
     Copy-Item "PrismaUI\views\RleyBodyMorphs\index.html" (Join-Path $modRoot "PrismaUI\views\RleyBodyMorphs\index.html") -Force
     Copy-Item "PrismaUI\views\RleyBodyMorphs\script.js" (Join-Path $modRoot "PrismaUI\views\RleyBodyMorphs\script.js") -Force
     Copy-Item "PrismaUI\views\RleyBodyMorphs\style.css" (Join-Path $modRoot "PrismaUI\views\RleyBodyMorphs\style.css") -Force
@@ -297,16 +264,6 @@ try {
     # every body update, so remove them when upgrading an existing profile.
     Remove-Item -LiteralPath (Join-Path $modRoot "Textures\actors\character\male\malebody_1_n.dds") -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path $modRoot "Textures\!COR\Body\FemaleBody_1_n.dds") -Force -ErrorAction SilentlyContinue
-    Copy-Item "Source\Scripts\RleyTextureBridge.psc" (Join-Path $modRoot "Source\Scripts\RleyTextureBridge.psc") -Force
-    Copy-Item "Source\Scripts\MuDynamicNormalMap.psc" (Join-Path $modRoot "Source\Scripts\MuDynamicNormalMap.psc") -Force
-    Copy-Item "Source\Scripts\NiOverride.psc" (Join-Path $modRoot "Source\Scripts\NiOverride.psc") -Force
-    Copy-Item "Source\Scripts\ArmorAddon.psc" (Join-Path $modRoot "Source\Scripts\ArmorAddon.psc") -Force
-
-    if ($CompileRuntimeMorphController) {
-        Copy-Item "Scripts\RleyRuntimeMorphController.pex" (Join-Path $modRoot "Scripts\RleyRuntimeMorphController.pex") -Force
-        Copy-Item "Source\Scripts\RleyRuntimeMorphController.psc" (Join-Path $modRoot "Source\Scripts\RleyRuntimeMorphController.psc") -Force
-    }
-
     # Deploy mppatcher-cli.exe + MPPatcher.exe
     $bsModDir = Join-Path $modRoot "CalienteTools\BodySlide"
     New-Item -ItemType Directory -Force $bsModDir | Out-Null

@@ -59,12 +59,22 @@ namespace mps
                 if (static_cast<std::uint64_t>(sourceOffset) + length > stock.size()) {
                     throw PatchFormatError("COPY range exceeds the stock buffer");
                 }
+                // Found by review: check the budget before appending, not
+                // after the whole operation stream ran -- an oversized
+                // COPY/INSERT must not be allowed to grow `out` arbitrarily
+                // large before the declared-length mismatch is caught.
+                if (static_cast<std::uint64_t>(out.size()) + length > patchedLength) {
+                    throw PatchFormatError("operation would exceed declared patchedLength");
+                }
                 out.insert(out.end(), stock.begin() + sourceOffset, stock.begin() + sourceOffset + length);
             } else if (opcode == kOpInsert) {
                 RequireAvailable(patchData, pos, 4);
                 const std::uint32_t length = ReadLe32(patchData, pos);
                 pos += 4;
                 RequireAvailable(patchData, pos, length);
+                if (static_cast<std::uint64_t>(out.size()) + length > patchedLength) {
+                    throw PatchFormatError("operation would exceed declared patchedLength");
+                }
                 out.insert(out.end(), patchData.begin() + pos, patchData.begin() + pos + length);
                 pos += length;
             } else {

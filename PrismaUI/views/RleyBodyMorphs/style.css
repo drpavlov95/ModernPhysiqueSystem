@@ -50,7 +50,7 @@ body {
 
 canvas {
     display: block;
-    margin: 0 auto 14px;
+    margin: 0 auto 6px;
     border-radius: 12px;
     background: transparent;
     touch-action: none;
@@ -60,40 +60,6 @@ canvas {
 
 canvas.dragging {
     cursor: grabbing;
-}
-
-.readout {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 12px;
-    width: 400px;
-    margin: 0 auto;
-    transform: translateX(28px);
-}
-
-.readout div {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    padding: 6px 10px;
-    border: 0;
-    border-radius: 9px;
-    background: transparent;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: rgba(235, 226, 211, 0.58);
-}
-
-.readout span {
-    font-size: 19px;
-    line-height: 1.1;
-    font-weight: 700;
-    letter-spacing: 0;
-    text-transform: none;
-    font-variant-numeric: tabular-nums;
-    color: rgba(247, 243, 236, 0.94);
 }
 
 .ghost-button {
@@ -159,7 +125,87 @@ canvas.dragging {
 .snap-toggle input:checked::after {
     transform: scale(1);
 }
-.face-controls { display: grid; gap: 6px; margin: 8px auto 0; width: 400px; pointer-events: auto; }
-.face-controls label { display: grid; grid-template-columns: 1fr 150px 38px; gap: 8px; align-items: center; font-size: 12px; }
-.face-controls input { width: 150px; }
-.face-controls span { text-align: right; }
+.face-controls {
+    display: grid;
+    gap: 2px;
+    width: 400px;
+    margin: 0 auto;
+    pointer-events: auto;
+}
+
+.face-controls-title {
+    margin: 0 0 5px;
+    padding: 0 8px 5px;
+    border-bottom: 1px solid rgba(235, 235, 235, 0.34);
+    color: rgba(246, 246, 246, 0.92);
+    font-family: Arial, sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.035em;
+    text-transform: uppercase;
+}
+
+.face-controls label {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 166px 34px;
+    gap: 9px;
+    align-items: center;
+    min-height: 25px;
+    padding: 0 7px;
+    color: rgba(238, 238, 238, 0.88);
+    font-family: Arial, sans-serif;
+    font-size: 13px;
+    line-height: 25px;
+    text-shadow: 0 1px 1px rgba(0, 0, 0, 0.8);
+}
+
+.face-controls label:hover {
+    background: linear-gradient(90deg, rgba(225, 225, 225, 0.13), rgba(225, 225, 225, 0.025));
+    color: #fff;
+}
+
+.face-controls input[type="range"] {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 166px;
+    height: 18px;
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    cursor: ew-resize;
+}
+
+.face-controls input[type="range"]::-webkit-slider-runnable-track {
+    height: 3px;
+    border: 1px solid rgba(0, 0, 0, 0.78);
+    background: rgba(184, 184, 184, 0.58);
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+
+.face-controls input[type="range"]::-webkit-slider-thumb {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 7px;
+    height: 15px;
+    margin-top: -7px;
+    border: 1px solid rgba(18, 18, 18, 0.95);
+    border-radius: 0;
+    background: #dedede;
+    box-shadow: inset 1px 0 rgba(255, 255, 255, 0.6), 0 1px 2px rgba(0, 0, 0, 0.75);
+}
+
+.face-controls input[type="range"]:hover::-webkit-slider-thumb,
+.face-controls input[type="range"]:focus::-webkit-slider-thumb {
+    background: #fff;
+}
+
+.face-controls input[type="range"]:focus {
+    outline: none;
+}
+
+.face-controls span {
+    color: rgba(232, 232, 232, 0.76);
+    text-align: right;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+}

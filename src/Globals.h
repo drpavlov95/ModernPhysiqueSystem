@@ -44,15 +44,6 @@ constexpr const char* kNormalMapDataFolder = "Data\\Textures\\RleyBodyMorphs";
 constexpr const char* kNormalMapRelativeFolder = "Textures\\RleyBodyMorphs";
 constexpr const char* kHandNormalMapDataFolder = "Data\\Textures\\RleyBodyMorphs\\Hands";
 constexpr const char* kHandNormalMapRelativeFolder = "Textures\\RleyBodyMorphs\\Hands";
-constexpr const char* kTextureBridgeScriptName = "RleyTextureBridge";
-constexpr const char* kTextureBridgeApplySelectedNormalPathsForSexFunction =
-    "ApplySelectedNormalPathsForSex";
-constexpr const char* kTextureBridgeQueueMuNormalUpdateFunction =
-    "QueueMuNormalUpdate";
-constexpr const char* kTextureBridgePrepareMuBackendFunction =
-    "PrepareMuBackend";
-constexpr const char* kTextureBridgeClearLegacyNormalOverridesFunction =
-    "ClearLegacyNormalOverridesForPlayer";
 constexpr const wchar_t* kMuDynamicNormalMapDllName =
     L"MuDynamicNormalMap.dll";
 // The active meshes do not share one body slot: HIMBO uses slot 2, while the

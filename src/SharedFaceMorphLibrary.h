@@ -60,6 +60,7 @@ namespace mps
 		// state is used to remove at most one prior PW target from the edited
 		// live geometry before it is accepted as the new native base.
 		void BeginInteractiveFaceEdit();
+		[[nodiscard]] bool HasExternalFaceEdit(RE::PlayerCharacter* player) const;
 		// Returns true only after the same live face/FOD scene has been observed
 		// for the requested number of consecutive samples.
 		[[nodiscard]] bool ObserveStableFaceScene(

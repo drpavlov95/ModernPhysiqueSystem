@@ -92,7 +92,7 @@ set(required_deploy_fragments
     "Get-Process-Name$blockingProcessNames-ErrorActionSilentlyContinue"
     "throw\"CloseSkyrimbeforedeployment."
     "cmd/c"
-    "build\\release-msvc\\ModernPhysiqueSystem.pdb"
+    "build\\release-msvc\\PhysiqueWheel.pdb"
     "--show-only=json-v1"
     "if($missingRequiredTests.Count-gt0)"
     "if($missingDeploySources.Count-gt0)"
@@ -200,9 +200,8 @@ string(
 string(FIND "${compact_deploy}" "if($missingDeploySources.Count-gt0)" preflight_offset)
 string(FIND "${compact_deploy}" "New-Item-ItemTypeDirectory" first_directory_write_offset)
 string(FIND "${compact_deploy}" "Copy-Item" first_copy_offset)
-string(FIND "${compact_deploy}" "Copy-Item\"Scripts\\RleyTextureBridge.pex\"" pex_copy_offset)
 string(FIND "${compact_deploy}" "Copy-Item\"interface\\racesex_menu.swf\"" swf_copy_offset)
-string(FIND "${compact_deploy}" "Copy-Item\"build\\release-msvc\\ModernPhysiqueSystem.dll\"" dll_copy_offset)
+string(FIND "${compact_deploy}" "Copy-Item\"build\\release-msvc\\PhysiqueWheel.dll\"" dll_copy_offset)
 if(
     test_manifest_offset EQUAL -1
     OR test_manifest_guard_offset EQUAL -1
@@ -210,7 +209,6 @@ if(
     OR preflight_offset EQUAL -1
     OR first_directory_write_offset EQUAL -1
     OR first_copy_offset EQUAL -1
-    OR pex_copy_offset EQUAL -1
     OR swf_copy_offset EQUAL -1
     OR dll_copy_offset EQUAL -1
     OR test_manifest_offset GREATER_EQUAL test_manifest_guard_offset
@@ -219,19 +217,18 @@ if(
     OR preflight_offset GREATER_EQUAL third_process_assertion_offset
     OR third_process_assertion_offset GREATER_EQUAL first_directory_write_offset
     OR first_directory_write_offset GREATER_EQUAL first_copy_offset
-    OR first_copy_offset LESS pex_copy_offset
-    OR first_copy_offset GREATER pex_copy_offset
-    OR preflight_offset GREATER_EQUAL pex_copy_offset
-    OR pex_copy_offset GREATER_EQUAL swf_copy_offset
+    OR first_copy_offset LESS swf_copy_offset
+    OR first_copy_offset GREATER swf_copy_offset
+    OR preflight_offset GREATER_EQUAL swf_copy_offset
     OR swf_copy_offset GREATER_EQUAL dll_copy_offset
 )
-    message(FATAL_ERROR "Deploy must test and preflight before copying PEX, SWF, then DLL")
+    message(FATAL_ERROR "Deploy must test and preflight before copying the SWF, then the DLL")
 endif()
 
 string(
     FIND
     "${compact_deploy}"
-    "Copy-Item\"build\\debug-msvc\\ModernPhysiqueSystem.dll\""
+    "Copy-Item\"build\\debug-msvc\\PhysiqueWheel.dll\""
     debug_dll_copy_offset
 )
 if(debug_dll_copy_offset GREATER -1)

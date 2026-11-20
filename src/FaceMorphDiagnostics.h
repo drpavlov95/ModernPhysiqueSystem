@@ -40,7 +40,6 @@ namespace FaceMorphDiagnostics
 	[[nodiscard]] bool UseSharedFaceMorphLibrary();
 	[[nodiscard]] bool MuDynamicNormalMapsRequested();
 	[[nodiscard]] bool MuDynamicNormalMapsRequired();
-	[[nodiscard]] bool ShouldClearLegacyNormalOverrides();
 	[[nodiscard]] bool UseMuDynamicNormalMaps();
 	void SetMuDynamicNormalMapsAvailable(bool available);
 	[[nodiscard]] bool UseRealtimeNormalMapPreview();

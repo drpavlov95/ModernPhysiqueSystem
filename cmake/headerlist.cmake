@@ -1,4 +1,5 @@
 set(headers ${headers}
+    src/EmbeddedSwfPatch.h
 	src/PCH.h
     src/log.h
     src/FaceMorphDiagnostics.h

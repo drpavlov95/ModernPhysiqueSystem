@@ -7,8 +7,8 @@ Skyrim SE 1.5.97 SKSE plugin + Prisma UI prototype for a Starfield-style physiqu
 - Native morph backend is implemented in [`src/plugin.cpp`](src/plugin.cpp).
 - Morphs are applied through RaceMenu/SKEE `IBodyMorphInterface`.
 - Prisma UI is served from `PrismaUI/views/RleyBodyMorphs/`.
-- RaceMenu extension scripts live in `Source/Scripts/`.
-- Current working opener path is the custom RaceMenu category + helper slider from `RleyPhysiqueRM.psc`.
+- The wheel appears inside RaceMenu's Body category. `interface/racesex_menu.swf` is generated at game start from the user's own copy (see THIRD_PARTY_NOTICES.md).
+- No Papyrus scripts and no ESP: everything runs in the DLL.
 
 ### Morph channels
 
@@ -16,23 +16,14 @@ Skyrim SE 1.5.97 SKSE plugin + Prisma UI prototype for a Starfield-style physiqu
 - `RleyMuscular`
 - `RleyFat`
 
-### Known gap
-
-Automatic Prisma visibility based on the active RaceMenu category is not finished yet. The stable baseline is:
-
-- custom `rley_physique` category
-- helper `"Open Physique"` slider
-- native preview/commit through the DLL
-
 ### Repo layout
 
 - `src/` - SKSE plugin source
 - `PrismaUI/views/RleyBodyMorphs/` - Prisma frontend
-- `Source/Scripts/` - Papyrus source scripts
+- `reference/RaceMenu/` - RaceMenu ActionScript used to author the SWF patch
 
 ### Notes
 
-- `RleyRuntimeMorphController.psc` is intentionally inert now. Real-time morph preview moved into the DLL.
 - `hook.cpp`, `hook.h`, and `settings.h` are placeholders from the original template and are not part of the current feature path.
 
 ### License

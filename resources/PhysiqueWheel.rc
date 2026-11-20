@@ -1,0 +1,5 @@
+#include "resource.h"
+
+IDR_RACEMENU_SWF_PATCH RCDATA "racemenu-0.4.16-to-physique-wheel.mpspatch"
+IDR_RACEMENU_INSTALLED_SWF_PATCH RCDATA "racemenu-installed-to-physique-wheel.mpspatch"
+IDR_RACEMENU_AE_SWF_PATCH RCDATA "racemenu-ae-to-physique-wheel.mpspatch"

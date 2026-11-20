@@ -7,7 +7,7 @@ set(
     MPS_LIFECYCLE_HEADER
     "${MPS_SOURCE_DIR}/src/core/RaceMenuLifecycleState.h"
 )
-set(MPS_CONFIG "${MPS_SOURCE_DIR}/config/ModernPhysiqueSystem.ini")
+set(MPS_CONFIG "${MPS_SOURCE_DIR}/config/PhysiqueWheel.ini")
 
 foreach(required_path IN ITEMS
     "${MPS_PLUGIN_SOURCE}"

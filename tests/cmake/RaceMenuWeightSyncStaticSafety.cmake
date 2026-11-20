@@ -438,7 +438,7 @@ string(SHA256 slider_entry_source_sha256 "${normalized_slider_entry_source}")
 file(SHA256 "${MPS_RACEMENU_SWF}" racemenu_swf_sha256)
 set(
     expected_racemenu_source_sha256
-    "639a080535f01564495f0735f4bc34e4bec2c6b545b237195f06a4c672d242ca"
+    "ea12b6426d6fc681ab51560f024b56bba7ceed290517906e97dd9e3c60dce3c0"
 )
 set(
     expected_slider_entry_source_sha256
@@ -446,7 +446,7 @@ set(
 )
 set(
     expected_racemenu_swf_sha256
-    "c75f1442feba4e1a8573ade0e3437903def7081e421c1655b9dd494b3a961608"
+    "a5e368fbcdab55618984f349f98fd8170c23b8d4b109ee17d3558b6e5616d55c"
 )
 if(NOT racemenu_source_sha256 STREQUAL expected_racemenu_source_sha256)
     message(

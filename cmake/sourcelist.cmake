@@ -1,4 +1,6 @@
 set(sources ${sources}
+    resources/PhysiqueWheel.rc
+    src/EmbeddedSwfPatch.cpp
     src/plugin.cpp
     src/Globals.cpp
     src/FaceMorphDiagnostics.cpp
@@ -15,5 +17,6 @@ set(sources ${sources}
     src/core/SwfContainer.cpp
     src/core/SwfInflate.cpp
     src/core/SwfPatchFormat.cpp
+    src/core/SwfPatcher.cpp
     src/SwfStockPatcher.cpp
 )

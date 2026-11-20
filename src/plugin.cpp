@@ -9,6 +9,7 @@
 #include "core/Text.h"
 #include "core/MorphMath.h"
 #include "SwfStockPatcher.h"
+#include "EmbeddedSwfPatch.h"
 #include "core/NormalMapCatalog.h"
 #include "core/RaceMenuLifecycleState.h"
 
@@ -180,8 +181,6 @@ bool TryPrepareMuSexTransitionGeometry(std::string_view source);
 void TickRaceMenuRebuildGate();
 void ResetMuNormalLifecycle(std::string_view source);
 void CompleteMuSexTransition(std::string_view source);
-bool ApplyLegacySelectedNormalMapTextureSet(bool persist, std::string_view applySource);
-bool DispatchLegacyNormalOverrideCleanup(std::string_view applySource);
 void ScheduleDeferredBodyTextureApply(int ticks, int repeats = 1);
 void QueueDeferredBodyTextureApplyTask();
 void SchedulePreviewNormalApply(int ticks = kPreviewNormalThrottleTicks);
@@ -744,202 +743,6 @@ bool ApplyMuDynamicNormalMap(
         force ? 1 : 0,
         applySource);
     return TryReconcileMuNormalMap();
-}
-
-bool DispatchSelectedNormalPathsStatic(
-    std::string_view bodyNormalPath,
-    std::string_view handNormalPath,
-    bool isFemale,
-    bool persist,
-    std::string_view applySource)
-{
-    if (bodyNormalPath.empty()) {
-        spdlog::warn(
-            "DispatchSelectedNormalPathsStatic skipped because body normal path was empty (source={})",
-            applySource);
-        return false;
-    }
-
-    auto* vm = RE::BSScript::Internal::VirtualMachine::GetSingleton();
-    if (!vm) {
-        spdlog::error("Failed to get Papyrus VM while dispatching selected normal paths");
-        return false;
-    }
-
-    RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> result;
-    auto* args = RE::MakeFunctionArguments(
-        std::string(bodyNormalPath),
-        std::string(handNormalPath),
-        isFemale ? true : false,
-        persist ? true : false,
-        std::string(applySource));
-    const bool dispatched = vm->DispatchStaticCall(
-        RE::BSFixedString(kTextureBridgeScriptName),
-        RE::BSFixedString(kTextureBridgeApplySelectedNormalPathsForSexFunction),
-        args,
-        result);
-
-    if (!dispatched) {
-        spdlog::warn(
-            "Failed to dispatch static texture bridge call {}.{}(bodyNormalPath={}, handNormalPath={}, isFemale={}, persist={}, source={})",
-            kTextureBridgeScriptName,
-            kTextureBridgeApplySelectedNormalPathsForSexFunction,
-            bodyNormalPath,
-            handNormalPath.empty() ? "<empty>" : handNormalPath,
-            isFemale,
-            persist,
-            applySource);
-    } else {
-        spdlog::debug(
-            "Dispatched static texture bridge call {}.{} with bodyNormalPath={}, handNormalPath={}, isFemale={}, persist={}, source={}",
-            kTextureBridgeScriptName,
-            kTextureBridgeApplySelectedNormalPathsForSexFunction,
-            bodyNormalPath,
-            handNormalPath.empty() ? "<empty>" : handNormalPath,
-            isFemale,
-            persist,
-            applySource);
-    }
-
-    return dispatched;
-}
-
-bool ApplyLegacySelectedNormalMapTextureSet(bool persist, std::string_view applySource)
-{
-    // All fields come from one game-thread snapshot so a sex/profile change
-    // cannot mix a new body path with an old hand path or editor ID.
-    const SelectedNormalMapCandidate candidate =
-        g_selectedNormalMapCandidate;
-    const std::string_view sexToken =
-        candidate.sex == 0 ? "male" :
-        candidate.sex == 1 ? "female" :
-        std::string_view{};
-    const bool hasNormalPath = !candidate.bodyPath.empty();
-    const bool hasHandNormalPath = !candidate.handPath.empty();
-    const std::string dispatchKey =
-        mps::BuildNormalMapDispatchKey(
-            sexToken,
-            candidate.bodyPath,
-            candidate.handPath,
-            persist);
-
-    if (!candidate.IsValid() ||
-        dispatchKey.empty()) {
-        spdlog::warn(
-            "ApplySelectedNormalMapTextureSet skipped because the normal-map selection was incomplete (source={}, sex={}, bodyPath={}, thin={:.3f}, muscular={:.3f}, heavy={:.3f})",
-            applySource,
-            sexToken.empty() ?
-                "<unknown>" :
-                sexToken,
-            hasNormalPath ?
-                candidate.bodyPath :
-                "<empty>",
-            g_lastThin.load(),
-            g_lastMuscular.load(),
-            g_lastFat.load());
-        return false;
-    }
-
-    auto* player = RE::PlayerCharacter::GetSingleton();
-    auto* actorBase =
-        player ? player->GetActorBase() : nullptr;
-    const std::uint8_t currentSex = actorBase ?
-        static_cast<std::uint8_t>(actorBase->GetSex()) :
-        SelectedNormalMapCandidate::kInvalidSex;
-    if (!player ||
-        currentSex > 1 ||
-        currentSex != candidate.sex) {
-        spdlog::warn(
-            "ApplySelectedNormalMapTextureSet rejected stale candidate source={} candidateSex={} currentSex={}",
-            applySource,
-            static_cast<unsigned>(candidate.sex),
-            static_cast<unsigned>(currentSex));
-        return false;
-    }
-
-    if (!dispatchKey.empty() && dispatchKey == g_appliedNormalMapDispatchKey) {
-        spdlog::debug(
-            "ApplySelectedNormalMapTextureSet skipped because the requested normals are already applied (source={}, persist={}, bodyPath={}, handPath={}, thin={:.3f}, muscular={:.3f}, heavy={:.3f})",
-            applySource,
-            persist,
-            hasNormalPath ? candidate.bodyPath : "<no-path>",
-            hasHandNormalPath ? candidate.handPath : "<no-hand-path>",
-            g_lastThin.load(),
-            g_lastMuscular.load(),
-            g_lastFat.load());
-        return true;
-    }
-
-    const auto applyId = g_applySequence.fetch_add(1) + 1;
-    const std::string tracedApplySource = std::format(
-        "{}|applyId={}|driver=ModernPhysiqueSystem.dll",
-        applySource,
-        applyId);
-
-    spdlog::debug(
-        "ApplySelectedNormalMapTextureSet attempting applyId={} bodyPath={} handPath={} persist={} source={} thin={:.3f} muscular={:.3f} heavy={:.3f}",
-        applyId,
-        hasNormalPath ? candidate.bodyPath : "<no-path>",
-        hasHandNormalPath ? candidate.handPath : "<no-hand-path>",
-        persist,
-        applySource,
-        g_lastThin.load(),
-        g_lastMuscular.load(),
-        g_lastFat.load());
-
-    const std::string_view handNormalPath =
-        hasHandNormalPath ?
-        std::string_view(candidate.handPath) :
-        std::string_view{};
-    const bool targetIsFemale = candidate.sex == 1;
-
-    if (hasNormalPath &&
-        DispatchSelectedNormalPathsStatic(
-            candidate.bodyPath,
-            handNormalPath,
-            targetIsFemale,
-            persist,
-            tracedApplySource)) {
-        g_appliedNormalMapDispatchKey = dispatchKey;
-        return true;
-    }
-
-    spdlog::warn(
-        "ApplySelectedNormalMapTextureSet failed to dispatch unified normal paths applyId={} body={} hand={} persist={} source={}",
-        applyId,
-        hasNormalPath ? candidate.bodyPath : "<no-path>",
-        hasHandNormalPath ? candidate.handPath : "<no-hand-path>",
-        persist,
-        applySource);
-
-    return false;
-}
-
-bool DispatchLegacyNormalOverrideCleanup(std::string_view applySource)
-{
-    auto* vm = RE::BSScript::Internal::VirtualMachine::GetSingleton();
-    if (!vm) {
-        spdlog::error("Failed to get Papyrus VM while clearing legacy normal-map overrides");
-        return false;
-    }
-
-    RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> result;
-    auto* args = RE::MakeFunctionArguments(std::string(applySource));
-    const bool dispatched = vm->DispatchStaticCall(
-        RE::BSFixedString(kTextureBridgeScriptName),
-        RE::BSFixedString(kTextureBridgeClearLegacyNormalOverridesFunction),
-        args,
-        result);
-    if (dispatched) {
-        spdlog::info(
-            "Dispatched one-time persisted legacy normal override cleanup source={}",
-            applySource);
-    } else {
-        spdlog::warn(
-            "Failed to dispatch persisted legacy normal override cleanup source={}",
-            applySource);
-    }
-    return dispatched;
 }
 
 bool ApplyCurrentNormalMapBackend(
@@ -1629,6 +1432,24 @@ public:
             categoryFlag,
             categoryKey.empty() ? "<none>" : categoryKey);
         SetPhysiqueVisibilityForCategory(categoryKey, categoryFlag);
+    }
+};
+
+// The AE UI leaves SKEE's native map alone. Restore only our own morph layer
+// synchronously, before ChangeSex/ChangeRace rebuilds the actor's face.
+class PrepareNativeFaceTransitionHandler final : public RE::GFxFunctionHandler
+{
+public:
+    void Call(Params& a_params) override
+    {
+        if (REL::Module::IsAE() && g_raceMenuOpen.load()) {
+            InvalidateBodyMorphApplication("ae_pre_native_transition");
+            BeginFaceMorphTransition("ae_pre_native_transition", true);
+            (void)g_faceSliderRouter.InvalidateRoute();
+        }
+        if (a_params.retVal) {
+            a_params.retVal->SetBoolean(true);
+        }
     }
 };
 
@@ -3408,7 +3229,9 @@ void TryAcquireOptionalRaceMenuInterfaces()
         return;
     }
 
-    if (!g_faceMorphInterface) {
+    // The legacy face interface/router uses an SE-specific ABI and exact
+    // private-map gates. AE uses the shared TRI backend, never this fallback.
+    if (!g_faceMorphInterface && !REL::Module::IsAE()) {
         g_faceMorphInterface = GetFaceMorphInterfaceFromMap(g_raceMenuInterfaceMap);
         if (g_faceMorphInterface) {
             g_faceMorphUnavailableLogged = false;
@@ -3466,6 +3289,14 @@ bool ApplySharedFaceMorphTarget(
         !player ||
         g_faceRouterAwaitingRsmRebuild ||
         g_faceMorphLifecycle.pending) {
+        return false;
+    }
+
+    // RaceMenu's SliderChange notification is delayed by the SWF. Detect
+    // edits before a tick/preview can adopt a partially rebuilt face as base.
+    if (g_raceMenuOpen.load() && reason != "face_transition_stable" &&
+        g_sharedFaceMorphLibrary.HasExternalFaceEdit(player)) {
+        BeginFaceMorphTransition("external_face_edit_observed", false, true);
         return false;
     }
 
@@ -4131,6 +3962,14 @@ bool RegisterScaleform(RE::GFxMovieView* a_view, RE::GFxValue* a_root)
         return false;
     }
 
+    RE::GFxValue nativeTransitionCallback;
+    a_view->CreateFunction(std::addressof(nativeTransitionCallback),
+        new PrepareNativeFaceTransitionHandler());
+    if (!a_root->SetMember("PrepareNativeFaceTransition", nativeTransitionCallback)) {
+        spdlog::error("Failed to register PrepareNativeFaceTransition");
+        return false;
+    }
+
     RE::GFxValue prepareFaceMapCallback;
     a_view->CreateFunction(
         std::addressof(prepareFaceMapCallback),
@@ -4518,6 +4357,93 @@ void OnDataLoaded()
     RefreshCachedMorphStateFromNative();
 }
 
+void LogRaceMenuBinaryVersion()
+{
+    const auto module = GetModuleHandleW(L"skee64.dll");
+    if (!module) {
+        spdlog::warn("Environment: RaceMenu/SKEE skee64.dll is not loaded");
+        return;
+    }
+    std::wstring path(32768, L'\0');
+    const auto length = GetModuleFileNameW(module, path.data(), static_cast<DWORD>(path.size()));
+    if (length == 0 || length >= path.size()) {
+        spdlog::warn("Environment: RaceMenu/SKEE loaded; module path unavailable");
+        return;
+    }
+    path.resize(length);
+    DWORD ignored = 0;
+    const auto size = GetFileVersionInfoSizeW(path.c_str(), &ignored);
+    std::vector<std::byte> bytes(size);
+    VS_FIXEDFILEINFO* info = nullptr;
+    UINT infoSize = 0;
+    if (size && GetFileVersionInfoW(path.c_str(), 0, size, bytes.data()) &&
+        VerQueryValueW(bytes.data(), L"\\", reinterpret_cast<void**>(&info), &infoSize) &&
+        info && infoSize >= sizeof(VS_FIXEDFILEINFO) && info->dwSignature == 0xFEEF04BD) {
+        spdlog::info("Environment: RaceMenu/SKEE fileVersion={}.{}.{}.{} productVersion={}.{}.{}.{} path={} (binary metadata; not the Nexus release version)",
+            HIWORD(info->dwFileVersionMS), LOWORD(info->dwFileVersionMS),
+            HIWORD(info->dwFileVersionLS), LOWORD(info->dwFileVersionLS),
+            HIWORD(info->dwProductVersionMS), LOWORD(info->dwProductVersionMS),
+            HIWORD(info->dwProductVersionLS), LOWORD(info->dwProductVersionLS),
+            std::filesystem::path(path).string());
+    } else {
+        spdlog::warn("Environment: RaceMenu/SKEE loaded at {}; version metadata unavailable", std::filesystem::path(path).string());
+    }
+}
+
+void PatchRaceMenuSwfOnDataLoaded()
+{
+    // BSResourceNiBinaryStream is only safe after Skyrim has initialized its
+    // resource system. Running this from SKSEPluginLoad blocks plugin startup;
+    // kDataLoaded is still early enough that RaceMenu has not opened its SWF.
+    spdlog::info(
+        "SwfStockPatcher: main-thread patch task started threadId={} pluginLoadThreadId={}",
+        GetCurrentThreadId(),
+        g_pluginMainThreadId.load());
+
+    constexpr std::uint64_t kRaceMenu0416StockSwfHash = 0x32391A1CBF028BE6ULL;
+    const auto patchData = mps::GetEmbeddedRaceMenuSwfPatch();
+    if (patchData.empty()) {
+        spdlog::error("SwfStockPatcher: embedded MPS1 recipe is unavailable");
+        return;
+    }
+
+    auto result = mps::PatchStockSwfIfNeeded(
+        "Data\\interface\\racesex_menu.swf",
+        patchData,
+        kRaceMenu0416StockSwfHash);
+    if (result == mps::SwfPatchResult::UnsupportedStock) {
+        const auto installedPatch = mps::GetEmbeddedRaceMenuSwfPatch(mps::RaceMenuSwfVariant::SEInstalled);
+        if (!installedPatch.empty()) {
+            result = mps::PatchStockSwfIfNeeded(
+                "Data\\interface\\racesex_menu.swf", installedPatch, 0xcaaac1b6d3f2d3c3ULL);
+        }
+    }
+    if (result == mps::SwfPatchResult::UnsupportedStock) {
+        const auto aePatch = mps::GetEmbeddedRaceMenuSwfPatch(mps::RaceMenuSwfVariant::AE);
+        if (!aePatch.empty()) {
+            result = mps::PatchStockSwfIfNeeded(
+                "Data\\interface\\racesex_menu.swf", aePatch, 0xa97f0f3f35779b5dULL);
+            if (result == mps::SwfPatchResult::Patched) {
+                spdlog::info("SwfStockPatcher: matched AE RaceMenu recipe a97f0f3f35779b5d");
+            }
+        }
+    }
+    switch (result) {
+    case mps::SwfPatchResult::Patched:
+        spdlog::info("SwfStockPatcher: patched racesex_menu.swf at data-loaded");
+        break;
+    case mps::SwfPatchResult::AlreadyPatched:
+        spdlog::info("SwfStockPatcher: racesex_menu.swf already patched");
+        break;
+    case mps::SwfPatchResult::UnsupportedStock:
+        spdlog::warn("SwfStockPatcher: unsupported stock racesex_menu.swf; left untouched");
+        break;
+    case mps::SwfPatchResult::Failed:
+        spdlog::error("SwfStockPatcher: failed to patch racesex_menu.swf; left untouched");
+        break;
+    }
+}
+
 void MessageHandler(SKSE::MessagingInterface::Message* a_msg)
 {
     switch (a_msg->type) {
@@ -4525,12 +4451,21 @@ void MessageHandler(SKSE::MessagingInterface::Message* a_msg)
         TryAcquireRaceMenuBodyMorphInterface();
         break;
     case SKSE::MessagingInterface::kPostPostLoad:
+        LogRaceMenuBinaryVersion();
         RefreshMuDynamicNormalMapAvailability("post_post_load");
         if (FaceMorphDiagnostics::UseMuDynamicNormalMaps()) {
             (void)AcquireMuNativeInterface();
         }
         break;
     case SKSE::MessagingInterface::kDataLoaded:
+        if (auto* tasks = SKSE::GetTaskInterface()) {
+            tasks->AddTask([]() { PatchRaceMenuSwfOnDataLoaded(); });
+            spdlog::info(
+                "SwfStockPatcher: queued patch after data-loaded threadId={}",
+                GetCurrentThreadId());
+        } else {
+            spdlog::error("SwfStockPatcher: SKSE task interface unavailable at data-loaded");
+        }
         OnDataLoaded();
         if (auto* inputManager = RE::BSInputDeviceManager::GetSingleton()) {
             inputManager->AddEventSink(&g_hotkeyWatcher);
@@ -4550,10 +4485,6 @@ void MessageHandler(SKSE::MessagingInterface::Message* a_msg)
         TryAcquireRaceMenuBodyMorphInterface();
         RefreshCachedMorphStateFromNative();
         ApplyCurrentNormalMapBackend(true, "post_load_game");
-        if (!FaceMorphDiagnostics::UseMuDynamicNormalMaps() &&
-            FaceMorphDiagnostics::ShouldClearLegacyNormalOverrides()) {
-            (void)DispatchLegacyNormalOverrideCleanup("post_load_game_legacy_migration");
-        }
         break;
     case SKSE::MessagingInterface::kNewGame:
         InvalidateBodyMorphApplication("new_game");
@@ -4563,10 +4494,6 @@ void MessageHandler(SKSE::MessagingInterface::Message* a_msg)
         TryAcquireRaceMenuBodyMorphInterface();
         RefreshCachedMorphStateFromNative();
         ApplyCurrentNormalMapBackend(true, "new_game");
-        if (!FaceMorphDiagnostics::UseMuDynamicNormalMaps() &&
-            FaceMorphDiagnostics::ShouldClearLegacyNormalOverrides()) {
-            (void)DispatchLegacyNormalOverrideCleanup("new_game_legacy_migration");
-        }
         break;
     }
 }
@@ -4576,43 +4503,16 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
     SKSE::Init(skse);
     SetupLog();
     FaceMorphDiagnostics::LoadConfig();
+    spdlog::info("Environment: Skyrim runtime={} SKSE packed version={:#x}",
+        skse->RuntimeVersion().string(), skse->SKSEVersion());
+    spdlog::info("Physique Wheel NG beta: runtimeFamily={} faceRoute={} SWF recipes=SE0416,SEInstalled,AE-a97f0f3f35779b5d",
+        REL::Module::IsAE() ? "AE" : "SE",
+        REL::Module::IsAE() ? "shared-TRI-only; native AE slider map" : "SE exact-gated/shared-TRI");
     const std::uint32_t loadThreadId = GetCurrentThreadId();
     g_pluginMainThreadId.store(loadThreadId);
     LogPluginBuildIdentity();
     spdlog::info("Rley plugin loaded");
 
-    // Reconstruct the patched racesex_menu.swf from the user's own stock
-    // SWF in-process -- see docs/superpowers/plans/2026-11-11-swf-inprocess-patcher.md.
-    // patchData/supportedStockHash are placeholders: the real patch-data
-    // file and a genuine stock SWF hash are not available yet (same
-    // Prerequisite gap as the Python-based patcher plan's
-    // KNOWN_STOCK_CLASS_HASHES), so UnsupportedStock is the only reachable
-    // outcome today. TODO: once a genuine stock racesex_menu.swf is
-    // available, generate the real patch via
-    // tools/racemenu_swf_patch/generate_binary_patch.py and replace these
-    // two placeholders with the real patch bytes and hash.
-    {
-        constexpr std::span<const std::byte> kPlaceholderSwfPatchData{};
-        constexpr std::uint64_t kPlaceholderSupportedStockSwfHash = 0;
-        const auto swfPatchResult = mps::PatchStockSwfIfNeeded(
-            "Data\\interface\\racesex_menu.swf",
-            kPlaceholderSwfPatchData,
-            kPlaceholderSupportedStockSwfHash);
-        switch (swfPatchResult) {
-        case mps::SwfPatchResult::Patched:
-            spdlog::info("SwfStockPatcher: patched racesex_menu.swf this load");
-            break;
-        case mps::SwfPatchResult::AlreadyPatched:
-            spdlog::info("SwfStockPatcher: racesex_menu.swf already patched");
-            break;
-        case mps::SwfPatchResult::UnsupportedStock:
-            spdlog::warn("SwfStockPatcher: unsupported stock racesex_menu.swf; left untouched");
-            break;
-        case mps::SwfPatchResult::Failed:
-            spdlog::error("SwfStockPatcher: failed to patch racesex_menu.swf; left untouched");
-            break;
-        }
-    }
     LogFaceFlagChange(
         "pluginMainThreadId",
         "0",

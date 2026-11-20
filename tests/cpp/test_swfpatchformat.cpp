@@ -91,3 +91,38 @@ TEST_CASE("ApplyBinaryPatch rejects a truncated operation")
     const std::vector<std::byte> stock(4, std::byte{ 0 });
     CHECK_THROWS_AS(mps::ApplyBinaryPatch(stock, patch), mps::PatchFormatError);
 }
+
+TEST_CASE("ApplyBinaryPatch rejects a single operation that would overshoot patchedLength, before processing anything after it")
+{
+    // Found by review: the old implementation only compared out.size()
+    // against patchedLength AFTER the whole operation stream ran, so a
+    // declared patchedLength of 16 paired with a 300-byte COPY (plenty of
+    // stock to copy from) appended the full 300 bytes -- an
+    // attacker-sized patch can grow the output far past the declared
+    // length before any check runs. The fix checks each operation's
+    // contribution against the remaining budget before appending it.
+    //
+    // This is distinguished from the old behavior by what runs *next*:
+    // op 2 here is an unrecognized opcode (0x99). The old code would
+    // fully execute op 1 (the oversized COPY) and only fail later, on
+    // op 2, with "unknown opcode". The fixed code must never reach op 2
+    // at all -- it rejects op 1 for exceeding the budget first.
+    const std::vector<std::byte> stock(300, std::byte{ 'A' });
+    auto patch = BuildPatch({
+        'M', 'P', 'S', '1', 16, 0, 0, 0,
+        0x00, 0, 0, 0, 0, 44, 1, 0, 0, // COPY 300 bytes (0x012C) against a 16-byte budget
+        0x99,                          // op 2: unrecognized opcode, must never be reached
+        0xFF
+    });
+
+    bool threw = false;
+    std::string message;
+    try {
+        (void)mps::ApplyBinaryPatch(stock, patch);
+    } catch (const mps::PatchFormatError& e) {
+        threw = true;
+        message = e.what();
+    }
+    CHECK(threw);
+    CHECK(message.find("unknown opcode") == std::string::npos);
+}

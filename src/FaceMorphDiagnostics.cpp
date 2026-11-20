@@ -14,7 +14,8 @@
 
 namespace
 {
-	constexpr const char* kConfigFileName = "ModernPhysiqueSystem.ini";
+	constexpr const char* kConfigFileName = "PhysiqueWheel.ini";
+	constexpr const char* kLegacyConfigFileName = "ModernPhysiqueSystem.ini";
 
 	std::atomic_bool g_causalTrace{ FaceMorphDiagnostics::kEnableFaceCausalTrace };
 	std::atomic_bool g_faceNodeSnapshot{ FaceMorphDiagnostics::kEnableFaceNodeSnapshot };
@@ -31,7 +32,6 @@ namespace
 	};
 	std::atomic_bool g_muDynamicNormalMapsAvailable{ false };
 	std::atomic_bool g_muDynamicNormalMapsRequired{ false };
-	std::atomic_bool g_clearLegacyNormalOverrides{ false };
 	std::atomic_bool g_realtimeNormalMapPreview{
 		FaceMorphDiagnostics::kEnableRealtimeNormalMapPreview
 	};
@@ -57,19 +57,23 @@ namespace
 
 	std::filesystem::path FindConfigPath()
 	{
-		const std::array candidates{
-			std::filesystem::path("Data") / "SKSE" / "Plugins" / kConfigFileName,
-			std::filesystem::path("SKSE") / "Plugins" / kConfigFileName,
-			std::filesystem::path(kConfigFileName)
-		};
+		// The plugin was renamed from ModernPhysiqueSystem; a user's customised
+		// legacy INI is still honoured when the new one is absent.
+		for (const char* fileName : { kConfigFileName, kLegacyConfigFileName }) {
+			const std::array candidates{
+				std::filesystem::path("Data") / "SKSE" / "Plugins" / fileName,
+				std::filesystem::path("SKSE") / "Plugins" / fileName,
+				std::filesystem::path(fileName)
+			};
 
-		for (const auto& candidate : candidates) {
-			if (FileExists(candidate)) {
-				return candidate;
+			for (const auto& candidate : candidates) {
+				if (FileExists(candidate)) {
+					return candidate;
+				}
 			}
 		}
 
-		return candidates.front();
+		return std::filesystem::path("Data") / "SKSE" / "Plugins" / kConfigFileName;
 	}
 
 	bool ReadBool(const std::filesystem::path& path, const char* section, const char* key, bool defaultValue)
@@ -156,11 +160,6 @@ namespace FaceMorphDiagnostics
 		std::ranges::transform(normalMapBackend, normalMapBackend.begin(), [](unsigned char ch) {
 			return static_cast<char>(std::tolower(ch));
 		});
-		const bool clearLegacyNormalOverrides = ReadBool(
-			configPath,
-			"NormalMaps",
-			"ClearLegacyOverridesOnLoad",
-			normalMapBackend == "legacy");
 		if (normalMapBackend != "auto" && normalMapBackend != "mu" && normalMapBackend != "none") {
 			spdlog::warn(
 				"Unsupported NormalMaps.Backend={}; falling back to auto",
@@ -186,14 +185,13 @@ namespace FaceMorphDiagnostics
 		g_useSharedFaceMorphLibrary.store(faceMorphBackend == "shared");
 		g_useMuDynamicNormalMaps.store(useMuDynamicNormalMaps);
 		g_muDynamicNormalMapsRequired.store(requireMuDynamicNormalMaps);
-		g_clearLegacyNormalOverrides.store(clearLegacyNormalOverrides);
 		g_realtimeNormalMapPreview.store(realtimeNormalMapPreview);
 
 		spdlog::set_level(logLevel);
 		spdlog::flush_on(logLevel <= spdlog::level::debug ? spdlog::level::debug : spdlog::level::warn);
 
 		spdlog::info(
-			"ModernPhysiqueSystem config path={} exists={} logLevel={} FaceCausalTrace={} FaceNodeSnapshot={} RaceMenuEntryDump={} VerboseLogging={} PreviewRaceMenuFaceSliders={} WeightSyncPoll={} WeightMorphLink={} FaceBackend={} NormalBackend={} RealtimePreview={}",
+			"PhysiqueWheel config path={} exists={} logLevel={} FaceCausalTrace={} FaceNodeSnapshot={} RaceMenuEntryDump={} VerboseLogging={} PreviewRaceMenuFaceSliders={} WeightSyncPoll={} WeightMorphLink={} FaceBackend={} NormalBackend={} RealtimePreview={}",
 			configPath.string(),
 			configExists ? 1 : 0,
 			logLevelText,
@@ -257,11 +255,6 @@ namespace FaceMorphDiagnostics
 	bool MuDynamicNormalMapsRequired()
 	{
 		return g_muDynamicNormalMapsRequired.load();
-	}
-
-	bool ShouldClearLegacyNormalOverrides()
-	{
-		return g_clearLegacyNormalOverrides.load();
 	}
 
 	bool UseMuDynamicNormalMaps()

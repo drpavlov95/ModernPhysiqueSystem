@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 # Set your project name. This will be the name of your SKSE .dll file.
-project(ModernPhysiqueSystem VERSION 0.1.0 LANGUAGES CXX)
+project(PhysiqueWheel VERSION 0.1.0 LANGUAGES CXX RC)
 
 #
 
@@ -94,6 +94,7 @@ target_include_directories(
 		"${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
 target_link_libraries("${PROJECT_NAME}" PRIVATE ZLIB::ZLIB)
+target_link_libraries("${PROJECT_NAME}" PRIVATE Version)
 # Optional post-build deployment. This is disabled in all ordinary presets;
 # tools/BuildAndDeployDebug.ps1 performs the reviewed paired deployment instead.
 if(MPS_ENABLE_POST_BUILD_DEPLOY)
@@ -116,7 +117,7 @@ if(MPS_ENABLE_POST_BUILD_DEPLOY)
         add_custom_command(
             TARGET "${PROJECT_NAME}"
             POST_BUILD
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${SRC_CONFIG_FOLDER}/ModernPhysiqueSystem.ini" "${DLL_FOLDER}/ModernPhysiqueSystem.ini"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${SRC_CONFIG_FOLDER}/PhysiqueWheel.ini" "${DLL_FOLDER}/PhysiqueWheel.ini"
             VERBATIM
         )
     endif()
@@ -148,6 +149,7 @@ if(MPS_BUILD_TESTS)
         src/core/SwfContainer.cpp
         src/core/SwfInflate.cpp
         src/core/SwfPatchFormat.cpp
+        src/core/SwfPatcher.cpp
     )
     set(MPS_TEST_SOURCES
         tests/cpp/test_main.cpp
@@ -162,6 +164,7 @@ if(MPS_BUILD_TESTS)
         tests/cpp/test_swfcontainer.cpp
         tests/cpp/test_swfinflate.cpp
         tests/cpp/test_swfpatchformat.cpp
+        tests/cpp/test_swfpatcher.cpp
     )
     add_executable(mps_tests ${MPS_CORE_SOURCES} ${MPS_TEST_SOURCES})
     target_compile_features(mps_tests PRIVATE cxx_std_23)
@@ -200,6 +203,14 @@ if(MPS_BUILD_TESTS)
             "-DMPS_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
             -P
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/RaceMenuRuntimeTraceStaticSafety.cmake"
+    )
+    add_test(
+        NAME mps_swf_runtime_patch_static_safety
+        COMMAND
+            "${CMAKE_COMMAND}"
+            "-DMPS_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
+            -P
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/SwfRuntimePatchStaticSafety.cmake"
     )
     add_test(
         NAME mps_deploy_static_safety
