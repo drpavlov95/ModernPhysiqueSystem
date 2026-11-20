@@ -83,13 +83,3 @@ Before release, pick one:
 ## Source
 
 Corresponding source: https://github.com/drpavlov95/ModernPhysiqueSystem
-(the `origin` remote of this working tree).
-
-> [!WARNING]
-> As of 2026-11-02 that repository returns **404 — it is private or not yet created**,
-> while the sibling `ModernPhysiqueFramework` is public.
->
-> The GPL requires that corresponding source be obtainable by everyone who receives the
-> binary. Publishing a GPL-3.0 release while the repository stays private puts the
-> release in violation of its own licence. **Make the repository public before release**,
-> or ship the source alongside the download.
