@@ -58,28 +58,6 @@ body morphs this plugin reads are hand-made and ship with **Physiques of Skyrim*
 under that mod's own permissions. Loading a data file does not make it a derivative of
 the program that loads it.
 
-## Not redistributable: `interface/racesex_menu.swf`
-
-> [!IMPORTANT]
-> This file is tracked in the repository and **must not be shipped in a public release
-> as-is.**
-
-`tools/BuildRaceMenuSwf.ps1` produces it by using FFDec to replace the `RaceMenu` and
-`SliderListEntry` ActionScript packages *inside RaceMenu's own compiled SWF*.
-
-The GPL grant does not reach this file: expired6978's GPL repository contains no `.as`,
-`.swf` or `.fla` sources at all, so the SWF is a Nexus-distributed asset outside the
-source licence, and RaceMenu's Nexus permissions do not allow redistributing its files.
-Comparable projects (RaceMenu VR 2, Racemenu - Prisma UI) ship no RaceMenu SWF for this
-reason. Bundling it would also hard-overwrite the user's RaceMenu, breaking any other
-mod that touches `racesex_menu.swf`.
-
-Before release, pick one:
-
-1. **Written permission from expired6978** to redistribute the patched SWF; or
-2. **Do not bundle it** — ship `BuildRaceMenuSwf.ps1` as an install-time step that
-   patches the user's own RaceMenu copy, leaving the original asset undistributed.
-
 ## Source
 
 Corresponding source: https://github.com/drpavlov95/ModernPhysiqueSystem
